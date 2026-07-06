@@ -2184,6 +2184,41 @@ def database_status_api():
     return jsonify({"ok": True, "data": database_status()})
 
 
+@app.get("/api/export")
+def export_data_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    state, updated_at = read_state()
+    safe_state = json.loads(json.dumps(state))
+    for user in safe_state.get("users", []):
+        user.pop("password", None)
+    exported_at = utc_now()
+    payload = {
+        "system": "Mova Sports",
+        "version": 1,
+        "database": "PostgreSQL" if USE_POSTGRES else "SQLite",
+        "exportedAt": exported_at,
+        "stateUpdatedAt": updated_at,
+        "data": safe_state,
+    }
+    record_audit(
+        "export",
+        "state",
+        "manual-json",
+        {
+            "exportedAt": exported_at,
+            "products": len(safe_state.get("products", [])),
+            "customers": len(safe_state.get("customers", [])),
+            "sales": len(safe_state.get("sales", [])),
+        },
+    )
+    response = jsonify(payload)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    response.headers["Content-Disposition"] = f'attachment; filename="mova-sports-export-{stamp}.json"'
+    return response
+
+
 @app.post("/api/backups")
 def create_backup_api():
     _, error_response = require_admin()

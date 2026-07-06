@@ -128,6 +128,7 @@ function bindEvents() {
   els.refreshDatabaseButton.addEventListener("click", () => loadDatabaseStatus(true));
   els.refreshBackupsButton.addEventListener("click", () => loadBackups(true));
   els.createBackupButton.addEventListener("click", createBackup);
+  els.exportDataButton.addEventListener("click", exportSystemData);
   els.refreshAuditButton.addEventListener("click", () => loadAuditLogs(true));
   ["auditSearch"].forEach((id) => els[id].addEventListener("input", renderAuditLogs));
   ["auditModuleFilter", "auditActionFilter", "auditLimit"].forEach((id) => els[id].addEventListener("input", () => loadAuditLogs(true)));
@@ -3146,6 +3147,41 @@ async function createBackup() {
     alert("Não foi possível conectar ao servidor para criar o backup.");
   } finally {
     els.createBackupButton.disabled = false;
+  }
+}
+
+async function exportSystemData() {
+  if (!BACKEND_ENABLED) {
+    const blob = new Blob([JSON.stringify({ system: "Mova Sports", exportedAt: new Date().toISOString(), data: db }, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `mova-sports-export-${todayIso}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    return;
+  }
+  try {
+    const response = await fetch("/api/export", { cache: "no-store" });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      alert(payload.error || "Não foi possível exportar os dados.");
+      return;
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const match = disposition.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : `mova-sports-export-${todayIso}.json`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch {
+    alert("Não foi possível conectar ao servidor para exportar os dados.");
   }
 }
 

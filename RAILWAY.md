@@ -89,3 +89,5 @@ CLOUDINARY_FOLDER=mova-sports/products
 ```
 
 Quando essas variaveis existem, as novas fotos sao enviadas para o Cloudinary e o banco salva a URL publica da imagem. Sem essas variaveis, o sistema continua usando armazenamento local.
+
+Se ainda nao quiser configurar Cloudinary, remova as variaveis `CLOUDINARY_*` do Railway. O sistema continuara funcionando, mas fotos enviadas podem nao sobreviver a redeploys.

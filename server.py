@@ -24,7 +24,8 @@ CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip()
 CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY", "").strip()
 CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "").strip()
 CLOUDINARY_FOLDER = os.environ.get("CLOUDINARY_FOLDER", "mova-sports/products").strip() or "mova-sports/products"
-USE_CLOUDINARY = bool(CLOUDINARY_URL or (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET))
+VALID_CLOUDINARY_URL = CLOUDINARY_URL.startswith("cloudinary://")
+USE_CLOUDINARY = bool(VALID_CLOUDINARY_URL or (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET))
 DB_BUSY_TIMEOUT_MS = max(1000, int(float(os.environ.get("MOVA_DB_BUSY_TIMEOUT_MS", "5000") or 5000)))
 APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV == "production"
@@ -382,7 +383,9 @@ def save_product_image(file_storage) -> dict:
         except ImportError as exc:
             raise ValueError("Cloudinary nao instalado. Verifique requirements.txt e refaca o deploy.") from exc
         config = {"secure": True}
-        if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
+        if VALID_CLOUDINARY_URL:
+            os.environ["CLOUDINARY_URL"] = CLOUDINARY_URL
+        elif CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
             config.update({
                 "cloud_name": CLOUDINARY_CLOUD_NAME,
                 "api_key": CLOUDINARY_API_KEY,

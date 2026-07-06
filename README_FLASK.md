@@ -1,6 +1,6 @@
 # Mova Sports - Versao Web Local
 
-Esta versao roda em um servidor Flask e salva os dados no banco SQLite `loja.db`.
+Esta versao roda em um servidor Flask. Localmente, salva os dados no SQLite `loja.db`. Em hospedagem web, pode usar PostgreSQL via `DATABASE_URL`.
 
 ## Rodar
 
@@ -86,22 +86,22 @@ Variaveis recomendadas para deploy:
 ```text
 APP_ENV=production
 MOVA_SECRET_KEY=uma-chave-grande-com-pelo-menos-32-caracteres
+DATABASE_URL=postgresql://...
 MOVA_ADMIN_LOGIN=admin
 MOVA_ADMIN_NAME=Administrador
 MOVA_ADMIN_PASSWORD=uma-senha-forte
-MOVA_DB=/var/data/loja.db
-MOVA_BACKUP_DIR=/var/data/backups
-MOVA_UPLOAD_DIR=/var/data/uploads
 MOVA_DB_BUSY_TIMEOUT_MS=5000
 ```
 
-Enquanto o sistema usar SQLite, mantenha `--workers 1`. Para muitas lojas, muitos acessos simultaneos ou uso pesado, o proximo passo tecnico e migrar o banco para PostgreSQL.
+Se `DATABASE_URL` estiver configurado, o sistema usa PostgreSQL. Se nao estiver, usa SQLite local.
+
+Enquanto o sistema usar SQLite, mantenha `--workers 1`. Com PostgreSQL, a persistencia dos cadastros, vendas e financeiro fica no banco gerenciado da hospedagem.
 
 Para Railway, este projeto possui:
 
 - `railway.json`, com comando de start e healthcheck;
 - `.railwayignore`, para nao enviar banco local, backups e uploads;
-- `RAILWAY.md`, com o passo a passo de deploy.
+- `RAILWAY.md`, com o passo a passo de deploy usando PostgreSQL.
 
 ## Dados
 
@@ -110,7 +110,7 @@ Ao abrir o `index.html` direto, ele ainda usa o armazenamento local do navegador
 
 ## Banco de dados
 
-O sistema usa SQLite. Para uso web inicial, o servidor ativa:
+Sem `DATABASE_URL`, o sistema usa SQLite. Para uso local, o servidor ativa:
 
 - `foreign_keys`;
 - `journal_mode=WAL`;

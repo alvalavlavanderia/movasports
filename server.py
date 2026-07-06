@@ -11,6 +11,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
 DB_PATH = os.environ.get("MOVA_DB", os.path.join(APP_DIR, "loja.db"))
 BACKUP_DIR = os.environ.get("MOVA_BACKUP_DIR", os.path.join(APP_DIR, "backups"))
 UPLOAD_DIR = os.environ.get("MOVA_UPLOAD_DIR", os.path.join(APP_DIR, "uploads"))
@@ -111,7 +113,81 @@ def validate_password_strength(password: str) -> str | None:
     return None
 
 
-def connect_db() -> sqlite3.Connection:
+class DbRow(dict):
+    def __init__(self, keys, values):
+        super().__init__(zip(keys, values))
+        self._values = list(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+class EmptyCursor:
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class PgCursor:
+    def __init__(self, cursor):
+        self.cursor = cursor
+        self.keys = [getattr(item, "name", item[0]) for item in cursor.description] if cursor.description else []
+
+    def _row(self, values):
+        if values is None:
+            return None
+        return DbRow(self.keys, values)
+
+    def fetchone(self):
+        return self._row(self.cursor.fetchone())
+
+    def fetchall(self):
+        return [self._row(row) for row in self.cursor.fetchall()]
+
+
+class PgConnection:
+    def __init__(self, url: str):
+        import psycopg2
+
+        self.conn = psycopg2.connect(url)
+
+    def execute(self, sql: str, params=()):
+        translated = translate_postgres_sql(sql)
+        if translated is None:
+            return EmptyCursor()
+        cursor = self.conn.cursor()
+        cursor.execute(translated, params or ())
+        return PgCursor(cursor)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if exc_type:
+            self.conn.rollback()
+        else:
+            self.conn.commit()
+        self.conn.close()
+
+
+def translate_postgres_sql(sql: str) -> str | None:
+    stripped = sql.strip()
+    upper = stripped.upper()
+    if upper.startswith("PRAGMA"):
+        return None
+    if upper.startswith("INSERT OR IGNORE INTO STORES"):
+        sql = "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING"
+    sql = sql.replace("ORDER BY name COLLATE NOCASE", "ORDER BY LOWER(name)")
+    return sql.replace("?", "%s")
+
+
+def connect_db():
+    if USE_POSTGRES:
+        return PgConnection(DATABASE_URL)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -126,6 +202,8 @@ def ensure_backup_dir() -> None:
 
 
 def create_database_backup(reason: str = "manual") -> dict:
+    if USE_POSTGRES:
+        raise RuntimeError("Backup manual por arquivo nao se aplica ao PostgreSQL. Use backup/snapshot da hospedagem.")
     ensure_backup_dir()
     init_db()
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -145,6 +223,8 @@ def create_database_backup(reason: str = "manual") -> dict:
 
 
 def list_database_backups() -> list[dict]:
+    if USE_POSTGRES:
+        return []
     ensure_backup_dir()
     backups = []
     for entry in os.scandir(BACKUP_DIR):
@@ -187,6 +267,37 @@ def database_status() -> dict:
         "audit_logs",
     ]
     counts = {}
+    if USE_POSTGRES:
+        with connect_db() as conn:
+            version = conn.execute("SELECT version() AS version").fetchone()["version"]
+            database_name = conn.execute("SELECT current_database() AS name").fetchone()["name"]
+            size = int(conn.execute("SELECT pg_database_size(current_database()) AS size").fetchone()["size"])
+            for table in table_names:
+                try:
+                    counts[table] = int(conn.execute(f"SELECT COUNT(*) AS total FROM {table}").fetchone()["total"])
+                except Exception:
+                    counts[table] = 0
+        return {
+            "engine": "PostgreSQL",
+            "path": database_name,
+            "filename": database_name,
+            "size": size,
+            "walSize": 0,
+            "shmSize": 0,
+            "journalMode": "server-managed",
+            "synchronous": "server-managed",
+            "foreignKeys": True,
+            "busyTimeoutMs": None,
+            "pageCount": None,
+            "pageSize": None,
+            "estimatedDataSize": size,
+            "integrity": "ok",
+            "foreignKeyErrors": 0,
+            "counts": counts,
+            "backupCount": len(backup_items),
+            "lastBackup": backup_items[0] if backup_items else None,
+            "version": version,
+        }
     with connect_db() as conn:
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
         synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
@@ -223,6 +334,8 @@ def database_status() -> dict:
 
 
 def ensure_startup_backup() -> None:
+    if USE_POSTGRES:
+        return
     if not os.path.exists(DB_PATH):
         return
     ensure_backup_dir()
@@ -2014,7 +2127,8 @@ def uploaded_product_image(filename: str):
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "message": "Mova Sports ativo.", "database": os.path.basename(DB_PATH)})
+    database_name = "PostgreSQL" if USE_POSTGRES else os.path.basename(DB_PATH)
+    return jsonify({"ok": True, "message": "Mova Sports ativo.", "database": database_name})
 
 
 @app.get("/api/backups")
@@ -2039,7 +2153,10 @@ def create_backup_api():
     if error_response:
         return error_response
     payload = request.get_json(silent=True) or {}
-    backup = create_database_backup(str(payload.get("reason") or "manual"))
+    try:
+        backup = create_database_backup(str(payload.get("reason") or "manual"))
+    except RuntimeError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
     prune_database_backups()
     record_audit("create", "backup", backup["filename"], {"reason": backup["reason"], "size": backup["size"]})
     return jsonify({"ok": True, "data": backup}), 201

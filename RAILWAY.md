@@ -1,34 +1,27 @@
-# Deploy no Railway
+# Deploy no Railway com PostgreSQL
 
-Este projeto ja esta preparado para rodar no Railway usando Flask, Gunicorn e SQLite com volume persistente.
+Este projeto roda no Railway usando Flask, Gunicorn e PostgreSQL gerenciado.
 
-## 1. Criar projeto
+## 1. Adicionar PostgreSQL
 
-1. Envie este projeto para um repositorio GitHub.
-2. No Railway, crie um novo projeto a partir desse repositorio.
-3. O Railway deve detectar o `railway.json` e usar o comando:
+No projeto do Railway:
 
-```text
-gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
-```
+1. Clique em **New** ou **Create**.
+2. Escolha **Database**.
+3. Escolha **PostgreSQL**.
+4. Depois conecte o banco ao servico `web`.
 
-## 2. Criar volume persistente
-
-Crie um volume no Railway e monte em:
+Ao conectar, o Railway fornece automaticamente a variavel:
 
 ```text
-/data
+DATABASE_URL
 ```
 
-O volume e necessario para manter:
+O sistema usa PostgreSQL sempre que essa variavel existir.
 
-- banco SQLite;
-- backups;
-- fotos de produtos.
+## 2. Variaveis do servico web
 
-## 3. Variaveis de ambiente
-
-Configure no Railway:
+No servico `web`, configure:
 
 ```text
 APP_ENV=production
@@ -36,28 +29,24 @@ MOVA_SECRET_KEY=troque-por-uma-chave-grande-com-pelo-menos-32-caracteres
 MOVA_ADMIN_NAME=Administrador
 MOVA_ADMIN_LOGIN=admin
 MOVA_ADMIN_PASSWORD=troque-por-uma-senha-forte
-MOVA_DB=/data/loja.db
-MOVA_BACKUP_DIR=/data/backups
-MOVA_UPLOAD_DIR=/data/uploads
-MOVA_DB_BUSY_TIMEOUT_MS=5000
 MOVA_SESSION_HOURS=12
 MOVA_LOGIN_ATTEMPTS=5
 MOVA_LOGIN_WINDOW_SECONDS=900
 ```
 
+Nao precisa configurar `MOVA_DB` para PostgreSQL.
+
 Use uma senha forte antes do primeiro deploy, porque o usuario inicial e criado quando o banco ainda nao existe.
 
-## 4. SQLite no Railway
+## 3. Start command
 
-Mantenha:
+O Railway deve detectar o `railway.json` e usar:
 
 ```text
---workers 1
+gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
 ```
 
-SQLite funciona bem para o inicio, mas nao deve rodar com varios workers gravando no mesmo arquivo. Quando o sistema tiver mais uso, o proximo passo sera migrar para PostgreSQL.
-
-## 5. Conferir depois do deploy
+## 4. Conferir depois do deploy
 
 Acesse:
 
@@ -70,8 +59,15 @@ O retorno esperado e:
 ```json
 {
   "ok": true,
-  "message": "Mova Sports ativo."
+  "message": "Mova Sports ativo.",
+  "database": "PostgreSQL"
 }
 ```
 
 Depois entre no sistema com o login configurado em `MOVA_ADMIN_LOGIN` e `MOVA_ADMIN_PASSWORD`.
+
+## 5. Fotos de produtos
+
+O PostgreSQL resolve a persistencia dos cadastros, vendas e financeiro.
+
+Fotos enviadas ainda ficam no armazenamento do servidor. Para producao completa, o proximo passo e mover fotos para um servico externo, como Cloudinary, S3 ou similar.

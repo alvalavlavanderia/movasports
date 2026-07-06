@@ -2671,6 +2671,16 @@ def delete_product_api(product_id: str):
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": "Produto não encontrado."}), 404
+        linked_sale = conn.execute(
+            "SELECT id FROM sale_items WHERE product_id = ? LIMIT 1",
+            (product_id,),
+        ).fetchone()
+        linked_return = conn.execute(
+            "SELECT id FROM sale_return_items WHERE product_id = ? LIMIT 1",
+            (product_id,),
+        ).fetchone()
+        if linked_sale or linked_return:
+            return jsonify({"ok": False, "error": "Produto possui historico de venda, troca ou devolucao e nao pode ser excluido."}), 409
         conn.execute("DELETE FROM products WHERE store_id = ? AND id = ?", ("matriz", product_id))
         record_audit("delete", "product", product_id, {}, conn)
     sync_product_to_state(deleted_id=product_id)
@@ -2860,11 +2870,17 @@ def delete_supplier_api(supplier_id: str):
     init_db()
     with connect_db() as conn:
         row = conn.execute(
-            "SELECT id FROM suppliers WHERE store_id = ? AND id = ?",
+            "SELECT id, name FROM suppliers WHERE store_id = ? AND id = ?",
             ("matriz", supplier_id),
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": "Fornecedor não encontrado."}), 404
+        linked_payable = conn.execute(
+            "SELECT id FROM payables WHERE store_id = ? AND supplier = ? LIMIT 1",
+            ("matriz", row["name"]),
+        ).fetchone()
+        if linked_payable:
+            return jsonify({"ok": False, "error": "Fornecedor possui conta a pagar vinculada e nao pode ser excluido."}), 409
         conn.execute("DELETE FROM suppliers WHERE store_id = ? AND id = ?", ("matriz", supplier_id))
         record_audit("delete", "supplier", supplier_id, {}, conn)
     sync_supplier_to_state(deleted_id=supplier_id)
@@ -2970,7 +2986,11 @@ def delete_customer_api(customer_id: str):
             "SELECT id FROM receivables WHERE store_id = ? AND customer_id = ? LIMIT 1",
             ("matriz", customer_id),
         ).fetchone()
-        if linked_sale or linked_receivable:
+        linked_payment = conn.execute(
+            "SELECT id FROM receivable_payments WHERE store_id = ? AND customer_id = ? LIMIT 1",
+            ("matriz", customer_id),
+        ).fetchone()
+        if linked_sale or linked_receivable or linked_payment:
             return jsonify({"ok": False, "error": "Cliente possui histórico financeiro e não pode ser excluído."}), 409
         conn.execute("DELETE FROM customers WHERE store_id = ? AND id = ?", ("matriz", customer_id))
         record_audit("delete", "customer", customer_id, {}, conn)

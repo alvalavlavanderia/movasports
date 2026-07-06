@@ -618,6 +618,35 @@ function editCustomer(id) {
   activateSubtab("cad-cliente");
 }
 
+async function deleteCustomer(id) {
+  const customer = db.customers.find((item) => item.id === id);
+  if (!customer || !confirm(`Excluir cliente ${customer.name}?`)) return;
+  if (BACKEND_ENABLED) {
+    try {
+      const response = await fetch(`/api/customers/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || "Não foi possível excluir o cliente.");
+        return;
+      }
+      db.customers = db.customers.filter((item) => item.id !== id);
+      persistLocalOnly();
+      renderAll();
+      return;
+    } catch (error) {
+      console.warn(error);
+      alert("Não foi possível conectar ao servidor para excluir o cliente.");
+      return;
+    }
+  }
+  if (db.sales.some((sale) => sale.customerId === id) || db.receivables.some((item) => item.customerId === id)) {
+    return alert("Cliente possui histórico financeiro e não pode ser excluído.");
+  }
+  db.customers = db.customers.filter((item) => item.id !== id);
+  persist();
+  renderAll();
+}
+
 async function saveSupplier(event) {
   event.preventDefault();
   if (!validCnpj(els.supplierCnpj.value)) return alert("CNPJ invalido.");
@@ -787,6 +816,35 @@ function editSupplier(id) {
   activateSubtab("cad-fornecedor");
 }
 
+async function deleteSupplier(id) {
+  const supplier = db.suppliers.find((item) => item.id === id);
+  if (!supplier || !confirm(`Excluir fornecedor ${supplier.name}?`)) return;
+  if (BACKEND_ENABLED) {
+    try {
+      const response = await fetch(`/api/suppliers/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || "Não foi possível excluir o fornecedor.");
+        return;
+      }
+      db.suppliers = db.suppliers.filter((item) => item.id !== id);
+      persistLocalOnly();
+      renderAll();
+      return;
+    } catch (error) {
+      console.warn(error);
+      alert("Não foi possível conectar ao servidor para excluir o fornecedor.");
+      return;
+    }
+  }
+  if (db.payables.some((item) => item.supplier === supplier.name)) {
+    return alert("Fornecedor possui conta a pagar vinculada e não pode ser excluído.");
+  }
+  db.suppliers = db.suppliers.filter((item) => item.id !== id);
+  persist();
+  renderAll();
+}
+
 function editSimpleName(collection, value) {
   if (collection === "brands") {
     els.editingBrandName.value = value;
@@ -799,6 +857,37 @@ function editSimpleName(collection, value) {
   els.categoryName.value = value;
   activateSubtab("cad-categoria");
   els.categoryName.focus();
+}
+
+async function deleteSimpleName(collection, value) {
+  const label = collection === "brands" ? "marca" : "categoria";
+  const field = collection === "brands" ? "brand" : "category";
+  if (!value || !confirm(`Excluir ${label} ${value}?`)) return;
+  if (BACKEND_ENABLED) {
+    try {
+      const endpoint = collection === "brands" ? "/api/brands" : "/api/categories";
+      const response = await fetch(`${endpoint}/${encodeURIComponent(value)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || `Não foi possível excluir ${label}.`);
+        return;
+      }
+      db[collection] = db[collection].filter((item) => item !== value);
+      persistLocalOnly();
+      renderAll();
+      return;
+    } catch (error) {
+      console.warn(error);
+      alert(`Não foi possível conectar ao servidor para excluir ${label}.`);
+      return;
+    }
+  }
+  if (db.products.some((product) => product[field] === value)) {
+    return alert(`Esta ${label} está vinculada a produto e não pode ser excluída.`);
+  }
+  db[collection] = db[collection].filter((item) => item !== value);
+  persist();
+  renderAll();
 }
 
 function resetUserForm() {
@@ -819,6 +908,36 @@ function editUser(id) {
   els.userPassword.placeholder = "Deixe em branco para manter a senha atual";
   els.userRole.value = user.role;
   activateSubtab("cad-usuario");
+}
+
+async function deleteUser(id) {
+  if (!isAdmin()) return alert("Apenas admin pode excluir usuários.");
+  const user = db.users.find((item) => item.id === id);
+  if (!user || !confirm(`Excluir usuário ${user.name}?`)) return;
+  if (BACKEND_ENABLED) {
+    try {
+      const response = await fetch(`/api/users/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || "Não foi possível excluir o usuário.");
+        return;
+      }
+      db.users = db.users.filter((item) => item.id !== id);
+      persistLocalOnly();
+      renderAll();
+      return;
+    } catch (error) {
+      console.warn(error);
+      alert("Não foi possível conectar ao servidor para excluir o usuário.");
+      return;
+    }
+  }
+  if (session?.user?.id === id) return alert("Não é possível excluir o usuário logado.");
+  const activeAdmins = db.users.filter((item) => item.role === "admin" && item.active !== false);
+  if (user.role === "admin" && activeAdmins.length <= 1) return alert("Não é possível excluir o último administrador.");
+  db.users = db.users.filter((item) => item.id !== id);
+  persist();
+  renderAll();
 }
 
 function renderAll() {
@@ -1046,6 +1165,7 @@ function renderCustomers() {
     `;
     const actions = row.querySelector(".table-actions");
     actions.append(button("Editar", "icon-button", () => editCustomer(customer.id)));
+    actions.append(button("Excluir", "icon-button danger-icon", () => deleteCustomer(customer.id)));
     els.customerList.append(row);
   });
 }
@@ -1074,7 +1194,9 @@ function renderSuppliers() {
       <td><strong>${escapeHtml(supplier.phone || "-")}</strong><small>${escapeHtml(supplier.email || "-")}</small></td>
       <td><div class="table-actions"></div></td>
     `;
-    row.querySelector(".table-actions").append(button("Editar", "icon-button", () => editSupplier(supplier.id)));
+    const actions = row.querySelector(".table-actions");
+    actions.append(button("Editar", "icon-button", () => editSupplier(supplier.id)));
+    actions.append(button("Excluir", "icon-button danger-icon", () => deleteSupplier(supplier.id)));
     els.supplierList.append(row);
   });
 }
@@ -1085,13 +1207,15 @@ function renderSimpleLists() {
   const brands = db.brands.filter((item) => !brandTerm || normalize(item).includes(brandTerm));
   const categories = db.categories.filter((item) => !categoryTerm || normalize(item).includes(categoryTerm));
   els.brandList.innerHTML = db.brands.length
-    ? brands.map((item) => `<tr><td><strong>${escapeHtml(item)}</strong></td><td><div class="table-actions"><button class="icon-button" type="button" data-edit-brand="${escapeHtml(item)}">Editar</button></div></td></tr>`).join("") || `<tr><td colspan="2" class="empty-cell">Nenhuma marca encontrada.</td></tr>`
+    ? brands.map((item) => `<tr><td><strong>${escapeHtml(item)}</strong></td><td><div class="table-actions"><button class="icon-button" type="button" data-edit-brand="${escapeHtml(item)}">Editar</button><button class="icon-button danger-icon" type="button" data-delete-brand="${escapeHtml(item)}">Excluir</button></div></td></tr>`).join("") || `<tr><td colspan="2" class="empty-cell">Nenhuma marca encontrada.</td></tr>`
     : `<tr><td colspan="2" class="empty-cell">Nenhuma marca cadastrada.</td></tr>`;
   els.categoryList.innerHTML = db.categories.length
-    ? categories.map((item) => `<tr><td><strong>${escapeHtml(item)}</strong></td><td><div class="table-actions"><button class="icon-button" type="button" data-edit-category="${escapeHtml(item)}">Editar</button></div></td></tr>`).join("") || `<tr><td colspan="2" class="empty-cell">Nenhuma categoria encontrada.</td></tr>`
+    ? categories.map((item) => `<tr><td><strong>${escapeHtml(item)}</strong></td><td><div class="table-actions"><button class="icon-button" type="button" data-edit-category="${escapeHtml(item)}">Editar</button><button class="icon-button danger-icon" type="button" data-delete-category="${escapeHtml(item)}">Excluir</button></div></td></tr>`).join("") || `<tr><td colspan="2" class="empty-cell">Nenhuma categoria encontrada.</td></tr>`
     : `<tr><td colspan="2" class="empty-cell">Nenhuma categoria cadastrada.</td></tr>`;
   els.brandList.querySelectorAll("[data-edit-brand]").forEach((button) => button.addEventListener("click", () => editSimpleName("brands", button.dataset.editBrand)));
+  els.brandList.querySelectorAll("[data-delete-brand]").forEach((button) => button.addEventListener("click", () => deleteSimpleName("brands", button.dataset.deleteBrand)));
   els.categoryList.querySelectorAll("[data-edit-category]").forEach((button) => button.addEventListener("click", () => editSimpleName("categories", button.dataset.editCategory)));
+  els.categoryList.querySelectorAll("[data-delete-category]").forEach((button) => button.addEventListener("click", () => deleteSimpleName("categories", button.dataset.deleteCategory)));
 }
 
 function renderUsers() {
@@ -1117,7 +1241,9 @@ function renderUsers() {
       <td><span class="status-pill">${user.role === "admin" ? "Admin" : "Operador"}</span></td>
       <td><div class="table-actions"></div></td>
     `;
-    row.querySelector(".table-actions").append(button("Editar", "icon-button", () => editUser(user.id)));
+    const actions = row.querySelector(".table-actions");
+    actions.append(button("Editar", "icon-button", () => editUser(user.id)));
+    actions.append(button("Excluir", "icon-button danger-icon", () => deleteUser(user.id)));
     els.userList.append(row);
   });
 }

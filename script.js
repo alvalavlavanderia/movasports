@@ -131,6 +131,7 @@ function bindEvents() {
   els.exportDataButton.addEventListener("click", exportSystemData);
   els.importDataButton.addEventListener("click", importSystemData);
   els.refreshAuditButton.addEventListener("click", () => loadAuditLogs(true));
+  els.changePasswordForm.addEventListener("submit", changePassword);
   ["auditSearch"].forEach((id) => els[id].addEventListener("input", renderAuditLogs));
   ["auditModuleFilter", "auditActionFilter", "auditLimit"].forEach((id) => els[id].addEventListener("input", () => loadAuditLogs(true)));
 }
@@ -3349,6 +3350,41 @@ async function importSystemData() {
     els.importDataStatus.textContent = "Falha de conexão durante a restauração.";
   } finally {
     els.importDataButton.disabled = false;
+  }
+}
+
+async function changePassword(event) {
+  event.preventDefault();
+  if (!BACKEND_ENABLED) return alert("Alteração de senha exige servidor ativo.");
+  const currentPassword = els.currentPassword.value;
+  const newPassword = els.newPassword.value;
+  const confirmPassword = els.confirmPassword.value;
+  if (!currentPassword || !newPassword) return alert("Informe a senha atual e a nova senha.");
+  if (newPassword !== confirmPassword) return alert("A confirmação da senha não confere.");
+  els.changePasswordStatus.textContent = "Alterando senha...";
+  const submitButton = els.changePasswordForm.querySelector("button[type='submit']");
+  submitButton.disabled = true;
+  try {
+    const response = await fetch("/api/me/password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ currentPassword, newPassword, confirmPassword }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(payload.error || "Não foi possível alterar a senha.");
+      els.changePasswordStatus.textContent = payload.error || "Falha ao alterar senha.";
+      return;
+    }
+    els.changePasswordForm.reset();
+    els.changePasswordStatus.textContent = "Senha alterada com sucesso.";
+    await loadAuditLogs(true);
+  } catch (error) {
+    console.warn(error);
+    alert("Não foi possível conectar ao servidor para alterar a senha.");
+    els.changePasswordStatus.textContent = "Falha de conexão.";
+  } finally {
+    submitButton.disabled = false;
   }
 }
 

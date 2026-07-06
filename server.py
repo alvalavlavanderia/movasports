@@ -2415,6 +2415,53 @@ def api_session():
     return jsonify({"ok": True, "user": user})
 
 
+@app.post("/api/me/password")
+def change_own_password_api():
+    current_user = session.get("user")
+    if not current_user:
+        return jsonify({"ok": False, "error": "Login obrigatorio."}), 401
+    payload = request.get_json(silent=True) or {}
+    current_password = str(payload.get("currentPassword") or "")
+    new_password = str(payload.get("newPassword") or "")
+    confirm_password = str(payload.get("confirmPassword") or "")
+    if not current_password or not new_password:
+        return jsonify({"ok": False, "error": "Informe a senha atual e a nova senha."}), 400
+    if new_password != confirm_password:
+        return jsonify({"ok": False, "error": "A confirmacao da senha nao confere."}), 400
+    password_error = validate_password_strength(new_password)
+    if password_error:
+        return jsonify({"ok": False, "error": password_error}), 400
+    init_db()
+    with connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, login, password_hash, role, active
+            FROM users
+            WHERE store_id = ? AND id = ?
+            """,
+            ("matriz", current_user.get("id")),
+        ).fetchone()
+        if not row or not row["active"]:
+            return jsonify({"ok": False, "error": "Usuario nao encontrado ou inativo."}), 404
+        if not check_password_hash(row["password_hash"], current_password):
+            return jsonify({"ok": False, "error": "Senha atual incorreta."}), 401
+        now = utc_now()
+        conn.execute(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE store_id = ? AND id = ?",
+            (generate_password_hash(new_password), now, "matriz", row["id"]),
+        )
+        record_audit("update", "auth", row["id"], {"changedPassword": True}, conn)
+    sync_user_to_state({
+        "id": row["id"],
+        "name": row["name"],
+        "login": row["login"],
+        "password": new_password,
+        "role": row["role"],
+        "active": bool(row["active"]),
+    })
+    return jsonify({"ok": True})
+
+
 @app.get("/api/users")
 def list_users():
     init_db()

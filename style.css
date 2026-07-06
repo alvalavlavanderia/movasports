@@ -3894,6 +3894,7 @@ input:focus, select:focus {
 .database-panel,
 .backup-panel,
 .restore-panel,
+.password-panel,
 .audit-panel {
   padding: 18px;
   border-radius: 10px;
@@ -3966,6 +3967,13 @@ input:focus, select:focus {
   display: grid;
   gap: 14px;
   grid-template-columns: minmax(220px, 1fr) minmax(180px, 260px) auto;
+}
+
+.password-grid {
+  align-items: end;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(160px, 1fr)) auto;
 }
 
 .danger {
@@ -4151,7 +4159,7 @@ input:focus, select:focus {
     height: auto;
   }
   .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .two-column, .sale-layout, .sale-register-layout, .sale-history-layout, .return-grid, .manual-receipt-grid, .credit-summary-panel, .dashboard-head, .product-register-layout, .customer-register-layout, .cadastro-register-layout, .cadastro-register-layout.compact-register, .audit-toolbar, .restore-grid { grid-template-columns: 1fr; }
+  .two-column, .sale-layout, .sale-register-layout, .sale-history-layout, .return-grid, .manual-receipt-grid, .credit-summary-panel, .dashboard-head, .product-register-layout, .customer-register-layout, .cadastro-register-layout, .cadastro-register-layout.compact-register, .audit-toolbar, .restore-grid, .password-grid { grid-template-columns: 1fr; }
   .dashboard-cards, .dashboard-grid, .database-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cash-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cadastro-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

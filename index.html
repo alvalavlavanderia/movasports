@@ -774,6 +774,19 @@
           <button id="createBackupButton" class="primary" type="button">Criar backup</button>
         </div>
       </div>
+      <section class="panel password-panel">
+        <div class="section-title stacked">
+          <h2>Alterar senha</h2>
+          <p>Atualize a senha do usuário logado.</p>
+        </div>
+        <form id="changePasswordForm" class="password-grid">
+          <label class="field">Senha atual<input id="currentPassword" type="password" autocomplete="current-password" required></label>
+          <label class="field">Nova senha<input id="newPassword" type="password" autocomplete="new-password" required></label>
+          <label class="field">Confirmar nova senha<input id="confirmPassword" type="password" autocomplete="new-password" required></label>
+          <button class="primary" type="submit">Alterar senha</button>
+        </form>
+        <span id="changePasswordStatus" class="backup-status">Nenhuma alteração realizada.</span>
+      </section>
       <section class="panel database-panel">
         <div class="section-title tight">
           <h2>Saúde do banco</h2>

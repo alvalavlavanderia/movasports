@@ -79,8 +79,44 @@ def require_login_for_api():
     return None
 
 
+@app.before_request
+def validate_active_session_for_api():
+    if not request.path.startswith("/api/"):
+        return None
+    if request.path in {"/api/health", "/api/session", "/api/login", "/api/logout"}:
+        return None
+    if not session.get("user"):
+        return None
+    if not refresh_session_user():
+        session.clear()
+        return jsonify({"ok": False, "error": "Sessao expirada. Faca login novamente."}), 401
+    return None
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def refresh_session_user() -> dict | None:
+    user = session.get("user")
+    if not user:
+        return None
+    init_db()
+    with connect_db() as conn:
+        row = conn.execute(
+            """
+            SELECT id, name, login, role, active
+            FROM users
+            WHERE store_id = ? AND id = ?
+            """,
+            ("matriz", user.get("id")),
+        ).fetchone()
+    if not row or not row["active"]:
+        return None
+    public = public_user(row)
+    if public != user:
+        session["user"] = public
+    return public
 
 
 def client_rate_key(login: str) -> str:
@@ -2411,7 +2447,9 @@ def api_logout():
 
 @app.get("/api/session")
 def api_session():
-    user = session.get("user")
+    user = refresh_session_user() if session.get("user") else None
+    if session.get("user") and not user:
+        session.clear()
     return jsonify({"ok": True, "user": user})
 
 

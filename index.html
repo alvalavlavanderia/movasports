@@ -1,0 +1,908 @@
+﻿<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#18324f">
+  <title>Mova Sports</title>
+  <link rel="stylesheet" href="style.css?v=20260706-7">
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <img class="brand-logo" src="assets/MOVA%20LOGO.png" alt="Mova Sports">
+      </div>
+      <nav class="tabs" aria-label="Módulos">
+        <button class="tab-button active" type="button" data-tab="dashboard"><span><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"></path><path d="M5 10.5V20h14v-9.5"></path><path d="M9 20v-6h6v6"></path></svg></span>Dashboard</button>
+        <button class="tab-button" type="button" data-tab="venda"><span><svg viewBox="0 0 24 24"><path d="M6 6h15l-2 8H8L6 3H3"></path><circle cx="9" cy="20" r="1.5"></circle><circle cx="18" cy="20" r="1.5"></circle></svg></span>Vendas</button>
+        <button class="tab-button" type="button" data-tab="estoque"><span><svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"></path><path d="M4 7.5 12 12l8-4.5"></path><path d="M12 12v9"></path></svg></span>Estoque</button>
+        <button class="tab-button" type="button" data-tab="catalogo"><span><svg viewBox="0 0 24 24"><path d="M20 13 13 20 4 11V4h7l9 9Z"></path><circle cx="8" cy="8" r="1.5"></circle></svg></span>Catálogo</button>
+        <button class="tab-button" type="button" data-tab="crediario"><span><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"></rect><circle cx="12" cy="9" r="3"></circle><path d="M7.5 18c.9-2.4 2.4-3.5 4.5-3.5s3.6 1.1 4.5 3.5"></path></svg></span>Crediário</button>
+        <button class="tab-button" type="button" data-tab="caixa"><span><svg viewBox="0 0 24 24"><path d="M7 5h10l2 3v12H5V8l2-3Z"></path><path d="M8 8h8"></path><path d="M12 11v6"></path><path d="M14.5 12.5c-.4-.8-1.2-1.2-2.3-1.2-1.2 0-2 .6-2 1.5s.7 1.3 2.1 1.6c1.5.3 2.3.7 2.3 1.7 0 .9-.8 1.6-2.2 1.6-1.2 0-2.1-.4-2.6-1.2"></path></svg></span>Caixa</button>
+        <button class="tab-button" type="button" data-tab="contas"><span><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6V3Z"></path><path d="M15 3v5h4"></path><path d="M12 10v7"></path><path d="M14.5 11.5c-.4-.8-1.2-1.2-2.3-1.2-1.2 0-2 .6-2 1.5s.7 1.3 2.1 1.6c1.5.3 2.3.7 2.3 1.7 0 .9-.8 1.6-2.2 1.6-1.2 0-2.1-.4-2.6-1.2"></path></svg></span>Contas a pagar</button>
+        <button class="tab-button" type="button" data-tab="cadastros"><span><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><path d="M3 20c1-3.5 3-5.2 6-5.2s5 1.7 6 5.2"></path><circle cx="17" cy="9" r="2.5"></circle><path d="M16 14.7c2.6.2 4.2 1.9 5 5.3"></path></svg></span>Cadastros</button>
+        <button class="tab-button admin-only" type="button" data-tab="configuracoes"><span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2 3.4-.2-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V22h-4v-.3a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.2.1-2-3.4.1-.1A1.7 1.7 0 0 0 6 15a1.7 1.7 0 0 0-1.5-1H4v-4h.5A1.7 1.7 0 0 0 6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1 2-3.4.2.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V2h4v.3a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.2-.1 2 3.4-.1.1A1.7 1.7 0 0 0 18 9a1.7 1.7 0 0 0 1.5 1h.5v4h-.5A1.7 1.7 0 0 0 18 15Z"></path></svg></span>Configurações</button>
+      </nav>
+      <div class="sidebar-user">
+        <div class="sidebar-user-row"><span class="sidebar-info-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.4-4 4-6 8-6s6.6 2 8 6"></path></svg></span><div><span>Usuário</span><strong id="currentUserLabel"></strong></div></div>
+        <div class="sidebar-user-row"><span class="sidebar-info-icon"><svg viewBox="0 0 24 24"><path d="M12 3 20 6v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3Z"></path><path d="m8.5 12 2.2 2.2 4.8-5"></path></svg></span><div><span>Perfil</span><strong id="currentUserRole">Administrador</strong></div></div>
+        <button id="logoutButton" class="logout-link" type="button"><span><svg viewBox="0 0 24 24"><path d="M14 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-3"></path><path d="M10 12h10"></path><path d="m17 9 3 3-3 3"></path></svg></span>Sair do sistema</button>
+      </div>
+    </aside>
+
+    <div class="main-area">
+  <main class="app-shell">
+    <section id="dashboard" class="tab-panel active">
+      <section class="dashboard-shell">
+        <div class="dashboard-head">
+          <div>
+            <h2>Dashboard</h2>
+            <p>Visão geral da sua loja</p>
+          </div>
+          <span id="topDateLabel" class="date-chip"></span>
+        </div>
+        <div class="metric-grid dashboard-cards">
+          <div class="metric kpi green"><span>Vendas hoje</span><strong id="dashTodaySales">R$ 0,00</strong><small>Atualizado agora</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 13H7L6 7Z"></path><path d="M9 7a3 3 0 0 1 6 0"></path><path d="M10 13h4"></path></svg></i></div>
+          <div class="metric kpi blue"><span>Vendas no mês</span><strong id="dashMonthSales">R$ 0,00</strong><small>Período atual</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18V6"></path><path d="M4 18h16"></path><path d="m7 15 4-4 3 3 5-7"></path></svg></i></div>
+          <div class="metric kpi purple manager-only"><span>Lucro do mês</span><strong id="dashMonthProfit">R$ 0,00</strong><small>Estimado</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18"></path><path d="M17 7.5c-.8-1-2.2-1.5-4-1.5-2.3 0-4 1.1-4 2.8 0 4 8 1.8 8 6 0 1.8-1.7 3.2-4.4 3.2-2 0-3.7-.7-4.6-2"></path></svg></i></div>
+          <div class="metric kpi orange manager-only"><span>Valor do estoque</span><strong id="dashStockValue">R$ 0,00</strong><small>Custo cadastrado</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8 12 4l8 4-8 4-8-4Z"></path><path d="M4 8v8l8 4 8-4V8"></path><path d="M12 12v8"></path></svg></i></div>
+          <div class="metric kpi pink"><span>Crediário em aberto</span><strong id="dashCreditOpen">R$ 0,00</strong><small>Clientes com saldo</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"></rect><path d="M3 10h18"></path><path d="M7 15h4"></path></svg></i></div>
+        </div>
+        <div class="dashboard-grid">
+          <section class="dashboard-card chart-card span-2">
+            <div class="section-title tight"><h2>Vendas por dia</h2><select id="dashSalesRange" class="mini-select"><option value="30" selected>Últimos 30 dias</option><option value="7">Últimos 7 dias</option><option value="90">Últimos 90 dias</option></select></div>
+            <div id="salesChart" class="line-chart"></div>
+          </section>
+          <section class="dashboard-card payment-card span-2">
+            <div id="paymentSummary" class="payment-summary"></div>
+          </section>
+        </div>
+        <section class="cash-summary-card">
+          <div class="cash-summary-grid">
+            <article class="blue"><i><svg viewBox="0 0 24 24"><path d="M5 7h14v12H5z"></path><path d="M8 7V5h8v2"></path><path d="M8 13h8"></path></svg></i><span>Saldo em caixa</span><strong id="dashCashBalance">R$ 0,00</strong><small>Disponível agora</small><em>Igual ao último fechamento</em></article>
+            <article class="green"><i><svg viewBox="0 0 24 24"><path d="M12 4v16"></path><path d="m6 14 6 6 6-6"></path></svg></i><span>Entradas hoje</span><strong id="dashCashIn">R$ 0,00</strong><small>Total recebido</small><em>Atualizado hoje</em></article>
+            <article class="pink"><i><svg viewBox="0 0 24 24"><path d="M12 20V4"></path><path d="m6 10 6-6 6 6"></path></svg></i><span>Saídas hoje</span><strong id="dashCashOut">R$ 0,00</strong><small>Total pago</small><em>Atualizado hoje</em></article>
+            <article class="purple"><i><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2"></rect><path d="M4 10h16"></path></svg></i><span>Contas a pagar</span><strong id="dashPayablesOpen">R$ 0,00</strong><small>Total pendente</small><em id="dashPayablesCount">0 contas em aberto</em></article>
+            <article class="orange"><i><svg viewBox="0 0 24 24"><path d="M6 8c0-2 12-2 12 0s-12 2-12 0Z"></path><path d="M6 8v8c0 2 12 2 12 0V8"></path><path d="M6 12c0 2 12 2 12 0"></path></svg></i><span>A receber (crediário)</span><strong id="dashReceivableOpen">R$ 0,00</strong><small>Total a receber</small><em id="dashReceivableCount">0 parcelas em aberto</em></article>
+          </div>
+        </section>
+        <div class="dashboard-grid dashboard-bottom-grid">
+          <section class="dashboard-card brand-card span-2 dashboard-feature-card">
+            <div class="dashboard-feature-title"><span><svg viewBox="0 0 24 24"><path d="m12 3 3 6 6 .9-4.5 4.4 1 6.2L12 17.6 6.5 20.5l1-6.2L3 9.9 9 9l3-6Z"></path></svg></span><div><h2>Marcas mais vendidas</h2><p>Ranking por quantidade de peças vendidas.</p></div></div>
+            <div id="topProductsList" class="compact-list"></div>
+          </section>
+          <section class="dashboard-card span-2 dashboard-feature-card">
+            <div class="dashboard-feature-title warning"><span><svg viewBox="0 0 24 24"><path d="M12 3 4 20h16L12 3Z"></path><path d="M12 9v5"></path><path d="M12 17h.01"></path></svg></span><div><h2>Peças paradas há mais de 90 dias</h2><p>Produtos com baixa movimentação no estoque.</p></div></div>
+            <div id="lowStockList" class="compact-list"></div>
+          </section>
+        </div>
+      </section>
+    </section>
+
+    <section id="cadastros" class="tab-panel">
+      <div class="page-head">
+        <div>
+          <h2 id="cadastroTitle">Cadastros</h2>
+          <p id="cadastroSubtitle">Escolha qual cadastro deseja abrir.</p>
+        </div>
+        <div id="cadastroPageActions" class="page-actions" hidden>
+          <button id="backCadastroButton" class="ghost icon-back" type="button" title="Voltar para cadastros" aria-label="Voltar para cadastros">←</button>
+          <button id="exportProductsButton" class="ghost product-only-action" type="button">Exportar</button>
+          <button id="exportCustomersButton" class="ghost customer-only-action" type="button">Exportar</button>
+        </div>
+      </div>
+      <section id="cad-home" class="subtab-panel active">
+        <section class="panel cadastro-home-panel">
+          <div>
+            <h2>Navegue pelos cadastros</h2>
+            <p>Escolha abaixo o tipo de cadastro que deseja acessar.</p>
+          </div>
+          <div class="cadastro-grid">
+            <button class="cadastro-card pink" type="button" data-subtab="cad-produto"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 4h6l2 3 4 2-2 5-3-1v7H8v-7l-3 1-2-5 4-2 2-3Z"></path><path d="M9 4c.8 1.3 1.8 2 3 2s2.2-.7 3-2"></path></svg></span><strong>Produto</strong><p>Cadastre e gerencie produtos, preços, estoque, fotos e variações.</p><em id="productCardCount">0 produtos cadastrados</em><b>→</b></button>
+            <button class="cadastro-card purple" type="button" data-subtab="cad-cliente"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4 20c1.5-4 4.2-6 8-6s6.5 2 8 6"></path></svg></span><strong>Cliente</strong><p>Cadastre clientes, dados pessoais, contatos, limites e histórico.</p><em id="customerCardCount">0 clientes cadastrados</em><b>→</b></button>
+            <button class="cadastro-card blue" type="button" data-subtab="cad-fornecedor"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 6h11v10H3z"></path><path d="M14 10h4l3 3v3h-7z"></path><circle cx="7" cy="18" r="2"></circle><circle cx="18" cy="18" r="2"></circle></svg></span><strong>Fornecedor</strong><p>Cadastre fornecedores, dados fiscais, contatos e formas de pagamento.</p><em id="supplierCardCount">0 fornecedores</em><b>→</b></button>
+            <button class="cadastro-card orange" type="button" data-subtab="cad-marca"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 13 13 20 4 11V4h7l9 9Z"></path><circle cx="8" cy="8" r="1.5"></circle></svg></span><strong>Marca</strong><p>Cadastre as marcas dos produtos comercializados na sua loja.</p><em id="brandCardCount">0 marcas cadastradas</em><b>→</b></button>
+            <button class="cadastro-card green" type="button" data-subtab="cad-categoria"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect><rect x="4" y="14" width="6" height="6" rx="1"></rect><rect x="14" y="14" width="6" height="6" rx="1"></rect></svg></span><strong>Categoria</strong><p>Organize seus produtos em categorias, linhas e grupos.</p><em id="categoryCardCount">0 categorias cadastradas</em><b>→</b></button>
+            <button class="cadastro-card teal admin-only" type="button" data-subtab="cad-usuario"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><path d="M3 19c1-3.4 3-5 6-5s5 1.6 6 5"></path><path d="M16 6a3 3 0 0 1 0 6"></path><path d="M18 14c1.8.7 3 2.3 3 5"></path></svg></span><strong>Usuários</strong><p>Gerencie usuários, acessos, senhas e permissões do sistema.</p><em id="userCardCount">0 usuários cadastrados</em><b>→</b></button>
+          </div>
+        </section>
+      </section>
+
+      <section id="cad-produto" class="subtab-panel">
+        <div class="product-register-layout">
+          <section class="panel product-form-card">
+            <div class="section-title">
+              <h2>Informações do Produto</h2>
+              <label class="switch-field">Produto ativo<input id="productActive" type="checkbox" checked><span></span></label>
+            </div>
+            <form id="productForm" class="product-form-grid">
+              <input id="editingProductId" type="hidden">
+              <label class="field">Código de barras *<input id="productBarcode" type="text" required></label>
+              <label class="field span-2">Nome do produto *<input id="productName" type="text" required></label>
+              <label class="field">Categoria *<input id="productCategory" list="categoryOptions" placeholder="Selecione..."></label>
+              <label class="field">Marca *<input id="productBrand" list="brandOptions" placeholder="Selecione..."></label>
+              <label class="field">Gênero<select id="productGender"><option>Feminino</option><option>Masculino</option><option>Unissex</option></select></label>
+              <label class="field">Tamanho<input id="productSize" type="text" placeholder="Selecione..."></label>
+              <label class="field">Cor<input id="productColor" type="text" placeholder="Selecione..."></label>
+              <label class="field manager-only">Preço de custo<input id="productCost" type="number" min="0" step="0.01" value="0"></label>
+              <label class="field">Preço de venda<input id="productPrice" type="number" min="0" step="0.01" value="0"></label>
+              <label class="field">Estoque atual<input id="productStock" type="number" min="0" step="1" value="0"></label>
+              <label class="field">Estoque mínimo<input id="productMinStock" type="number" min="0" step="1" value="0"></label>
+              <label class="field span-3">Descrição<textarea id="productDescription" placeholder="Digite uma descrição para o produto..."></textarea></label>
+              <label class="field span-3 upload-box">Foto do produto<input id="productPhoto" type="file" accept="image/*"><span>Arraste uma imagem ou clique para selecionar<br><small>PNG, JPG ou WEBP até 5MB</small></span></label>
+              <button id="clearProductButton" class="ghost span-1" type="button">Limpar campos</button>
+              <button class="primary span-2" type="submit">Salvar Produto</button>
+            </form>
+          </section>
+          <section class="panel product-list-card">
+            <div class="section-title"><h2>Produtos Cadastrados</h2></div>
+            <div class="product-list-toolbar">
+              <input id="productTableSearch" type="search" placeholder="Buscar produto...">
+              <select id="productTableFilter"><option value="all">Todos os produtos</option><option value="active">Ativos</option><option value="low">Estoque baixo</option></select>
+            </div>
+            <div class="product-table-wrap">
+              <table class="product-table">
+                <thead><tr><th>Produto</th><th>Categoria</th><th>Preço</th><th>Estoque</th><th>Status</th><th>Ações</th></tr></thead>
+                <tbody id="productList"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="cad-cliente" class="subtab-panel">
+        <div class="customer-register-layout">
+          <section class="panel customer-form-card">
+            <div class="section-title"><h2>Informações do Cliente</h2></div>
+            <form id="customerForm" class="customer-form-grid">
+              <input id="editingCustomerId" type="hidden">
+              <label class="field">Código<input id="customerCode" type="text" disabled></label>
+              <label class="field span-2">Nome<input id="customerName" type="text" required></label>
+              <label class="field">CPF<input id="customerCpf" type="text"></label>
+              <label class="field">RG<input id="customerRg" type="text"></label>
+              <label class="field">Nascimento<input id="customerBirth" type="date"></label>
+              <label class="field">WhatsApp<input id="customerWhatsapp" type="tel"></label>
+              <label class="field">E-mail<input id="customerEmail" type="email"></label>
+              <label class="field span-2">Endereço<input id="customerAddress" type="text"></label>
+              <label class="field">Cidade<input id="customerCity" type="text"></label>
+              <label class="field">Bairro<input id="customerDistrict" type="text"></label>
+              <label class="field">CEP<input id="customerZip" type="text"></label>
+              <label class="field">Limite de crédito<input id="customerLimit" type="number" min="0" step="0.01" value="0"></label>
+              <button id="clearCustomerButton" class="ghost span-1" type="button">Limpar campos</button>
+              <button class="primary span-2" type="submit">Salvar Cliente</button>
+            </form>
+          </section>
+          <section class="panel customer-list-card">
+            <div class="section-title"><h2>Clientes Cadastrados</h2></div>
+            <div class="customer-list-toolbar">
+              <input id="customerListSearch" type="search" placeholder="Buscar cliente por nome...">
+            </div>
+            <div class="customer-table-wrap">
+              <table class="customer-table">
+                <thead><tr><th>Cliente</th><th>Contato</th><th>Limite</th><th>Saldo</th><th>Ações</th></tr></thead>
+                <tbody id="customerList"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="cad-fornecedor" class="subtab-panel">
+        <div class="cadastro-register-layout">
+          <section class="panel cadastro-form-card">
+            <div class="section-title"><h2>Informações do Fornecedor</h2></div>
+            <form id="supplierForm" class="cadastro-form-grid">
+              <input id="editingSupplierId" type="hidden">
+              <label class="field span-2">Nome<input id="supplierName" type="text" required></label>
+              <label class="field">CNPJ<input id="supplierCnpj" type="text" required></label>
+              <label class="field">WhatsApp<input id="supplierPhone" type="tel"></label>
+              <label class="field">E-mail<input id="supplierEmail" type="email"></label>
+              <label class="field span-3">Endereço<input id="supplierAddress" type="text"></label>
+              <button class="primary span-3" type="submit">Salvar Fornecedor</button>
+            </form>
+          </section>
+          <section class="panel cadastro-list-card">
+            <div class="section-title"><h2>Fornecedores Cadastrados</h2></div>
+            <div class="cadastro-list-toolbar">
+              <input id="supplierListSearch" type="search" placeholder="Buscar fornecedor...">
+            </div>
+            <div class="cadastro-table-wrap">
+              <table class="cadastro-table">
+                <thead><tr><th>Fornecedor</th><th>CNPJ</th><th>Contato</th><th>Ações</th></tr></thead>
+                <tbody id="supplierList"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="cad-marca" class="subtab-panel">
+        <div class="cadastro-register-layout compact-register">
+          <section class="panel cadastro-form-card">
+            <div class="section-title"><h2>Informações da Marca</h2></div>
+            <form id="brandForm" class="cadastro-form-grid">
+              <input id="editingBrandName" type="hidden">
+              <label class="field span-3">Nome da marca<input id="brandName" type="text" placeholder="Ex: Mova Sports" required></label>
+              <button class="primary span-3">Salvar Marca</button>
+            </form>
+          </section>
+          <section class="panel cadastro-list-card">
+            <div class="section-title"><h2>Marcas Cadastradas</h2></div>
+            <div class="cadastro-list-toolbar">
+              <input id="brandListSearch" type="search" placeholder="Buscar marca...">
+            </div>
+            <div class="cadastro-table-wrap">
+              <table class="cadastro-table simple-cadastro-table">
+                <thead><tr><th>Marca</th><th>Ações</th></tr></thead>
+                <tbody id="brandList"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+      <section id="cad-categoria" class="subtab-panel">
+        <div class="cadastro-register-layout compact-register">
+          <section class="panel cadastro-form-card">
+            <div class="section-title"><h2>Informações da Categoria</h2></div>
+            <form id="categoryForm" class="cadastro-form-grid">
+              <input id="editingCategoryName" type="hidden">
+              <label class="field span-3">Nome da categoria<input id="categoryName" type="text" placeholder="Ex: Fitness" required></label>
+              <button class="primary span-3">Salvar Categoria</button>
+            </form>
+          </section>
+          <section class="panel cadastro-list-card">
+            <div class="section-title"><h2>Categorias Cadastradas</h2></div>
+            <div class="cadastro-list-toolbar">
+              <input id="categoryListSearch" type="search" placeholder="Buscar categoria...">
+            </div>
+            <div class="cadastro-table-wrap">
+              <table class="cadastro-table simple-cadastro-table">
+                <thead><tr><th>Categoria</th><th>Ações</th></tr></thead>
+                <tbody id="categoryList"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+      <section id="cad-usuario" class="subtab-panel admin-only">
+        <div class="cadastro-register-layout">
+          <section class="panel cadastro-form-card">
+            <div class="section-title"><h2>Informações do Usuário</h2></div>
+            <form id="userForm" class="cadastro-form-grid">
+              <input id="editingUserId" type="hidden">
+              <label class="field span-2">Nome<input id="userName" type="text" required></label>
+              <label class="field">Usuário<input id="userLogin" type="text" required></label>
+              <label class="field">Senha<input id="userPassword" type="password" required></label>
+              <label class="field">Acesso<select id="userRole"><option value="operator">Operador</option><option value="admin">Admin</option></select></label>
+              <button class="primary span-3" type="submit">Salvar Usuário</button>
+            </form>
+          </section>
+          <section class="panel cadastro-list-card">
+            <div class="section-title"><h2>Usuários Cadastrados</h2></div>
+            <div class="cadastro-list-toolbar">
+              <input id="userListSearch" type="search" placeholder="Buscar usuário...">
+            </div>
+            <div class="cadastro-table-wrap">
+              <table class="cadastro-table">
+                <thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th><th>Ações</th></tr></thead>
+                <tbody id="userList"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+    </section>
+
+    <section id="catalogo" class="tab-panel">
+      <div class="page-head">
+        <div>
+          <h2>Catálogo de produtos</h2>
+          <p>Visualize os produtos disponíveis e compartilhe com seus clientes.</p>
+        </div>
+        <div class="page-actions catalog-actions">
+          <button id="catalogPdfButton" class="ghost" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6V3Z"></path><path d="M15 3v5h4"></path><path d="M9 14h6"></path><path d="M9 17h4"></path></svg></span>Exportar PDF</button>
+        </div>
+      </div>
+      <section class="panel catalog-panel">
+        <div class="catalog-toolbar">
+          <label class="search-field catalog-search">
+            <span>Busca</span>
+            <input id="catalogSearch" type="search" placeholder="Buscar por nome, código ou categoria...">
+          </label>
+          <label class="field">Categoria<select id="catalogCategoryFilter"><option value="all">Todas</option></select></label>
+          <label class="field">Marca<select id="catalogBrandFilter"><option value="all">Todas</option></select></label>
+          <button id="catalogClearFiltersButton" class="ghost" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"></path><path d="M20 4v6h-6"></path></svg></span>Limpar filtros</button>
+        </div>
+        <div class="catalog-result-head">
+          <strong id="catalogCount">0 produtos encontrados</strong>
+          <div class="catalog-view-toggle" aria-label="Modo de visualização">
+            <button id="catalogGridViewButton" class="active" type="button" aria-label="Grade"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect><rect x="4" y="14" width="6" height="6" rx="1"></rect><rect x="14" y="14" width="6" height="6" rx="1"></rect></svg></button>
+            <button id="catalogListViewButton" type="button" aria-label="Lista"><svg viewBox="0 0 24 24"><path d="M8 6h12"></path><path d="M8 12h12"></path><path d="M8 18h12"></path><path d="M4 6h.01"></path><path d="M4 12h.01"></path><path d="M4 18h.01"></path></svg></button>
+          </div>
+        </div>
+        <div id="catalogList" class="catalog-grid empty">Nenhum produto cadastrado.</div>
+      </section>
+    </section>
+
+    <section id="estoque" class="tab-panel">
+      <div class="page-head">
+        <div>
+          <h2>Estoque</h2>
+          <p>Gerencie e acompanhe todos os produtos em estoque.</p>
+        </div>
+      </div>
+      <section class="panel stock-panel">
+        <div class="stock-toolbar">
+          <label class="search-field stock-search">
+            <span>Buscar</span>
+            <input id="stockSearch" type="search" placeholder="Buscar por código ou nome do produto...">
+          </label>
+          <button class="ghost stock-filter-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z"></path></svg></span>Filtros</button>
+          <div class="stock-actions">
+            <button id="stockExportButton" class="ghost" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"></path><path d="m8 11 4 4 4-4"></path><path d="M5 21h14"></path></svg></span>Exportar</button>
+            <button id="stockNewProductButton" class="primary" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg></span>Novo produto</button>
+          </div>
+        </div>
+        <div class="stock-filter-grid">
+          <label class="field">Categoria<select id="stockCategoryFilter"><option value="all">Todas</option></select></label>
+          <label class="field">Marca<select id="stockBrandFilter"><option value="all">Todas</option></select></label>
+          <label class="field">Status<select id="stockStatusFilter"><option value="all">Todos</option><option value="ok">Em estoque</option><option value="low">Estoque baixo</option><option value="empty">Sem estoque</option></select></label>
+        </div>
+      </section>
+      <section class="panel stock-table-panel">
+        <div class="stock-table-wrap">
+          <table class="stock-table">
+            <thead>
+              <tr>
+                <th>Código</th>
+                <th>Produto</th>
+                <th>Categoria</th>
+                <th>Marca</th>
+                <th>Tamanho</th>
+                <th>Cor</th>
+                <th>Estoque</th>
+                <th>Preço custo</th>
+                <th>Preço venda</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody id="stockList"></tbody>
+          </table>
+        </div>
+        <div id="stockFooter" class="stock-footer"></div>
+      </section>
+    </section>
+
+    <section id="venda" class="tab-panel">
+      <div class="page-head sale-head">
+        <div>
+          <h2>Vendas</h2>
+          <p>Realize vendas, devoluções, trocas e cancelamentos.</p>
+        </div>
+      </div>
+      <div class="subtabs sale-mode-tabs">
+        <button class="subtab active" type="button" data-subtab="nova-venda">Nova venda</button>
+        <button class="subtab" type="button" data-subtab="devolucao">Devolução/troca</button>
+        <button class="subtab" type="button" data-subtab="historico-vendas">Histórico</button>
+        <button class="subtab" type="button" data-subtab="cancelar-venda">Cancelar venda</button>
+      </div>
+      <section id="nova-venda" class="subtab-panel active">
+        <div class="sale-register-layout">
+          <section class="panel sale-products-card">
+            <div class="section-title"><h2>Produtos</h2></div>
+            <div class="sale-search-row">
+              <input id="saleProductSearch" type="search" placeholder="Buscar produto por código ou nome...">
+              <button class="ghost sale-scan-button" type="button" title="Código de barras" aria-label="Código de barras">▥</button>
+            </div>
+            <div id="saleProductList" class="table-list empty">Nenhum produto encontrado.</div>
+          </section>
+          <section class="panel sale-current-card">
+            <div class="section-title"><h2>Venda atual</h2><button id="clearSaleButton" class="ghost" type="button">Limpar</button></div>
+            <div class="sale-customer-row">
+              <label class="field">Cliente<input id="saleCustomerSearch" list="customerOptions" placeholder="Venda simples (sem cliente)"></label>
+              <button class="ghost sale-add-customer" type="button" title="Adicionar cliente" aria-label="Adicionar cliente">+</button>
+            </div>
+            <div class="sale-cart-box">
+              <div class="sale-cart-head"><span>Item</span><span>Descrição</span><span>Quant.</span><span>Unitário</span><span>Total</span></div>
+              <div id="cartList" class="sale-cart-list empty">Nenhum item.</div>
+            </div>
+            <div class="sale-total-row">
+              <label class="field">Desconto (R$)<input id="saleDiscount" type="number" min="0" step="0.01" value="0"></label>
+              <div class="sale-total-box"><span>Total da venda</span><strong id="saleTotal">R$ 0,00</strong></div>
+            </div>
+            <div class="section-title tight"><h2>Pagamentos</h2><button id="addPaymentButton" class="ghost" type="button">Adicionar forma</button></div>
+            <div class="sale-payment-head"><span>Forma de pagamento</span><span>Valor</span><span>Ações</span></div>
+            <div id="paymentRows" class="payments-list"></div>
+            <div class="sale-total-row">
+              <label class="field">Parcelas crediário<input id="storeCreditInstallments" type="number" min="1" step="1" value="1"></label>
+              <div class="sale-change-box"><span>Troco</span><strong id="saleChange">R$ 0,00</strong></div>
+            </div>
+            <button id="finishSaleButton" class="primary finish-button" type="button">Finalizar venda</button>
+          </section>
+        </div>
+        <section id="receiptPanel" class="panel" hidden></section>
+      </section>
+      <section id="devolucao" class="subtab-panel">
+        <section class="panel return-panel">
+          <div class="return-grid">
+            <div class="return-left">
+              <div class="section-title stacked"><div><h2>Devolução / Troca</h2><p>Localize a venda, selecione os itens e informe o motivo da devolução ou troca.</p></div></div>
+              <form id="returnForm" class="return-form">
+                <div class="return-step">
+                  <strong>1. Localizar venda</strong>
+                  <div class="return-search-row">
+                    <input id="returnProductSearch" list="saleOptions" placeholder="Buscar venda por número. Ex: VENDA001" required>
+                    <button class="ghost" type="button" aria-label="Buscar">⌕</button>
+                    <button class="ghost" type="button">Filtros</button>
+                  </div>
+                </div>
+                <div class="return-items-box">
+                  <strong>2. Itens da venda</strong>
+                  <div class="return-table-head"><span>Produto</span><span>Variação</span><span>Qtd. vendida</span><span>Ação</span><span>Qtd.</span><span>Unitário</span><span>Total</span></div>
+                  <div id="returnItemsList" class="return-empty">
+                    <span>□</span>
+                    <strong>Nenhuma venda selecionada</strong>
+                    <small>Busque uma venda para visualizar os itens.</small>
+                  </div>
+                </div>
+                <div class="return-warning"><strong>Atenção</strong><span>Verifique a política de trocas e devoluções da loja antes de confirmar a operação.</span></div>
+              </form>
+            </div>
+            <div class="return-right">
+              <div class="return-info"><strong>Importante</strong><span>A devolução gera um estorno conforme a forma de pagamento original.</span></div>
+              <section class="return-reason-card">
+                <strong>3. Motivo</strong>
+                <label class="field">Motivo da devolução/troca *
+                  <select id="returnReason" required>
+                    <option value="">Selecione o motivo</option>
+                    <option>Troca de tamanho</option>
+                    <option>Troca de cor</option>
+                    <option>Defeito no produto</option>
+                    <option>Desistência da compra</option>
+                    <option>Outro</option>
+                  </select>
+                </label>
+                <label class="field">Observação (opcional)<textarea id="returnNotes" placeholder="Digite uma observação..."></textarea></label>
+              </section>
+              <section class="return-summary">
+                <strong>Resumo</strong>
+                <div><span>Total da devolução</span><b id="returnTotalLabel">R$ 0,00</b></div>
+                <div><span>Descontos</span><b>R$ 0,00</b></div>
+                <div class="return-refund"><span>Valor a estornar</span><b id="returnRefundLabel">R$ 0,00</b></div>
+              </section>
+              <div class="return-actions">
+                <button class="ghost" type="button" onclick="document.getElementById('returnForm').reset()">Limpar</button>
+                <button class="primary" form="returnForm" type="submit">Registrar devolução/troca</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+      <section id="recebimento-venda" class="subtab-panel">
+        <section class="panel manual-receipt-panel">
+          <div class="manual-receipt-grid">
+            <div class="manual-receipt-left">
+              <div class="section-title stacked"><div><h2>Registrar recebimento manual</h2><p>Informe os valores recebidos no crédito e débito. Utilize esta opção para registrar os valores que entraram na conta.</p></div></div>
+              <form id="manualReceiptForm" class="manual-receipt-form">
+                <section class="manual-box">
+                  <strong>1. Informações gerais</strong>
+                  <div class="manual-general-grid">
+                    <label class="field">Data do recebimento<input id="manualReceiptDate" type="date" required></label>
+                    <label class="field span-2">Descrição (opcional)<input id="manualReceiptDescription" type="text" placeholder="Ex.: Recebimentos de vendas no cartão"></label>
+                    <label class="field">Responsável<select id="manualReceiptUser"><option>Administrador</option></select></label>
+                  </div>
+                </section>
+                <section class="manual-box">
+                  <strong>2. Valores recebidos</strong>
+                  <div class="manual-values-grid">
+                    <label class="field manual-value-card">Crédito<input id="manualCreditAmount" type="number" min="0" step="0.01" value="0"><small>Valor líquido que entrou na conta.</small></label>
+                    <label class="field manual-value-card">Débito<input id="manualDebitAmount" type="number" min="0" step="0.01" value="0"><small>Valor líquido que entrou na conta.</small></label>
+                  </div>
+                </section>
+              </form>
+            </div>
+            <div class="manual-receipt-right">
+              <div class="return-info"><strong>Importante</strong><span>Informe apenas os valores que realmente entraram na conta, já considerando as taxas cobradas.</span></div>
+              <section class="return-summary">
+                <strong>Resumo do recebimento</strong>
+                <div><span>Total Crédito</span><b id="manualCreditSummary">R$ 0,00</b></div>
+                <div><span>Total Débito</span><b id="manualDebitSummary">R$ 0,00</b></div>
+                <div class="return-refund"><span>Total a registrar</span><b id="manualReceiptTotal">R$ 0,00</b></div>
+              </section>
+              <div class="return-warning"><strong>Atenção</strong><span>Ao confirmar, os valores informados serão registrados no caixa e estarão disponíveis nos relatórios de recebimentos.</span></div>
+              <div class="return-actions">
+                <button class="ghost" type="button" onclick="document.getElementById('manualReceiptForm').reset(); document.getElementById('manualReceiptForm').dispatchEvent(new Event('input', { bubbles: true }))">Limpar</button>
+                <button class="primary" form="manualReceiptForm" type="submit">Registrar recebimento</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+      <section id="historico-vendas" class="subtab-panel">
+        <section class="panel sale-history-panel">
+          <div class="section-title stacked">
+            <div>
+              <h2>Histórico de vendas</h2>
+              <p>Busque um cliente ou venda simples para consultar compras e pagamentos.</p>
+            </div>
+          </div>
+          <div class="sale-history-layout">
+            <div class="sale-history-client-box">
+              <label class="search-field">
+                <span>Buscar cliente</span>
+                <input id="saleHistorySearch" type="search" placeholder="Buscar por nome do cliente...">
+              </label>
+              <div id="saleHistoryClients" class="sale-history-clients empty">Nenhum cliente encontrado.</div>
+            </div>
+            <div class="sale-history-detail">
+              <div id="saleHistorySummary" class="sale-history-summary empty">
+                <strong>Selecione um cliente</strong>
+                <span>As compras e pagamentos aparecerão aqui.</span>
+              </div>
+              <div id="saleHistorySales" class="sale-history-sales empty">Nenhuma venda selecionada.</div>
+            </div>
+          </div>
+        </section>
+      </section>
+      <section id="cancelar-venda" class="subtab-panel">
+        <section class="panel cancel-sale-panel">
+          <div class="section-title stacked">
+            <div>
+              <h2>Cancelar venda</h2>
+              <p>Localize a venda que deseja cancelar completamente. Esta ação não poderá ser desfeita.</p>
+            </div>
+          </div>
+          <div class="cancel-filter-row">
+            <label class="search-field">
+              <span>Buscar</span>
+              <input id="cancelSaleSearch" type="search" placeholder="Buscar venda por número, cliente ou CPF...">
+            </label>
+            <button class="ghost cancel-filter-button" type="button">Filtros</button>
+            <div class="cancel-date-range">
+              <input id="cancelSaleDate" type="date">
+              <span>-</span>
+              <input id="cancelSaleEndDate" type="date">
+            </div>
+          </div>
+          <div id="cancelSaleList" class="cancel-sale-list empty">Nenhuma venda.</div>
+          <div id="cancelSaleFooter" class="cancel-sale-footer"></div>
+        </section>
+      </section>
+    </section>
+
+    <section id="crediario" class="tab-panel">
+      <div class="page-head">
+        <div>
+          <h2>Crediário</h2>
+          <p>Gerencie clientes, parcelas e recebimentos do crediário.</p>
+        </div>
+        <button id="creditNewCustomerButton" class="primary credit-new-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg></span>Novo cliente</button>
+      </div>
+      <section class="panel credit-summary-panel">
+        <div class="credit-search-box">
+          <label class="search-field">
+            <span>Buscar</span>
+            <input id="creditCustomerSearch" type="search" placeholder="Buscar por nome, telefone ou CPF...">
+          </label>
+        </div>
+        <div class="credit-kpis">
+          <article><span class="blue"><svg viewBox="0 0 24 24"><path d="M8 4h8v16H8z"></path><path d="M5 8h3"></path><path d="M16 8h3"></path><path d="M11 12h2"></path></svg></span><small>A receber</small><strong id="creditOpenTotal">R$ 0,00</strong><em id="creditOpenCount">0 parcelas</em></article>
+          <article><span class="green"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="3"></rect><path d="m9 12 2 2 4-5"></path></svg></span><small>Em dia</small><strong id="creditDueTotal">R$ 0,00</strong><em id="creditDueCount">0 parcelas</em></article>
+          <article><span class="orange"><svg viewBox="0 0 24 24"><path d="M12 4 4 20h16L12 4Z"></path><path d="M12 10v4"></path><path d="M12 17h.01"></path></svg></span><small>Atrasadas</small><strong id="creditOverdueTotal">R$ 0,00</strong><em id="creditOverdueCount">0 parcelas</em></article>
+        </div>
+      </section>
+      <section class="panel credit-table-panel">
+        <div class="section-title tight"><h2>Clientes</h2></div>
+        <div class="credit-table-wrap">
+          <table class="credit-table">
+            <thead>
+              <tr>
+                <th>Cliente</th>
+                <th>Limite</th>
+                <th>Saldo devedor</th>
+                <th>Parcelas</th>
+                <th>Situação</th>
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody id="creditCustomerList"></tbody>
+          </table>
+        </div>
+        <div id="creditFooter" class="credit-footer"></div>
+      </section>
+    </section>
+
+    <section id="contas" class="tab-panel">
+      <div class="page-head">
+        <div>
+          <h2>Contas a pagar</h2>
+          <p>Gerencie suas contas a pagar de forma simples e organizada.</p>
+        </div>
+        <button id="payableNewButton" class="primary payable-new-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg></span>Nova conta a pagar</button>
+      </div>
+      <div class="payable-kpis">
+        <article><span class="blue"><svg viewBox="0 0 24 24"><path d="M5 7h14v12H5z"></path><path d="M8 7V5h8v2"></path><path d="M9 13h6"></path></svg></span><div><small>Total a pagar</small><strong id="payableTotalOpen">R$ 0,00</strong><em id="payableTotalCount">0 contas</em></div></article>
+        <article><span class="green"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"></rect><path d="M8 3v4"></path><path d="M16 3v4"></path><path d="M5 10h14"></path></svg></span><div><small>Vencidas</small><strong id="payableOverdueTotal">R$ 0,00</strong><em id="payableOverdueCount">0 contas</em></div></article>
+        <article><span class="orange"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M12 7v5l3 2"></path></svg></span><div><small>Vencem hoje</small><strong id="payableTodayTotal">R$ 0,00</strong><em id="payableTodayCount">0 contas</em></div></article>
+        <article><span class="purple"><svg viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"></rect><path d="M8 3v4"></path><path d="M16 3v4"></path><path d="M9 14h6"></path></svg></span><div><small>A vencer</small><strong id="payableFutureTotal">R$ 0,00</strong><em id="payableFutureCount">0 contas</em></div></article>
+      </div>
+      <section id="payableFormPanel" class="panel payable-form-panel" hidden>
+        <form id="payableForm" class="payable-form-grid">
+          <label class="field">Fornecedor<input id="payableSupplier" list="supplierOptions" required></label>
+          <label class="field">Categoria despesa<input id="payableCategory" type="text" required></label>
+          <label class="field">Valor<input id="payableAmount" type="number" min="0.01" step="0.01" required></label>
+          <label class="field">Data emissão<input id="payableIssue" type="date" required></label>
+          <label class="field">Vencimento<input id="payableDue" type="date" required></label>
+          <label class="field span-2">Observações<input id="payableNotes" type="text"></label>
+          <button class="primary" type="submit">Adicionar</button>
+        </form>
+      </section>
+      <section class="panel payable-filter-panel">
+        <div class="payable-filter-grid">
+          <label class="search-field payable-search"><span>Busca</span><input id="payableSearch" type="search" placeholder="Buscar por fornecedor, categoria ou descrição..."></label>
+          <label class="field">Categoria de despesa<select id="payableCategoryFilter"><option value="all">Todas</option></select></label>
+          <label class="field">Status<select id="payableFilter"><option value="all">Todos</option><option value="open">Vencidas e pendentes</option><option value="pending">A vencer</option><option value="today">Vence hoje</option><option value="overdue">Vencida</option><option value="paid">Pago</option></select></label>
+          <label class="field">Início<input id="payableStart" type="date"></label>
+          <label class="field">Fim<input id="payableEnd" type="date"></label>
+        </div>
+      </section>
+      <section class="panel payable-table-panel">
+        <div class="section-title tight"><h2>Todas as contas</h2><span id="payableFoundCount" class="muted-count">0 contas encontradas</span></div>
+        <div class="payable-table-wrap">
+          <table class="payable-table">
+            <thead><tr><th>Fornecedor</th><th>Categoria</th><th>Descrição</th><th>Vencimento</th><th>Valor</th><th>Status</th><th>Ações</th></tr></thead>
+            <tbody id="payableList"></tbody>
+          </table>
+        </div>
+        <div id="payableFooter" class="payable-footer"></div>
+      </section>
+    </section>
+
+    <section id="caixa" class="tab-panel">
+      <div class="page-head">
+        <div>
+          <h2>Caixa</h2>
+          <p>Acompanhe as movimentações e o saldo do caixa em tempo real.</p>
+        </div>
+        <div class="cash-head-actions">
+          <button id="cashClosingButton" class="ghost bank-account-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6z"></path><path d="M9 7h6"></path><path d="M9 11h6"></path><path d="M9 15h3"></path></svg></span>Fechamento</button>
+          <button id="bankAccountButton" class="ghost bank-account-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 10h16"></path><path d="M6 10V8l6-4 6 4v2"></path><path d="M7 10v8"></path><path d="M12 10v8"></path><path d="M17 10v8"></path><path d="M5 18h14"></path></svg></span>Conta bancária</button>
+          <button id="cashMovementButton" class="primary cash-movement-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="3"></rect><path d="M8 10h8"></path><path d="M8 14h4"></path></svg></span>Movimentação</button>
+        </div>
+      </div>
+      <div class="cash-kpis">
+        <article><span class="green"><svg viewBox="0 0 24 24"><path d="M5 7h14v12H5z"></path><path d="M8 7V5h8v2"></path><circle cx="17" cy="13" r="1.5"></circle></svg></span><div><small>Total em caixa</small><strong id="cashTotal">R$ 0,00</strong><em>Saldo atual disponível</em></div></article>
+        <article><span class="blue"><svg viewBox="0 0 24 24"><path d="M12 4v16"></path><path d="m6 14 6 6 6-6"></path></svg></span><div><small>Entradas hoje</small><strong id="cashInToday">R$ 0,00</strong><em>Total de entradas</em></div></article>
+        <article><span class="pink"><svg viewBox="0 0 24 24"><path d="M12 20V4"></path><path d="m6 10 6-6 6 6"></path></svg></span><div><small>Saídas hoje</small><strong id="cashOutToday">R$ 0,00</strong><em>Total de saídas</em></div></article>
+      </div>
+      <section id="cashMovementPanel" class="panel cash-movement-panel" hidden>
+        <form id="cashMovementForm" class="cash-movement-form">
+          <label class="field">Tipo<select id="cashMovementType"><option value="in">Entrada</option><option value="out">Saída</option></select></label>
+          <label class="field">Descrição<input id="cashMovementDescription" type="text" required></label>
+          <label class="field">Forma<select id="cashMovementMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option></select></label>
+          <label class="field">Valor<input id="cashMovementAmount" type="number" min="0.01" step="0.01" required></label>
+          <button class="primary" type="submit">Registrar</button>
+        </form>
+      </section>
+      <section id="bankAccountPanel" class="panel bank-account-panel" hidden>
+        <div class="section-title tight">
+          <div>
+            <h2>Entrada em conta bancária</h2>
+            <p>Registre manualmente os valores recebidos no banco por vendas no crédito ou débito.</p>
+          </div>
+        </div>
+        <form id="bankAccountForm" class="bank-account-form">
+          <label class="field">Data da entrada<input id="bankAccountDate" type="date" required></label>
+          <label class="field span-2">Descrição<input id="bankAccountDescription" type="text" placeholder="Ex: Recebimento da maquininha" required></label>
+          <label class="field">Crédito recebido<input id="bankCreditAmount" type="number" min="0" step="0.01" value="0"></label>
+          <label class="field">Débito recebido<input id="bankDebitAmount" type="number" min="0" step="0.01" value="0"></label>
+          <button class="primary" type="submit">Registrar entrada</button>
+        </form>
+      </section>
+      <section id="cashClosingPanel" class="panel cash-closing-panel" hidden>
+        <div class="section-title tight">
+          <div>
+            <h2>Fechamento de caixa</h2>
+            <p>Confira o dinheiro físico esperado e registre o valor informado pelo operador.</p>
+          </div>
+        </div>
+        <form id="cashClosingForm" class="cash-closing-form">
+          <label class="field">Data do fechamento<input id="cashClosingDate" type="date" required></label>
+          <label class="field">Dinheiro informado<input id="cashClosingInformed" type="number" min="0" step="0.01" value="0"></label>
+          <label class="field span-2">Observação<input id="cashClosingNotes" type="text" placeholder="Ex: diferença conferida, sangria pendente..."></label>
+          <div class="cash-closing-summary">
+            <article><span>Dinheiro esperado</span><strong id="cashClosingExpected">R$ 0,00</strong></article>
+            <article><span>Diferença</span><strong id="cashClosingDifference">R$ 0,00</strong></article>
+            <article><span>Saldo total</span><strong id="cashClosingTotalBalance">R$ 0,00</strong></article>
+          </div>
+          <button class="primary" type="submit">Registrar fechamento</button>
+        </form>
+      </section>
+      <section class="panel cash-filter-panel">
+        <h2>Filtros</h2>
+        <div class="cash-filter-grid">
+          <label class="field">Início<input id="cashStart" type="date"></label>
+          <label class="field">Fim<input id="cashEnd" type="date"></label>
+          <label class="field">Forma de pagamento<select id="cashMethodFilter"><option value="all">Todas</option><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="card">Cartão</option></select></label>
+          <label class="field">Tipo de movimentação<select id="cashTypeFilter"><option value="all">Todos</option><option value="in">Entrada</option><option value="out">Saída</option></select></label>
+        </div>
+      </section>
+      <section class="panel cash-timeline-panel">
+        <div class="section-title tight">
+          <h2>Linha do tempo</h2>
+          <button class="ghost cash-export-button" type="button">Exportar relatório</button>
+        </div>
+        <div id="cashTimeline" class="cash-timeline empty">Nenhuma movimentação.</div>
+        <div id="cashFooter" class="cash-footer"></div>
+      </section>
+      <section class="panel cash-closing-list-panel">
+        <div class="section-title tight"><h2>Fechamentos registrados</h2></div>
+        <div id="cashClosingList" class="cash-closing-list empty">Nenhum fechamento registrado.</div>
+      </section>
+    </section>
+
+    <section id="cartoes" class="tab-panel">
+      <section class="panel">
+        <div class="section-title"><h2>Receber cartoes</h2></div>
+        <form id="cardReceiptForm" class="grid-form">
+          <label class="field">Valor entrada<input id="cardReceiptAmount" type="number" min="0.01" step="0.01" required></label>
+          <label class="field span-2">Descrição<input id="cardReceiptDescription" type="text" placeholder="Conta Sicoob, Cartão Ana..." required></label>
+          <button class="primary" type="submit">Lancar no caixa</button>
+        </form>
+        <div id="cardPendingList" class="table-list empty">Nenhum cartao pendente.</div>
+      </section>
+    </section>
+
+    <section id="relatorios" class="tab-panel">
+      <section class="panel">
+        <div class="section-title"><h2>Relatórios</h2><div class="inline-filters"><label class="field">Início<input id="reportStart" type="date"></label><label class="field">Fim<input id="reportEnd" type="date"></label></div></div>
+        <div id="reportsList" class="report-grid"></div>
+      </section>
+    </section>
+
+    <section id="configuracoes" class="tab-panel admin-only">
+      <div class="page-head">
+        <div>
+          <h2>Configurações</h2>
+          <p>Gerencie recursos administrativos do sistema.</p>
+        </div>
+        <div class="page-actions">
+          <button id="refreshDatabaseButton" class="ghost" type="button">Verificar banco</button>
+          <button id="refreshBackupsButton" class="ghost" type="button">Atualizar</button>
+          <button id="createBackupButton" class="primary" type="button">Criar backup</button>
+        </div>
+      </div>
+      <section class="panel database-panel">
+        <div class="section-title tight">
+          <h2>Saúde do banco</h2>
+          <span id="databaseStatusText" class="backup-status">Nenhuma verificação carregada.</span>
+        </div>
+        <div id="databaseStatusList" class="database-status-grid empty">Nenhuma informação carregada.</div>
+      </section>
+      <section class="panel backup-panel">
+        <div class="section-title tight">
+          <h2>Backups do banco</h2>
+          <span id="backupStatus" class="backup-status">Nenhum backup carregado.</span>
+        </div>
+        <div id="backupList" class="backup-list empty">Nenhum backup encontrado.</div>
+      </section>
+      <section class="panel audit-panel">
+        <div class="section-title stacked">
+          <h2>Auditoria do sistema</h2>
+          <p>Consulte as principais alterações feitas por usuários no sistema.</p>
+        </div>
+        <div class="audit-toolbar">
+          <label class="search-field">
+            Buscar
+            <input id="auditSearch" type="search" placeholder="Buscar por usuário, item ou detalhe...">
+          </label>
+          <label class="field">
+            Módulo
+            <select id="auditModuleFilter">
+              <option value="">Todos</option>
+              <option value="auth">Autenticação</option>
+              <option value="product">Produtos</option>
+              <option value="customer">Clientes</option>
+              <option value="supplier">Fornecedores</option>
+              <option value="brand">Marcas</option>
+              <option value="category">Categorias</option>
+              <option value="user">Usuários</option>
+              <option value="sale">Vendas</option>
+              <option value="return">Devoluções</option>
+              <option value="cash">Caixa</option>
+              <option value="card_receipt">Recebimentos de cartão</option>
+              <option value="receivable">Crediário</option>
+              <option value="payable">Contas a pagar</option>
+              <option value="backup">Backups</option>
+              <option value="product_photo">Fotos de produtos</option>
+              <option value="state">Estado geral</option>
+            </select>
+          </label>
+          <label class="field">
+            Ação
+            <select id="auditActionFilter">
+              <option value="">Todas</option>
+              <option value="create">Criação</option>
+              <option value="update">Edição</option>
+              <option value="delete">Exclusão</option>
+              <option value="pay">Pagamento</option>
+              <option value="cancel">Cancelamento</option>
+              <option value="upload">Upload</option>
+              <option value="replace">Substituição</option>
+            </select>
+          </label>
+          <label class="field">
+            Limite
+            <select id="auditLimit">
+              <option value="50">50</option>
+              <option value="100" selected>100</option>
+              <option value="200">200</option>
+              <option value="500">500</option>
+            </select>
+          </label>
+          <button id="refreshAuditButton" class="ghost" type="button">Atualizar</button>
+        </div>
+        <div class="section-title tight">
+          <h2>Histórico recente</h2>
+          <span id="auditStatus" class="backup-status">Nenhum registro carregado.</span>
+        </div>
+        <div id="auditList" class="audit-list empty">Nenhum registro encontrado.</div>
+      </section>
+    </section>
+  </main>
+    </div>
+  </div>
+
+  <datalist id="brandOptions"></datalist>
+  <datalist id="categoryOptions"></datalist>
+  <datalist id="customerOptions"></datalist>
+  <datalist id="productOptions"></datalist>
+  <datalist id="saleOptions"></datalist>
+  <datalist id="supplierOptions"></datalist>
+
+  <div id="creditReceiveModal" class="modal-backdrop" hidden>
+    <form id="creditReceiveForm" class="modal-panel credit-receive-modal">
+      <input id="creditReceiveCustomerId" type="hidden">
+      <div class="modal-head">
+        <div>
+          <h2>Receber crediário</h2>
+          <p id="creditReceiveCustomerName">Cliente</p>
+        </div>
+        <button id="creditReceiveCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div class="credit-receive-summary">
+        <span>Saldo em aberto</span>
+        <strong id="creditReceiveOpenTotal">R$ 0,00</strong>
+      </div>
+      <div id="creditReceiveList" class="credit-receive-list"></div>
+      <div class="credit-receive-fields">
+        <label class="field">Data do pagamento<input id="creditReceiveDate" type="date" required></label>
+        <label class="field">Forma de pagamento<select id="creditReceiveMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+        <label class="field span-2">Observação<input id="creditReceiveNote" type="text" placeholder="Opcional"></label>
+      </div>
+      <div class="credit-receive-total">
+        <span>Total a receber</span>
+        <strong id="creditReceiveTotal">R$ 0,00</strong>
+      </div>
+      <div class="modal-actions">
+        <button id="creditReceiveCancelButton" class="ghost" type="button">Cancelar</button>
+        <button class="primary credit-receive-submit" type="submit">Confirmar recebimento</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="loginScreen" class="login-screen">
+    <form id="loginForm" class="login-panel">
+      <h2>Entrar no Mova Sports</h2>
+      <label class="field">Usuário<input id="loginUser" type="text" value="admin" autocomplete="username" required></label>
+      <label class="field">Senha<input id="loginPassword" type="password" value="1234" autocomplete="current-password" required></label>
+      <p id="loginMessage" class="value-bad" hidden></p>
+      <button class="primary" type="submit">Entrar</button>
+    </form>
+  </div>
+
+  <script src="script.js?v=20260706-7"></script>
+</body>
+</html>
+

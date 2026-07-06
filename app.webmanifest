@@ -1,0 +1,19 @@
+{
+  "name": "Gestao Loja Feminina",
+  "short_name": "Loja",
+  "description": "Gestao de loja feminina com vendas, estoque, caixa, conciliacao e relatorios.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef1f5",
+  "theme_color": "#24384f",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+# Mova Sports - Versao Web Local
+
+Esta versao roda em um servidor Flask e salva os dados no banco SQLite `loja.db`.
+
+## Rodar
+
+```powershell
+pip install -r requirements.txt
+python server.py
+```
+
+Acesse:
+
+```text
+http://127.0.0.1:5005
+```
+
+Tambem e possivel alterar host e porta:
+
+```powershell
+$env:HOST="0.0.0.0"
+$env:PORT="5005"
+python server.py
+```
+
+## Usuario inicial
+
+Em desenvolvimento, se nada for configurado, o sistema cria:
+
+```text
+usuario: admin
+senha: 1234
+```
+
+Para alterar o administrador inicial antes de criar o banco:
+
+```powershell
+$env:MOVA_ADMIN_NAME="Administrador"
+$env:MOVA_ADMIN_LOGIN="admin"
+$env:MOVA_ADMIN_PASSWORD="uma-senha-forte"
+python server.py
+```
+
+## Producao
+
+Em producao, configure obrigatoriamente:
+
+```powershell
+$env:APP_ENV="production"
+$env:MOVA_SECRET_KEY="uma-chave-grande-com-pelo-menos-32-caracteres"
+$env:MOVA_ADMIN_PASSWORD="uma-senha-forte"
+python server.py
+```
+
+Regras aplicadas em producao:
+
+- `MOVA_SECRET_KEY` precisa ter pelo menos 32 caracteres.
+- `MOVA_ADMIN_PASSWORD` precisa ter pelo menos 8 caracteres e nao pode ser uma senha comum.
+- Cookie de sessao usa `Secure`, `HttpOnly` e `SameSite=Lax`.
+- O sistema bloqueia temporariamente excesso de tentativas de login.
+- Headers basicos de seguranca sao enviados em todas as respostas.
+
+Opcional:
+
+```powershell
+$env:MOVA_DB="C:\caminho\para\loja.db"
+$env:MOVA_ADMIN_LOGIN="admin"
+$env:MOVA_ADMIN_NAME="Administrador"
+$env:MOVA_SESSION_HOURS="12"
+$env:MOVA_LOGIN_ATTEMPTS="5"
+$env:MOVA_LOGIN_WINDOW_SECONDS="900"
+```
+
+## Deploy web
+
+Para hospedar em uma plataforma web Linux, use:
+
+```text
+gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+```
+
+O projeto tambem possui `Procfile` com esse comando, usado por varias plataformas.
+
+Variaveis recomendadas para deploy:
+
+```text
+APP_ENV=production
+MOVA_SECRET_KEY=uma-chave-grande-com-pelo-menos-32-caracteres
+MOVA_ADMIN_LOGIN=admin
+MOVA_ADMIN_NAME=Administrador
+MOVA_ADMIN_PASSWORD=uma-senha-forte
+MOVA_DB=/var/data/loja.db
+MOVA_BACKUP_DIR=/var/data/backups
+MOVA_UPLOAD_DIR=/var/data/uploads
+MOVA_DB_BUSY_TIMEOUT_MS=5000
+```
+
+Enquanto o sistema usar SQLite, mantenha `--workers 1`. Para muitas lojas, muitos acessos simultaneos ou uso pesado, o proximo passo tecnico e migrar o banco para PostgreSQL.
+
+Para Railway, este projeto possui:
+
+- `railway.json`, com comando de start e healthcheck;
+- `.railwayignore`, para nao enviar banco local, backups e uploads;
+- `RAILWAY.md`, com o passo a passo de deploy.
+
+## Dados
+
+Quando aberto pelo servidor, o sistema sincroniza os dados com `loja.db`.
+Ao abrir o `index.html` direto, ele ainda usa o armazenamento local do navegador como fallback.
+
+## Banco de dados
+
+O sistema usa SQLite. Para uso web inicial, o servidor ativa:
+
+- `foreign_keys`;
+- `journal_mode=WAL`;
+- `synchronous=NORMAL`;
+- `busy_timeout`.
+
+O timeout pode ser configurado:
+
+```powershell
+$env:MOVA_DB_BUSY_TIMEOUT_MS="5000"
+```
+
+Administrador pode verificar integridade, tamanho, modo WAL e contagem de registros pela tela **Configurações > Saúde do banco**.
+
+## Backup
+
+Ao iniciar o servidor, o sistema cria no maximo um backup automatico por dia na pasta `backups`.
+
+Administrador tambem pode criar backup manual pela API:
+
+```text
+POST /api/backups
+```
+
+E listar backups:
+
+```text
+GET /api/backups
+```
+
+Para alterar a pasta:
+
+```powershell
+$env:MOVA_BACKUP_DIR="C:\backups-mova"
+```
+
+## Fotos de produtos
+
+As novas fotos de produtos enviadas pelo cadastro sao salvas em `uploads/products`.
+O banco guarda apenas a URL da imagem.
+
+Para alterar a pasta base dos uploads:
+
+```powershell
+$env:MOVA_UPLOAD_DIR="C:\uploads-mova"
+```

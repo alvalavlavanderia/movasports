@@ -19,6 +19,12 @@ UPLOAD_DIR = os.environ.get("MOVA_UPLOAD_DIR", os.path.join(APP_DIR, "uploads"))
 PRODUCT_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "products")
 ALLOWED_PRODUCT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024
+CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL", "").strip()
+CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip()
+CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY", "").strip()
+CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET", "").strip()
+CLOUDINARY_FOLDER = os.environ.get("CLOUDINARY_FOLDER", "mova-sports/products").strip() or "mova-sports/products"
+USE_CLOUDINARY = bool(CLOUDINARY_URL or (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET))
 DB_BUSY_TIMEOUT_MS = max(1000, int(float(os.environ.get("MOVA_DB_BUSY_TIMEOUT_MS", "5000") or 5000)))
 APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV == "production"
@@ -366,13 +372,41 @@ def save_product_image(file_storage) -> dict:
     file_storage.stream.seek(0)
     if size > MAX_PRODUCT_IMAGE_BYTES:
         raise ValueError("Imagem maior que 5MB.")
-    ensure_upload_dirs()
     extension = file_storage.filename.rsplit(".", 1)[-1].lower()
     base_name = secure_filename(file_storage.filename.rsplit(".", 1)[0]) or "produto"
+    file_storage.stream.seek(0)
+    if USE_CLOUDINARY:
+        try:
+            import cloudinary
+            import cloudinary.uploader
+        except ImportError as exc:
+            raise ValueError("Cloudinary nao instalado. Verifique requirements.txt e refaca o deploy.") from exc
+        config = {"secure": True}
+        if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
+            config.update({
+                "cloud_name": CLOUDINARY_CLOUD_NAME,
+                "api_key": CLOUDINARY_API_KEY,
+                "api_secret": CLOUDINARY_API_SECRET,
+            })
+        cloudinary.config(**config)
+        result = cloudinary.uploader.upload(
+            file_storage.stream,
+            folder=CLOUDINARY_FOLDER,
+            public_id=f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}-{base_name}",
+            resource_type="image",
+            overwrite=False,
+        )
+        return {
+            "url": result.get("secure_url") or result.get("url", ""),
+            "filename": result.get("public_id", base_name),
+            "size": size,
+            "storage": "cloudinary",
+        }
+    ensure_upload_dirs()
     filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}-{base_name}.{extension}"
     path = os.path.join(PRODUCT_UPLOAD_DIR, filename)
     file_storage.save(path)
-    return {"url": f"/uploads/products/{filename}", "filename": filename, "size": os.path.getsize(path)}
+    return {"url": f"/uploads/products/{filename}", "filename": filename, "size": os.path.getsize(path), "storage": "local"}
 
 
 def initial_admin_user() -> dict:

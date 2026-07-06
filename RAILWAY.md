@@ -70,4 +70,22 @@ Depois entre no sistema com o login configurado em `MOVA_ADMIN_LOGIN` e `MOVA_AD
 
 O PostgreSQL resolve a persistencia dos cadastros, vendas e financeiro.
 
-Fotos enviadas ainda ficam no armazenamento do servidor. Para producao completa, o proximo passo e mover fotos para um servico externo, como Cloudinary, S3 ou similar.
+Para persistir fotos de produtos, configure Cloudinary no servico `web`.
+
+Variaveis aceitas:
+
+```text
+CLOUDINARY_URL=cloudinary://...
+CLOUDINARY_FOLDER=mova-sports/products
+```
+
+Ou, se preferir separar as credenciais:
+
+```text
+CLOUDINARY_CLOUD_NAME=seu-cloud-name
+CLOUDINARY_API_KEY=sua-api-key
+CLOUDINARY_API_SECRET=seu-api-secret
+CLOUDINARY_FOLDER=mova-sports/products
+```
+
+Quando essas variaveis existem, as novas fotos sao enviadas para o Cloudinary e o banco salva a URL publica da imagem. Sem essas variaveis, o sistema continua usando armazenamento local.

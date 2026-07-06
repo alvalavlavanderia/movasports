@@ -157,3 +157,12 @@ Para alterar a pasta base dos uploads:
 ```powershell
 $env:MOVA_UPLOAD_DIR="C:\uploads-mova"
 ```
+
+Em producao, configure Cloudinary para as fotos ficarem fora do servidor:
+
+```text
+CLOUDINARY_URL=cloudinary://...
+CLOUDINARY_FOLDER=mova-sports/products
+```
+
+Tambem e possivel usar `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` e `CLOUDINARY_API_SECRET` em vez de `CLOUDINARY_URL`.

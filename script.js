@@ -129,6 +129,7 @@ function bindEvents() {
   els.refreshBackupsButton.addEventListener("click", () => loadBackups(true));
   els.createBackupButton.addEventListener("click", createBackup);
   els.exportDataButton.addEventListener("click", exportSystemData);
+  els.importDataButton.addEventListener("click", importSystemData);
   els.refreshAuditButton.addEventListener("click", () => loadAuditLogs(true));
   ["auditSearch"].forEach((id) => els[id].addEventListener("input", renderAuditLogs));
   ["auditModuleFilter", "auditActionFilter", "auditLimit"].forEach((id) => els[id].addEventListener("input", () => loadAuditLogs(true)));
@@ -3182,6 +3183,46 @@ async function exportSystemData() {
     URL.revokeObjectURL(url);
   } catch {
     alert("Não foi possível conectar ao servidor para exportar os dados.");
+  }
+}
+
+async function importSystemData() {
+  if (!BACKEND_ENABLED || !isAdmin()) return;
+  const file = els.importDataFile.files?.[0];
+  const confirmation = els.importDataConfirmation.value.trim();
+  if (!file) return alert("Selecione um arquivo JSON exportado pelo sistema.");
+  if (confirmation !== "RESTAURAR") return alert("Digite RESTAURAR para confirmar a importação.");
+  const accepted = confirm("Esta ação substitui os dados atuais do sistema pelo arquivo selecionado. Deseja continuar?");
+  if (!accepted) return;
+  els.importDataButton.disabled = true;
+  els.importDataStatus.textContent = "Restaurando dados...";
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("confirmation", confirmation);
+    const response = await fetch("/api/import", { method: "POST", body: formData });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(payload.error || "Não foi possível restaurar os dados.");
+      els.importDataStatus.textContent = payload.error || "Falha na restauração.";
+      return;
+    }
+    const data = payload.data || {};
+    els.importDataFile.value = "";
+    els.importDataConfirmation.value = "";
+    els.importDataStatus.textContent = `Restauração concluída: ${data.products || 0} produtos, ${data.customers || 0} clientes e ${data.sales || 0} vendas.`;
+    backupsLoaded = false;
+    databaseStatusLoaded = false;
+    auditLogsLoaded = false;
+    await syncFromServer();
+    await loadDatabaseStatus(true);
+    await loadAuditLogs(true);
+  } catch (error) {
+    console.warn(error);
+    alert("Não foi possível conectar ao servidor para restaurar os dados.");
+    els.importDataStatus.textContent = "Falha de conexão durante a restauração.";
+  } finally {
+    els.importDataButton.disabled = false;
   }
 }
 

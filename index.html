@@ -788,6 +788,24 @@
         </div>
         <div id="backupList" class="backup-list empty">Nenhum backup encontrado.</div>
       </section>
+      <section class="panel restore-panel">
+        <div class="section-title stacked">
+          <h2>Restaurar dados</h2>
+          <p>Importe um arquivo JSON exportado pelo sistema. Esta ação substitui cadastros, vendas, caixa e financeiro atuais.</p>
+        </div>
+        <div class="restore-grid">
+          <label class="field">
+            Arquivo JSON
+            <input id="importDataFile" type="file" accept="application/json,.json">
+          </label>
+          <label class="field">
+            Confirmação
+            <input id="importDataConfirmation" type="text" placeholder="Digite RESTAURAR">
+          </label>
+          <button id="importDataButton" class="danger" type="button">Restaurar dados</button>
+        </div>
+        <span id="importDataStatus" class="backup-status">Nenhuma restauração executada.</span>
+      </section>
       <section class="panel audit-panel">
         <div class="section-title stacked">
           <h2>Auditoria do sistema</h2>
@@ -830,6 +848,8 @@
               <option value="pay">Pagamento</option>
               <option value="cancel">Cancelamento</option>
               <option value="upload">Upload</option>
+              <option value="export">Exportação</option>
+              <option value="import">Importação</option>
               <option value="replace">Substituição</option>
             </select>
           </label>

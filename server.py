@@ -2219,6 +2219,61 @@ def export_data_api():
     return response
 
 
+def normalize_import_payload(payload: dict) -> tuple[dict | None, str | None]:
+    source = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    if not isinstance(source, dict):
+        return None, "Arquivo de importacao invalido."
+    defaults = default_state()
+    imported = {}
+    for key, default_value in defaults.items():
+        if key == "users":
+            continue
+        value = source.get(key, default_value)
+        if not isinstance(value, list):
+            return None, f"O campo {key} deve ser uma lista."
+        imported[key] = value
+    current_state, _ = read_state()
+    imported["users"] = current_state.get("users") or defaults["users"]
+    return {**defaults, **imported}, None
+
+
+@app.post("/api/import")
+def import_data_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    confirmation = ""
+    payload = None
+    uploaded = request.files.get("file")
+    if uploaded:
+        confirmation = str(request.form.get("confirmation") or "").strip()
+        try:
+            payload = json.loads(uploaded.read().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return jsonify({"ok": False, "error": "Arquivo JSON invalido."}), 400
+    else:
+        body = request.get_json(silent=True) or {}
+        confirmation = str(body.get("confirmation") or "").strip()
+        payload = body.get("payload")
+    if confirmation != "RESTAURAR":
+        return jsonify({"ok": False, "error": "Digite RESTAURAR para confirmar a importacao."}), 400
+    state, error = normalize_import_payload(payload if isinstance(payload, dict) else {})
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    updated_at = write_state(state)
+    summary = {
+        "products": len(state.get("products", [])),
+        "customers": len(state.get("customers", [])),
+        "sales": len(state.get("sales", [])),
+        "cash": len(state.get("cash", [])),
+        "receivables": len(state.get("receivables", [])),
+        "payables": len(state.get("payables", [])),
+        "updatedAt": updated_at,
+    }
+    record_audit("import", "state", "manual-json", summary)
+    return jsonify({"ok": True, "data": summary})
+
+
 @app.post("/api/backups")
 def create_backup_api():
     _, error_response = require_admin()

@@ -927,16 +927,16 @@
   </div>
 
   <div id="loginScreen" class="login-screen">
-    <form id="loginForm" class="login-panel">
+    <form id="loginForm" class="login-panel" autocomplete="off">
       <h2>Entrar no Mova Sports</h2>
-      <label class="field">Usuário<input id="loginUser" type="text" value="admin" autocomplete="username" required></label>
-      <label class="field">Senha<input id="loginPassword" type="password" value="1234" autocomplete="current-password" required></label>
+      <label class="field">Usuário<input id="loginUser" type="text" autocomplete="off" required></label>
+      <label class="field">Senha<input id="loginPassword" type="password" autocomplete="off" required></label>
       <p id="loginMessage" class="value-bad" hidden></p>
       <button class="primary" type="submit">Entrar</button>
     </form>
   </div>
 
-  <script src="script.js?v=20260706-7"></script>
+  <script src="script.js?v=20260707-1"></script>
 </body>
 </html>
 

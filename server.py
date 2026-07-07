@@ -1374,6 +1374,80 @@ def write_state(state: dict) -> str:
     return updated_at
 
 
+def users_state_from_db(conn: sqlite3.Connection, store_id: str = "matriz") -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, name, login, role, active
+        FROM users
+        WHERE store_id = ?
+        ORDER BY name COLLATE NOCASE
+        """,
+        (store_id,),
+    ).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "login": row["login"],
+            "role": row["role"],
+            "active": bool(row["active"]),
+        }
+        for row in rows
+    ]
+
+
+def reset_business_data(store_id: str = "matriz") -> tuple[str, dict]:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        users = users_state_from_db(conn, store_id)
+        empty_state = {**default_state(), "users": users or default_state()["users"]}
+        conn.execute("DELETE FROM sale_return_items WHERE return_id IN (SELECT id FROM sale_returns WHERE store_id = ?)", (store_id,))
+        conn.execute("DELETE FROM sale_returns WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM cash_closings WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM cash_movements WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM receivable_payments WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM receivables WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM payables WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM sale_payments WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)", (store_id,))
+        conn.execute("DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)", (store_id,))
+        conn.execute("DELETE FROM sales WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM products WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM customers WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM suppliers WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM brands WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM categories WHERE store_id = ?", (store_id,))
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(empty_state, ensure_ascii=False), updated_at),
+        )
+        record_audit(
+            "reset",
+            "state",
+            "app_state",
+            {"updatedAt": updated_at, "preservedUsers": len(empty_state["users"])},
+            conn,
+        )
+    return updated_at, {
+        "products": 0,
+        "customers": 0,
+        "suppliers": 0,
+        "brands": 0,
+        "categories": 0,
+        "sales": 0,
+        "receivables": 0,
+        "payables": 0,
+        "cash": 0,
+        "cashClosings": 0,
+        "returns": 0,
+        "users": len(empty_state["users"]),
+    }
+
+
 def normalize_product_payload(payload: dict, existing: dict | None = None) -> dict:
     now = utc_now()
     existing = existing or {}
@@ -2307,6 +2381,20 @@ def import_data_api():
         "updatedAt": updated_at,
     }
     record_audit("import", "state", "manual-json", summary)
+    return jsonify({"ok": True, "data": summary})
+
+
+@app.post("/api/reset")
+def reset_data_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    payload = request.get_json(silent=True) or {}
+    confirmation = str(payload.get("confirmation") or "").strip()
+    if confirmation != "ZERAR":
+        return jsonify({"ok": False, "error": "Digite ZERAR para confirmar a limpeza do sistema."}), 400
+    updated_at, summary = reset_business_data()
+    summary["updatedAt"] = updated_at
     return jsonify({"ok": True, "data": summary})
 
 

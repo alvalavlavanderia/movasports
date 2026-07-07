@@ -130,6 +130,7 @@ function bindEvents() {
   els.createBackupButton.addEventListener("click", createBackup);
   els.exportDataButton.addEventListener("click", exportSystemData);
   els.importDataButton.addEventListener("click", importSystemData);
+  els.resetDataButton.addEventListener("click", resetSystemData);
   els.refreshAuditButton.addEventListener("click", () => loadAuditLogs(true));
   els.changePasswordForm.addEventListener("submit", changePassword);
   ["auditSearch"].forEach((id) => els[id].addEventListener("input", renderAuditLogs));
@@ -3353,6 +3354,47 @@ async function importSystemData() {
   }
 }
 
+async function resetSystemData() {
+  if (!BACKEND_ENABLED || !isAdmin()) return;
+  const confirmation = els.resetDataConfirmation.value.trim();
+  if (confirmation !== "ZERAR") return alert("Digite ZERAR para confirmar a limpeza do sistema.");
+  const accepted = confirm("Esta ação apaga cadastros, vendas, caixa e financeiro. Usuários serão mantidos. Deseja continuar?");
+  if (!accepted) return;
+  els.resetDataButton.disabled = true;
+  els.resetDataStatus.textContent = "Exportando dados atuais antes de zerar...";
+  try {
+    await exportSystemData();
+    els.resetDataStatus.textContent = "Zerando sistema...";
+    const response = await fetch("/api/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(payload.error || "Não foi possível zerar o sistema.");
+      els.resetDataStatus.textContent = payload.error || "Falha ao zerar sistema.";
+      return;
+    }
+    els.resetDataConfirmation.value = "";
+    els.resetDataStatus.textContent = "Sistema zerado. Usuários e auditoria foram preservados.";
+    backupsLoaded = false;
+    databaseStatusLoaded = false;
+    auditLogsLoaded = false;
+    selectedSaleHistoryKey = "";
+    cart = [];
+    await syncFromServer();
+    await loadDatabaseStatus(true);
+    await loadAuditLogs(true);
+  } catch (error) {
+    console.warn(error);
+    alert("Não foi possível conectar ao servidor para zerar o sistema.");
+    els.resetDataStatus.textContent = "Falha de conexão durante a limpeza.";
+  } finally {
+    els.resetDataButton.disabled = false;
+  }
+}
+
 async function changePassword(event) {
   event.preventDefault();
   if (!BACKEND_ENABLED) return alert("Alteração de senha exige servidor ativo.");
@@ -3502,6 +3544,7 @@ function auditActionLabel(action) {
     cancel: "Cancelou",
     upload: "Enviou arquivo",
     replace: "Substituiu dados",
+    reset: "Zerou sistema",
   };
   return labels[action] || action || "Alterou";
 }

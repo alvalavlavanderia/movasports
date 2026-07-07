@@ -3547,6 +3547,8 @@ def create_cash_movement_api():
         return jsonify({"ok": False, "error": "Valor deve ser maior que zero."}), 400
     if not movement["description"]:
         return jsonify({"ok": False, "error": "Descrição é obrigatória."}), 400
+    if movement["direction"] == "out" and movement["type"] in {"", "manual"}:
+        return jsonify({"ok": False, "error": "Tipo de despesa obrigatorio para saidas."}), 400
     sync_cash_movements_to_state([movement])
     record_audit("create", "cash", movement["id"], {"movement": movement})
     return jsonify({"ok": True, "data": {"cash": [movement], "receivables": []}}), 201

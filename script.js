@@ -7,6 +7,7 @@ OLD_KEYS.forEach((key) => localStorage.removeItem(key));
 const todayIso = toDateInput(new Date());
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 const paymentLabels = { cash: "Dinheiro", pix: "PIX", debit: "Débito", credit: "Crédito", storeCredit: "Crediário" };
+const cashExpenseTypes = ["Gasolina", "Lanche", "Estacionamento", "Motoboy", "Material de limpeza", "Pequenas compras", "Correios", "Outros"];
 const BACKEND_ENABLED = location.protocol !== "file:";
 const STATE_API_URL = "/api/state";
 const MODULE_API_ENDPOINTS = {
@@ -66,6 +67,7 @@ function bindEvents() {
   document.querySelectorAll(".tab-button").forEach((button) => button.addEventListener("click", () => activateTab(button.dataset.tab)));
   document.querySelectorAll(".subtab").forEach((button) => button.addEventListener("click", () => activateSubtab(button.dataset.subtab)));
   document.querySelectorAll(".cadastro-card").forEach((button) => button.addEventListener("click", () => activateSubtab(button.dataset.subtab)));
+  populateCashExpenseFilter();
   ["cashStart", "cashEnd", "reportStart", "reportEnd", "manualReceiptDate", "cancelSaleDate", "cancelSaleEndDate", "creditReceiveDate", "payableStart", "payableEnd", "bankAccountDate", "cashClosingDate"].forEach((id) => els[id].value = todayIso);
 
   els.loginForm.addEventListener("submit", login);
@@ -123,6 +125,7 @@ function bindEvents() {
   els.bankAccountButton.addEventListener("click", () => els.bankAccountPanel.hidden = !els.bankAccountPanel.hidden);
   els.bankAccountForm.addEventListener("submit", saveBankAccountEntry);
   els.cashMovementButton.addEventListener("click", () => els.cashMovementPanel.hidden = !els.cashMovementPanel.hidden);
+  els.cashMovementType.addEventListener("input", updateCashExpenseField);
   els.cashMovementForm.addEventListener("submit", saveCashMovement);
   els.cardReceiptForm.addEventListener("submit", receiveCards);
   els.refreshDatabaseButton.addEventListener("click", () => loadDatabaseStatus(true));
@@ -133,8 +136,24 @@ function bindEvents() {
   els.resetDataButton.addEventListener("click", resetSystemData);
   els.refreshAuditButton.addEventListener("click", () => loadAuditLogs(true));
   els.changePasswordForm.addEventListener("submit", changePassword);
+  ["cashExpenseFilter"].forEach((id) => els[id].addEventListener("input", renderCash));
   ["auditSearch"].forEach((id) => els[id].addEventListener("input", renderAuditLogs));
   ["auditModuleFilter", "auditActionFilter", "auditLimit"].forEach((id) => els[id].addEventListener("input", () => loadAuditLogs(true)));
+  updateCashExpenseField();
+}
+
+function populateCashExpenseFilter() {
+  if (!els.cashExpenseFilter) return;
+  const options = ['<option value="all">Todos</option>', ...cashExpenseTypes.map((type) => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`)];
+  els.cashExpenseFilter.innerHTML = options.join("");
+}
+
+function updateCashExpenseField() {
+  if (!els.cashExpenseTypeField || !els.cashExpenseType) return;
+  const isOut = els.cashMovementType.value === "out";
+  els.cashExpenseTypeField.hidden = !isOut;
+  els.cashExpenseType.required = isOut;
+  if (!isOut) els.cashExpenseType.value = "";
 }
 
 function defaultDb() {
@@ -2536,9 +2555,12 @@ async function payPayable(id) {
 
 async function saveCashMovement(event) {
   event.preventDefault();
+  const direction = els.cashMovementType.value;
+  const expenseType = direction === "out" ? els.cashExpenseType.value.trim() : "";
+  if (direction === "out" && !expenseType) return alert("Selecione o tipo de despesa.");
   const movement = {
-    direction: els.cashMovementType.value,
-    type: "manual",
+    direction,
+    type: direction === "out" ? expenseType : "manual",
     description: els.cashMovementDescription.value.trim(),
     method: els.cashMovementMethod.value,
     amount: readNumber(els.cashMovementAmount.value),
@@ -2560,6 +2582,7 @@ async function saveCashMovement(event) {
       applyCashResultLocally(payload.data);
       persistLocalOnly();
       els.cashMovementForm.reset();
+      updateCashExpenseField();
       els.cashMovementPanel.hidden = true;
       renderAll();
       return;
@@ -2572,6 +2595,7 @@ async function saveCashMovement(event) {
   addCash(movement.direction, movement.type, movement.description, movement.method, movement.amount, movement.refId, movement.createdAt);
   persist();
   els.cashMovementForm.reset();
+  updateCashExpenseField();
   els.cashMovementPanel.hidden = true;
   renderAll();
 }
@@ -2639,12 +2663,18 @@ function renderCash() {
   const start = els.cashStart.value || "0000-01-01";
   const end = els.cashEnd.value || "9999-12-31";
   const method = els.cashMethodFilter.value;
-  const type = els.cashTypeFilter.value;
+  const movementType = els.cashTypeFilter.value;
+  const expenseType = els.cashExpenseFilter?.value || "all";
   let balance = 0;
   const rows = db.cash.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((item) => {
     balance += item.direction === "in" ? item.amount : -item.amount;
     return { ...item, balance };
-  }).filter((item) => item.createdAt.slice(0, 10) >= start && item.createdAt.slice(0, 10) <= end && (method === "all" || item.method === method) && (type === "all" || item.direction === type));
+  }).filter((item) => item.createdAt.slice(0, 10) >= start
+    && item.createdAt.slice(0, 10) <= end
+    && (method === "all" || item.method === method)
+    && (movementType === "all" || item.direction === movementType)
+    && (expenseType === "all" || (item.direction === "out" && item.type === expenseType)));
+  renderCashExpenseSummary(rows);
   els.cashTimeline.innerHTML = "";
   els.cashFooter.innerHTML = "";
   els.cashTimeline.classList.toggle("empty", rows.length === 0);
@@ -2662,7 +2692,7 @@ function renderCash() {
       <div class="cash-row-main">
         <small>${formatDateTime(item.createdAt)} <em>${tag}</em></small>
         <strong>${escapeHtml(item.description || item.type)}</strong>
-        <p>${escapeHtml(paymentLabels[item.method] || item.method || "-")}</p>
+        <p>${escapeHtml(cashMovementMeta(item))}</p>
       </div>
       <div class="cash-row-value">
         <strong>${isIn ? "+" : "-"} ${money.format(item.amount)}</strong>
@@ -2676,6 +2706,34 @@ function renderCash() {
     <span>Mostrando ${rows.length} de ${rows.length} movimentaç${rows.length === 1 ? "ão" : "ões"}</span>
     <div class="cash-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
   `;
+}
+
+function cashMovementMeta(item) {
+  const payment = paymentLabels[item.method] || item.method || "-";
+  if (item.direction === "out" && item.type && item.type !== "manual") return `${item.type} | ${payment}`;
+  return payment;
+}
+
+function renderCashExpenseSummary(rows) {
+  if (!els.cashExpenseSummary || !els.cashExpenseTotal) return;
+  const expenses = rows.filter((item) => item.direction === "out");
+  const grouped = expenses.reduce((acc, item) => {
+    const key = item.type && item.type !== "manual" ? item.type : "Outros";
+    acc[key] = round((acc[key] || 0) + Number(item.amount || 0));
+    return acc;
+  }, {});
+  const entries = Object.entries(grouped).sort((a, b) => b[1] - a[1]);
+  const total = round(entries.reduce((sum, [, value]) => sum + value, 0));
+  els.cashExpenseTotal.textContent = money.format(total);
+  els.cashExpenseSummary.classList.toggle("empty", entries.length === 0);
+  els.cashExpenseSummary.innerHTML = entries.length
+    ? entries.map(([type, value]) => `
+      <article>
+        <span>${escapeHtml(type)}</span>
+        <strong>${money.format(value)}</strong>
+      </article>
+    `).join("")
+    : "Nenhuma despesa no período.";
 }
 
 function cashClosingMetrics(date = todayIso) {

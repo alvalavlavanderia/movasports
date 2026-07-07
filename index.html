@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#18324f">
   <title>Mova Sports</title>
-  <link rel="stylesheet" href="style.css?v=20260706-7">
+  <link rel="stylesheet" href="style.css?v=20260707-3">
 </head>
 <body>
   <div class="app-layout">
@@ -679,6 +679,17 @@
       <section id="cashMovementPanel" class="panel cash-movement-panel" hidden>
         <form id="cashMovementForm" class="cash-movement-form">
           <label class="field">Tipo<select id="cashMovementType"><option value="in">Entrada</option><option value="out">Saída</option></select></label>
+          <label id="cashExpenseTypeField" class="field">Tipo de despesa<select id="cashExpenseType">
+            <option value="">Selecione...</option>
+            <option value="Gasolina">Gasolina</option>
+            <option value="Lanche">Lanche</option>
+            <option value="Estacionamento">Estacionamento</option>
+            <option value="Motoboy">Motoboy</option>
+            <option value="Material de limpeza">Material de limpeza</option>
+            <option value="Pequenas compras">Pequenas compras</option>
+            <option value="Correios">Correios</option>
+            <option value="Outros">Outros</option>
+          </select></label>
           <label class="field">Descrição<input id="cashMovementDescription" type="text" required></label>
           <label class="field">Forma<select id="cashMovementMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option></select></label>
           <label class="field">Valor<input id="cashMovementAmount" type="number" min="0.01" step="0.01" required></label>
@@ -726,7 +737,15 @@
           <label class="field">Fim<input id="cashEnd" type="date"></label>
           <label class="field">Forma de pagamento<select id="cashMethodFilter"><option value="all">Todas</option><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="card">Cartão</option></select></label>
           <label class="field">Tipo de movimentação<select id="cashTypeFilter"><option value="all">Todos</option><option value="in">Entrada</option><option value="out">Saída</option></select></label>
+          <label class="field">Tipo de despesa<select id="cashExpenseFilter"><option value="all">Todos</option></select></label>
         </div>
+      </section>
+      <section class="panel cash-expense-panel">
+        <div class="section-title tight">
+          <h2>Despesas por tipo</h2>
+          <span id="cashExpenseTotal">R$ 0,00</span>
+        </div>
+        <div id="cashExpenseSummary" class="cash-expense-summary empty">Nenhuma despesa no período.</div>
       </section>
       <section class="panel cash-timeline-panel">
         <div class="section-title tight">
@@ -951,7 +970,7 @@
     </form>
   </div>
 
-  <script src="script.js?v=20260707-2"></script>
+  <script src="script.js?v=20260707-3"></script>
 </body>
 </html>
 

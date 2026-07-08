@@ -34,6 +34,35 @@ SESSION_HOURS = max(1, int(float(os.environ.get("MOVA_SESSION_HOURS", "12") or 1
 LOGIN_ATTEMPT_LIMIT = max(3, int(float(os.environ.get("MOVA_LOGIN_ATTEMPTS", "5") or 5)))
 LOGIN_ATTEMPT_WINDOW_SECONDS = max(60, int(float(os.environ.get("MOVA_LOGIN_WINDOW_SECONDS", "900") or 900)))
 LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}
+POSTGRES_CAMEL_ALIASES = (
+    "cashIn",
+    "cashOut",
+    "costTotal",
+    "createdAt",
+    "customerId",
+    "customerName",
+    "dueDate",
+    "expectedCash",
+    "informedCash",
+    "issueDate",
+    "lastPaymentAt",
+    "minStock",
+    "paidAmount",
+    "paidAt",
+    "productId",
+    "productName",
+    "receivableId",
+    "refId",
+    "returnId",
+    "saleId",
+    "totalBalance",
+    "unitCost",
+    "unitPrice",
+    "updatedAt",
+    "userId",
+    "userName",
+    "userRole",
+)
 
 if IS_PRODUCTION:
     if not SECRET_KEY or len(SECRET_KEY) < 32:
@@ -225,6 +254,8 @@ def translate_postgres_sql(sql: str) -> str | None:
     if upper.startswith("INSERT OR IGNORE INTO STORES"):
         sql = "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT (id) DO NOTHING"
     sql = sql.replace("ORDER BY name COLLATE NOCASE", "ORDER BY LOWER(name)")
+    for alias in POSTGRES_CAMEL_ALIASES:
+        sql = sql.replace(f" AS {alias}", f' AS "{alias}"')
     return sql.replace("?", "%s")
 
 

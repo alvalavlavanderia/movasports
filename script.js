@@ -68,7 +68,7 @@ function bindEvents() {
   document.querySelectorAll(".subtab").forEach((button) => button.addEventListener("click", () => activateSubtab(button.dataset.subtab)));
   document.querySelectorAll(".cadastro-card").forEach((button) => button.addEventListener("click", () => activateSubtab(button.dataset.subtab)));
   populateCashExpenseFilter();
-  ["cashStart", "cashEnd", "reportStart", "reportEnd", "manualReceiptDate", "cancelSaleDate", "cancelSaleEndDate", "creditReceiveDate", "payableStart", "payableEnd", "bankAccountDate", "cashClosingDate"].forEach((id) => els[id].value = todayIso);
+  ["cashStart", "cashEnd", "reportStart", "reportEnd", "manualReceiptDate", "cancelSaleDate", "cancelSaleEndDate", "creditReceiveDate", "payableStart", "payableEnd", "bankAccountDate", "cashClosingDate", "saleHistoryStart", "saleHistoryEnd"].forEach((id) => els[id].value = todayIso);
 
   els.loginForm.addEventListener("submit", login);
   els.logoutButton.addEventListener("click", logout);
@@ -90,9 +90,14 @@ function bindEvents() {
   els.categoryForm.addEventListener("submit", (event) => saveSimpleName(event, "categories", els.categoryName));
   els.userForm.addEventListener("submit", saveUser);
 
-  ["customerListSearch", "supplierListSearch", "brandListSearch", "categoryListSearch", "userListSearch", "catalogSearch", "catalogCategoryFilter", "catalogBrandFilter", "stockSearch", "stockCategoryFilter", "stockBrandFilter", "stockStatusFilter", "saleProductSearch", "saleCustomerSearch", "saleDiscount", "saleHistorySearch", "cancelSaleSearch", "cancelSaleDate", "cancelSaleEndDate", "creditCustomerSearch", "payableSearch", "payableCategoryFilter", "payableFilter", "payableStart", "payableEnd", "cashStart", "cashEnd", "cashMethodFilter", "cashTypeFilter", "reportStart", "reportEnd", "dashSalesRange"].forEach((id) => {
+  ["customerListSearch", "supplierListSearch", "brandListSearch", "categoryListSearch", "userListSearch", "catalogSearch", "catalogCategoryFilter", "catalogBrandFilter", "stockSearch", "stockCategoryFilter", "stockBrandFilter", "stockStatusFilter", "saleProductSearch", "saleCustomerSearch", "saleDiscount", "saleHistorySearch", "saleHistoryType", "saleHistoryStart", "saleHistoryEnd", "saleHistoryStatus", "cancelSaleSearch", "cancelSaleDate", "cancelSaleEndDate", "creditCustomerSearch", "payableSearch", "payableCategoryFilter", "payableFilter", "payableStart", "payableEnd", "cashStart", "cashEnd", "cashMethodFilter", "cashTypeFilter", "reportStart", "reportEnd", "dashSalesRange"].forEach((id) => {
     els[id].addEventListener("input", renderAll);
   });
+  els.saleHistoryPeriod.addEventListener("input", () => {
+    updateSaleHistoryPeriodInputs();
+    renderAll();
+  });
+  els.saleHistoryExportButton.addEventListener("click", exportSaleHistory);
 
   els.catalogPdfButton.addEventListener("click", exportCatalogPdf);
   els.catalogClearFiltersButton.addEventListener("click", clearCatalogFilters);
@@ -1883,35 +1888,172 @@ function findSaleByCode(value) {
 }
 
 function renderSaleHistory() {
-  if (!els.saleHistoryClients || !els.saleHistorySales) return;
-  const query = normalize(els.saleHistorySearch.value || "");
-  const groups = saleHistoryGroups().filter((group) => !query || normalize(group.name).includes(query));
-  if (!groups.some((group) => group.key === selectedSaleHistoryKey)) selectedSaleHistoryKey = groups[0]?.key || "";
-  els.saleHistoryClients.classList.toggle("empty", groups.length === 0);
-  els.saleHistoryClients.innerHTML = "";
-  if (!groups.length) {
-    els.saleHistoryClients.textContent = "Nenhum cliente encontrado.";
-    renderSaleHistoryDetail(null);
+  if (!els.saleHistoryList || !els.saleHistoryDetailPanel) return;
+  const sales = filteredSaleHistory();
+  const activeSales = sales.filter((sale) => sale.status !== "cancelled");
+  const revenue = activeSales.reduce((total, sale) => total + Number(sale.total || 0), 0);
+  const average = activeSales.length ? revenue / activeSales.length : 0;
+  els.saleHistoryTotalCount.textContent = String(sales.length);
+  els.saleHistoryRevenue.textContent = money.format(revenue);
+  els.saleHistoryAverage.textContent = money.format(average);
+  els.saleHistoryResultCount.textContent = `${sales.length} venda${sales.length === 1 ? "" : "s"} encontrada${sales.length === 1 ? "" : "s"}`;
+  if (!sales.some((sale) => sale.id === selectedSaleHistoryKey)) selectedSaleHistoryKey = sales[0]?.id || "";
+  els.saleHistoryList.innerHTML = "";
+  if (!sales.length) {
+    els.saleHistoryList.innerHTML = `<tr><td colspan="8" class="empty-cell">Nenhuma venda encontrada.</td></tr>`;
+    els.saleHistoryFooter.textContent = "Mostrando 0 vendas";
+    renderSaleHistorySide(null);
     return;
   }
-  groups.forEach((group) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = `sale-history-client${group.key === selectedSaleHistoryKey ? " active" : ""}`;
-    item.innerHTML = `
-      <span>${escapeHtml(group.initials)}</span>
-      <div>
-        <strong>${escapeHtml(group.name)}</strong>
-        <small>${group.sales.length} compra${group.sales.length === 1 ? "" : "s"} | ${money.format(group.total)}</small>
-      </div>
+  sales.forEach((sale) => {
+    const row = document.createElement("tr");
+    row.className = sale.id === selectedSaleHistoryKey ? "selected" : "";
+    row.innerHTML = `
+      <td><strong>${escapeHtml(sale.id)}</strong></td>
+      <td>${formatDateTime(sale.createdAt)}</td>
+      <td>${escapeHtml(sale.customerName || "Venda simples")}</td>
+      <td>${saleItemCount(sale)}</td>
+      <td>${money.format(sale.total || 0)}</td>
+      <td>${escapeHtml(salePaymentSummary(sale))}</td>
+      <td><span class="sale-history-status ${sale.status === "cancelled" ? "cancelled" : "completed"}">${sale.status === "cancelled" ? "Cancelada" : "Finalizada"}</span></td>
+      <td><div class="sale-history-row-actions"></div></td>
     `;
-    item.addEventListener("click", () => {
-      selectedSaleHistoryKey = group.key;
+    row.addEventListener("click", () => {
+      selectedSaleHistoryKey = sale.id;
       renderSaleHistory();
     });
-    els.saleHistoryClients.append(item);
+    row.querySelector(".sale-history-row-actions").append(button("Ver", "icon-button", (event) => {
+      event.stopPropagation();
+      selectedSaleHistoryKey = sale.id;
+      renderSaleHistory();
+    }));
+    els.saleHistoryList.append(row);
   });
-  renderSaleHistoryDetail(groups.find((group) => group.key === selectedSaleHistoryKey));
+  els.saleHistoryFooter.innerHTML = `
+    <span>Mostrando 1 a ${sales.length} de ${sales.length} venda${sales.length === 1 ? "" : "s"}</span>
+    <div class="credit-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
+  `;
+  renderSaleHistorySide(sales.find((sale) => sale.id === selectedSaleHistoryKey));
+}
+
+function updateSaleHistoryPeriodInputs() {
+  const period = els.saleHistoryPeriod.value;
+  if (period === "today") {
+    els.saleHistoryStart.value = todayIso;
+    els.saleHistoryEnd.value = todayIso;
+  } else if (period === "month") {
+    const now = new Date();
+    els.saleHistoryStart.value = toDateInput(new Date(now.getFullYear(), now.getMonth(), 1));
+    els.saleHistoryEnd.value = todayIso;
+  }
+}
+
+function filteredSaleHistory() {
+  const query = normalize(els.saleHistorySearch.value || "");
+  const type = els.saleHistoryType.value || "name";
+  const period = els.saleHistoryPeriod.value || "all";
+  const status = els.saleHistoryStatus.value || "all";
+  const start = els.saleHistoryStart.value || "0000-01-01";
+  const end = els.saleHistoryEnd.value || "9999-12-31";
+  return db.sales.slice()
+    .filter((sale) => status === "all" || (status === "cancelled" ? sale.status === "cancelled" : sale.status !== "cancelled"))
+    .filter((sale) => period === "all" || (String(sale.createdAt || "").slice(0, 10) >= start && String(sale.createdAt || "").slice(0, 10) <= end))
+    .filter((sale) => saleHistoryMatchesSearch(sale, type, query))
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+
+function saleHistoryMatchesSearch(sale, type, query) {
+  if (!query) return true;
+  const customer = db.customers.find((item) => item.id === sale.customerId) || {};
+  if (type === "sale") return normalize(sale.id).includes(query);
+  if (type === "cpf") return normalize(customer.cpf || "").includes(query);
+  if (type === "phone") return normalize([customer.whatsapp, customer.phone].join(" ")).includes(query);
+  if (type === "barcode") return (sale.items || []).some((item) => normalize(item.barcode || "").includes(query));
+  return normalize([sale.customerName, customer.name].join(" ")).includes(query);
+}
+
+function saleItemCount(sale) {
+  return (sale.items || []).reduce((total, item) => total + Number(item.quantity || 0), 0);
+}
+
+function salePaymentSummary(sale) {
+  const parts = (sale.payments || []).map((payment) => paymentLabels[payment.method] || payment.method).filter(Boolean);
+  return parts.length ? [...new Set(parts)].join(", ") : "-";
+}
+
+function renderSaleHistorySide(sale) {
+  if (!sale) {
+    els.saleHistoryDetailPanel.className = "panel sale-history-side-panel empty";
+    els.saleHistoryDetailPanel.textContent = "Selecione uma venda para visualizar os detalhes.";
+    return;
+  }
+  els.saleHistoryDetailPanel.className = "panel sale-history-side-panel";
+  const customer = db.customers.find((item) => item.id === sale.customerId) || {};
+  const receivables = db.receivables.filter((item) => item.saleId === sale.id);
+  const items = (sale.items || []).map((item) => `
+    <div><span>${escapeHtml(item.quantity || 0)}x ${escapeHtml(item.name || "-")}</span><strong>${money.format(item.total || 0)}</strong></div>
+  `).join("") || `<p class="empty">Sem itens.</p>`;
+  const payments = (sale.payments || []).map((payment) => `
+    <div><span>${escapeHtml(paymentLabels[payment.method] || payment.method || "-")}</span><strong>${money.format(payment.amount || 0)}</strong></div>
+  `).join("") || `<p class="empty">Sem pagamentos.</p>`;
+  const receivablePayments = receivables.flatMap((item) => receivablePaymentRows(item).map((payment) => `
+    <div><span>${formatDateTime(payment.createdAt)} - ${escapeHtml(paymentLabels[payment.method] || payment.method || "-")}</span><strong>${money.format(payment.amount || 0)}</strong></div>
+  `)).join("");
+  els.saleHistoryDetailPanel.innerHTML = `
+    <div class="sale-history-side-head">
+      <div><h3>Venda ${escapeHtml(sale.id)}</h3><small>${sale.status === "cancelled" ? "Cancelada" : "Finalizada"}</small></div>
+      <button class="modal-close" type="button" aria-label="Limpar seleção">×</button>
+    </div>
+    <div class="sale-history-customer">
+      <span>${escapeHtml(initialsFromName(sale.customerName || "VS"))}</span>
+      <div><strong>${escapeHtml(sale.customerName || "Venda simples")}</strong><small>${escapeHtml(customer.whatsapp || customer.phone || "")}</small></div>
+    </div>
+    <div class="sale-history-side-meta">
+      <p>Data: <strong>${formatDateTime(sale.createdAt)}</strong></p>
+      <p>Itens: <strong>${saleItemCount(sale)}</strong></p>
+    </div>
+    <section><h4>Produtos</h4>${items}</section>
+    <section><h4>Pagamento</h4>${payments}${receivablePayments ? `<h4>Baixas do crediário</h4>${receivablePayments}` : ""}</section>
+    <div class="sale-history-side-total">
+      <span>Total</span><strong>${money.format(sale.total || 0)}</strong>
+    </div>
+    <div class="sale-history-side-actions">
+      <button class="ghost sale-history-print" type="button">Reimprimir</button>
+      <button class="ghost sale-history-return" type="button">Troca/Devolução</button>
+      <button class="danger sale-history-cancel" type="button"${sale.status === "cancelled" ? " disabled" : ""}>Cancelar venda</button>
+    </div>
+  `;
+  els.saleHistoryDetailPanel.querySelector(".modal-close").addEventListener("click", () => {
+    selectedSaleHistoryKey = "";
+    renderSaleHistory();
+  });
+  els.saleHistoryDetailPanel.querySelector(".sale-history-print").addEventListener("click", () => openSaleReceiptPrint(sale));
+  els.saleHistoryDetailPanel.querySelector(".sale-history-return").addEventListener("click", () => {
+    activateSubtab("devolucao");
+    els.returnProductSearch.value = sale.id;
+    renderReturnSaleItems();
+  });
+  els.saleHistoryDetailPanel.querySelector(".sale-history-cancel").addEventListener("click", () => cancelSale(sale.id));
+}
+
+function exportSaleHistory() {
+  const rows = filteredSaleHistory();
+  const csv = ["venda,data,cliente,itens,total,pagamento,status", ...rows.map((sale) => [
+    sale.id,
+    formatDateTime(sale.createdAt),
+    sale.customerName || "Venda simples",
+    saleItemCount(sale),
+    fixed(sale.total || 0),
+    salePaymentSummary(sale),
+    sale.status === "cancelled" ? "Cancelada" : "Finalizada",
+  ].map((value) => `"${String(value).replaceAll('"', '""')}"`).join(","))].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `historico-vendas-${todayIso}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function saleHistoryGroups() {

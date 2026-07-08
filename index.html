@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#18324f">
   <title>Mova Sports</title>
-  <link rel="stylesheet" href="style.css?v=20260707-3">
+  <link rel="stylesheet" href="style.css?v=20260708-3">
 </head>
 <body>
   <div class="app-layout">
@@ -521,28 +521,41 @@
         </section>
       </section>
       <section id="historico-vendas" class="subtab-panel">
-        <section class="panel sale-history-panel">
-          <div class="section-title stacked">
+        <section class="sale-history-page">
+          <div class="page-head sale-history-head">
             <div>
-              <h2>Histórico de vendas</h2>
-              <p>Busque um cliente ou venda simples para consultar compras e pagamentos.</p>
+              <h2>Histórico de Vendas</h2>
+              <p>Consulte vendas, clientes, pagamentos e detalhes.</p>
             </div>
+            <button id="saleHistoryExportButton" class="ghost" type="button">Exportar</button>
           </div>
-          <div class="sale-history-layout">
-            <div class="sale-history-client-box">
-              <label class="search-field">
-                <span>Buscar cliente</span>
-                <input id="saleHistorySearch" type="search" placeholder="Buscar por nome do cliente...">
-              </label>
-              <div id="saleHistoryClients" class="sale-history-clients empty">Nenhum cliente encontrado.</div>
+          <section class="panel sale-history-filter-panel">
+            <div class="sale-history-filter-grid">
+              <label class="field">Buscar por<select id="saleHistoryType"><option value="name">Nome</option><option value="cpf">CPF</option><option value="phone">Telefone</option><option value="sale">Nº Venda</option><option value="barcode">Código de barras</option></select></label>
+              <label class="field span-2">Pesquisar<input id="saleHistorySearch" type="search" placeholder="Digite sua busca..."></label>
+              <label class="field">Período<select id="saleHistoryPeriod"><option value="all">Todos</option><option value="today">Hoje</option><option value="month">Mês atual</option><option value="custom">Personalizado</option></select></label>
+              <label class="field">Início<input id="saleHistoryStart" type="date"></label>
+              <label class="field">Fim<input id="saleHistoryEnd" type="date"></label>
+              <label class="field">Situação<select id="saleHistoryStatus"><option value="all">Todas</option><option value="completed">Finalizadas</option><option value="cancelled">Canceladas</option></select></label>
             </div>
-            <div class="sale-history-detail">
-              <div id="saleHistorySummary" class="sale-history-summary empty">
-                <strong>Selecione um cliente</strong>
-                <span>As compras e pagamentos aparecerão aqui.</span>
+          </section>
+          <div class="sale-history-kpis">
+            <article><span class="purple">□</span><small>Total vendas</small><strong id="saleHistoryTotalCount">0</strong><em>Conforme filtro</em></article>
+            <article><span class="green">$</span><small>Faturamento</small><strong id="saleHistoryRevenue">R$ 0,00</strong><em>Total filtrado</em></article>
+            <article><span class="blue">◇</span><small>Ticket médio</small><strong id="saleHistoryAverage">R$ 0,00</strong><em>Conforme filtro</em></article>
+          </div>
+          <div class="sale-history-results-layout">
+            <section class="panel sale-history-table-panel">
+              <div class="section-title tight"><h2>Vendas encontradas</h2><span id="saleHistoryResultCount">0 vendas encontradas</span></div>
+              <div class="sale-history-table-wrap">
+                <table class="sale-history-table">
+                  <thead><tr><th>Venda</th><th>Data</th><th>Cliente</th><th>Itens</th><th>Total</th><th>Pagamento</th><th>Status</th><th>Ações</th></tr></thead>
+                  <tbody id="saleHistoryList"></tbody>
+                </table>
               </div>
-              <div id="saleHistorySales" class="sale-history-sales empty">Nenhuma venda selecionada.</div>
-            </div>
+              <div id="saleHistoryFooter" class="credit-footer"></div>
+            </section>
+            <aside id="saleHistoryDetailPanel" class="panel sale-history-side-panel empty">Selecione uma venda para visualizar os detalhes.</aside>
           </div>
         </section>
       </section>
@@ -971,7 +984,7 @@
     </form>
   </div>
 
-  <script src="script.js?v=20260708-2"></script>
+  <script src="script.js?v=20260708-3"></script>
 </body>
 </html>
 

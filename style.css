@@ -5,8 +5,8 @@
   --text: #17212f;
   --muted: #66758a;
   --line: #d7e0ea;
-  --primary: #1f6aa5;
-  --primary-dark: #184f7c;
+  --primary: #ee3f75;
+  --primary-dark: #c92d5f;
   --success: #16794c;
   --warning: #a15c00;
   --danger: #b42318;
@@ -218,8 +218,14 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 }
 .subtab.active { background: #fff; color: #18324f; }
 .subtab.active { border-color: var(--primary); color: var(--primary-dark); }
-.primary { background: var(--primary); color: #fff; }
-.primary:hover { background: var(--primary-dark); }
+.primary {
+  background: linear-gradient(135deg, #ff377d, #ee3f75);
+  color: #fff;
+  border-color: #ee3f75;
+}
+.primary:hover {
+  background: linear-gradient(135deg, #ee3f75, #c92d5f);
+}
 .ghost { background: var(--surface-2); color: var(--text); border-color: var(--line); }
 .danger { background: #fff1f0; color: var(--danger); border-color: #f0c5c0; }
 
@@ -767,7 +773,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .sale-current-card .finish-button {
   min-height: 48px;
   margin-top: 6px;
-  background: linear-gradient(135deg, #1f6aa5, #105992);
 }
 
 .sale-history-panel {
@@ -1369,10 +1374,6 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   display: grid;
   grid-template-columns: 120px minmax(0, 1fr);
   gap: 14px;
-}
-
-.return-actions .primary {
-  background: linear-gradient(135deg, #1f6aa5, #105992);
 }
 
 .cancel-sale-panel {
@@ -1984,10 +1985,6 @@ textarea {
   justify-content: flex-end;
 }
 
-.stock-actions .primary {
-  background: linear-gradient(135deg, #356ea8, #1f5b97);
-}
-
 .stock-filter-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(160px, 1fr));
@@ -2181,7 +2178,6 @@ textarea {
 
 .credit-new-button {
   padding-inline: 18px;
-  background: linear-gradient(135deg, #2d78cf, #1e62b6);
 }
 
 .credit-summary-panel,
@@ -2414,10 +2410,6 @@ textarea {
   gap: 9px;
   align-items: center;
   justify-content: center;
-}
-
-.cash-movement-button {
-  background: linear-gradient(135deg, #2d78cf, #1e62b6);
 }
 
 .bank-account-button {
@@ -2777,7 +2769,6 @@ textarea {
   gap: 9px;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #2d78cf, #1e62b6);
 }
 
 .payable-new-button span,

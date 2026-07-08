@@ -455,7 +455,13 @@ async function saveProduct(event) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(product),
       });
-      const payload = await response.json().catch(() => ({}));
+      const raw = await response.text();
+      let payload = {};
+      try {
+        payload = raw ? JSON.parse(raw) : {};
+      } catch {
+        payload = { error: raw ? raw.slice(0, 180) : "" };
+      }
       if (!response.ok) {
         alert(payload.error || "Não foi possível salvar o produto.");
         return;

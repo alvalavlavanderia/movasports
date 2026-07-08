@@ -981,6 +981,20 @@ def validate_user_payload(user: dict, creating: bool = False) -> str | None:
     return None
 
 
+def write_app_state_only(state: dict) -> str:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(state, ensure_ascii=False), updated_at),
+        )
+    return updated_at
+
+
 def sync_user_to_state(user: dict | None = None, deleted_id: str | None = None) -> None:
     state, _ = read_state()
     if deleted_id:
@@ -1558,7 +1572,7 @@ def sync_product_to_state(product: dict | None = None, deleted_id: str | None = 
             state["brands"].append(product["brand"])
         if product["category"] and product["category"] not in state["categories"]:
             state["categories"].append(product["category"])
-    write_state(state)
+    write_app_state_only(state)
 
 
 def normalize_customer_payload(payload: dict, existing: dict | None = None) -> dict:
@@ -1663,7 +1677,7 @@ def sync_customer_to_state(customer: dict | None = None, deleted_id: str | None 
     elif customer:
         customers = [item for item in state.get("customers", []) if item.get("id") != customer["id"]]
         state["customers"] = [customer, *customers]
-    write_state(state)
+    write_app_state_only(state)
 
 
 def normalize_supplier_payload(payload: dict, existing: dict | None = None) -> dict:
@@ -1731,7 +1745,7 @@ def sync_supplier_to_state(supplier: dict | None = None, deleted_id: str | None 
     elif supplier:
         suppliers = [item for item in state.get("suppliers", []) if item.get("id") != supplier["id"]]
         state["suppliers"] = [supplier, *suppliers]
-    write_state(state)
+    write_app_state_only(state)
 
 
 def money_round(value: float) -> float:
@@ -2259,7 +2273,7 @@ def sync_simple_name_to_state(kind: str, name: str | None = None, previous: str 
                 {**product, product_field: name} if product.get(product_field) == previous else product
                 for product in state.get("products", [])
             ]
-    write_state(state)
+    write_app_state_only(state)
 
 
 @app.get("/")

@@ -384,6 +384,7 @@
       </div>
       <div class="subtabs sale-mode-tabs">
         <button class="subtab active" type="button" data-subtab="nova-venda">Nova venda</button>
+        <button class="subtab" type="button" data-subtab="condicional">Condicional</button>
         <button class="subtab" type="button" data-subtab="devolucao">Devolução/troca</button>
         <button class="subtab" type="button" data-subtab="historico-vendas">Histórico</button>
         <button class="subtab" type="button" data-subtab="cancelar-venda">Cancelar venda</button>
@@ -423,6 +424,39 @@
           </section>
         </div>
         <section id="receiptPanel" class="panel" hidden></section>
+      </section>
+      <section id="condicional" class="subtab-panel">
+        <div class="sale-register-layout conditional-layout">
+          <section class="panel sale-products-card">
+            <div class="section-title"><h2>Produtos</h2></div>
+            <div class="sale-search-row">
+              <input id="conditionalProductSearch" type="search" placeholder="Buscar produto por código ou nome...">
+              <button class="ghost sale-scan-button" type="button" title="Código de barras" aria-label="Código de barras">▥</button>
+            </div>
+            <div id="conditionalProductList" class="table-list empty">Nenhum produto encontrado.</div>
+          </section>
+          <section class="panel sale-current-card">
+            <div class="section-title"><h2>Condicional atual</h2><button id="clearConditionalButton" class="ghost" type="button">Limpar</button></div>
+            <div class="sale-customer-row">
+              <label class="field">Cliente cadastrado<input id="conditionalCustomerSearch" list="customerOptions" placeholder="Digite o nome do cliente" required></label>
+              <button class="ghost sale-add-customer" type="button" title="Adicionar cliente" aria-label="Adicionar cliente">+</button>
+            </div>
+            <div class="sale-cart-box">
+              <div class="sale-cart-head"><span>Item</span><span>Descrição</span><span>Quant.</span><span>Unitário</span><span>Total</span></div>
+              <div id="conditionalCartList" class="sale-cart-list empty">Nenhum item.</div>
+            </div>
+            <div class="sale-total-row">
+              <div class="conditional-note">O condicional não baixa estoque. A baixa acontece somente quando os itens virarem venda.</div>
+              <div class="sale-total-box"><span>Total enviado</span><strong id="conditionalTotal">R$ 0,00</strong></div>
+            </div>
+            <button id="sendConditionalButton" class="primary finish-button" type="button">Enviar condicional</button>
+          </section>
+        </div>
+        <section class="panel conditional-open-panel">
+          <div class="section-title tight"><h2>Condicionais em aberto</h2><span>Finalize quando o cliente devolver ou escolher as peças.</span></div>
+          <div id="conditionalOpenList" class="table-list empty">Nenhum condicional em aberto.</div>
+        </section>
+        <section id="conditionalFinalizePanel" class="panel conditional-finalize-panel" hidden></section>
       </section>
       <section id="devolucao" class="subtab-panel">
         <section class="panel return-panel">

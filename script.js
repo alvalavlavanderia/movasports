@@ -23,11 +23,14 @@ const MODULE_API_ENDPOINTS = {
   cash: "/api/cash-movements",
   cashClosings: "/api/cash-closings",
   returns: "/api/returns",
+  conditionals: "/api/conditionals",
 };
 
 let db = loadDb();
 let session = loadSession();
 let cart = [];
+let conditionalCart = [];
+let selectedConditionalId = "";
 let productPhotoData = "";
 let productPhotoFile = null;
 let catalogViewMode = "grid";
@@ -121,6 +124,10 @@ function bindEvents() {
   els.clearSaleButton.addEventListener("click", clearSale);
   els.addPaymentButton.addEventListener("click", () => addPaymentRow("cash"));
   els.finishSaleButton.addEventListener("click", finishSale);
+  els.conditionalProductSearch.addEventListener("input", renderConditionalProducts);
+  els.conditionalCustomerSearch.addEventListener("input", renderConditionalOpenList);
+  els.clearConditionalButton.addEventListener("click", clearConditional);
+  els.sendConditionalButton.addEventListener("click", saveConditional);
   els.returnForm.addEventListener("submit", registerReturn);
   els.returnProductSearch.addEventListener("input", renderReturnSaleItems);
   els.manualReceiptForm.addEventListener("submit", saveManualReceipt);
@@ -178,6 +185,7 @@ function defaultDb() {
     cash: [],
     cashClosings: [],
     returns: [],
+    conditionals: [],
   };
 }
 
@@ -278,7 +286,7 @@ function mergeDb(loaded) {
 }
 
 function hasBusinessData(data) {
-  return ["products", "customers", "suppliers", "brands", "categories", "sales", "receivables", "payables", "cash", "returns"].some((key) => data?.[key]?.length);
+  return ["products", "customers", "suppliers", "brands", "categories", "sales", "receivables", "payables", "cash", "returns", "conditionals"].some((key) => data?.[key]?.length);
 }
 
 function scheduleServerPersist() {
@@ -1006,6 +1014,10 @@ function renderAll() {
     renderStock,
     renderSaleProducts,
     renderCart,
+    renderConditionalProducts,
+    renderConditionalCart,
+    renderConditionalOpenList,
+    renderConditionalFinalizePanel,
     renderSaleHistory,
     renderManualReceiptSummary,
     renderReturnSaleItems,
@@ -1535,6 +1547,251 @@ function renderCart() {
     paymentRow[0].querySelector(".pay-amount").value = fixed(saleTotal());
   }
   renderCartTotalOnly();
+}
+
+function renderConditionalProducts() {
+  if (!els.conditionalProductList) return;
+  const query = normalize(els.conditionalProductSearch.value);
+  const products = db.products.filter((product) => Number(product.stock || 0) > 0 && (!query || normalize(product.name).startsWith(query) || normalize(product.barcode).includes(query)));
+  els.conditionalProductList.innerHTML = "";
+  els.conditionalProductList.classList.toggle("empty", products.length === 0);
+  if (!products.length) {
+    els.conditionalProductList.textContent = "Nenhum produto com estoque encontrado.";
+    return;
+  }
+  products.slice(0, 8).forEach((product) => {
+    const row = document.createElement("article");
+    row.className = "sale-product-row";
+    row.innerHTML = `
+      ${product.photo ? `<img src="${product.photo}" alt="">` : `<div class="sale-product-photo"></div>`}
+      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | Estoque: ${product.stock}</small></div>
+      <strong>${money.format(product.price)}</strong>
+      <div class="table-actions"></div>
+    `;
+    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToConditionalCart(product.id), product.stock <= conditionalCartQty(product.id)));
+    els.conditionalProductList.append(row);
+  });
+}
+
+function addToConditionalCart(productId) {
+  const product = db.products.find((item) => item.id === productId);
+  if (!product || Number(product.stock || 0) <= conditionalCartQty(product.id)) return alert("Produto sem estoque.");
+  const existing = conditionalCart.find((item) => item.productId === product.id);
+  if (existing) existing.quantity += 1;
+  else conditionalCart.push({ productId: product.id, barcode: product.barcode, name: product.name, brand: product.brand, quantity: 1, unitCost: product.cost, unitPrice: product.price });
+  renderAll();
+}
+
+function conditionalCartQty(productId) {
+  return conditionalCart.find((item) => item.productId === productId)?.quantity || 0;
+}
+
+function changeConditionalCartQty(productId, delta) {
+  const item = conditionalCart.find((entry) => entry.productId === productId);
+  const product = db.products.find((entry) => entry.id === productId);
+  if (!item || !product) return;
+  item.quantity += delta;
+  if (item.quantity <= 0) conditionalCart = conditionalCart.filter((entry) => entry.productId !== productId);
+  if (item.quantity > product.stock) item.quantity = product.stock;
+  renderAll();
+}
+
+function conditionalTotal() {
+  return conditionalCart.reduce((total, item) => total + Number(item.quantity || 0) * Number(item.unitPrice || 0), 0);
+}
+
+function renderConditionalCart() {
+  if (!els.conditionalCartList) return;
+  els.conditionalCartList.innerHTML = "";
+  els.conditionalCartList.classList.toggle("empty", conditionalCart.length === 0);
+  if (!conditionalCart.length) {
+    els.conditionalCartList.innerHTML = `<div class="sale-cart-empty"><span>□</span><strong>Nenhum item adicionado</strong><small>Adicione produtos para enviar em condicional</small></div>`;
+  }
+  conditionalCart.forEach((item) => {
+    const row = document.createElement("article");
+    row.className = "sale-cart-row";
+    row.innerHTML = `
+      <span>${conditionalCart.indexOf(item) + 1}</span>
+      <strong>${escapeHtml(item.name)}</strong>
+      <span>${item.quantity}</span>
+      <span>${money.format(item.unitPrice)}</span>
+      <b>${money.format(item.quantity * item.unitPrice)}</b>
+    `;
+    const actions = document.createElement("div");
+    actions.className = "sale-cart-actions";
+    actions.append(button("+", "ghost", () => changeConditionalCartQty(item.productId, 1)));
+    actions.append(button("-", "danger", () => changeConditionalCartQty(item.productId, -1)));
+    row.append(actions);
+    els.conditionalCartList.append(row);
+  });
+  if (els.conditionalTotal) els.conditionalTotal.textContent = money.format(conditionalTotal());
+}
+
+function clearConditional() {
+  conditionalCart = [];
+  selectedConditionalId = "";
+  if (els.conditionalCustomerSearch) els.conditionalCustomerSearch.value = "";
+  renderAll();
+}
+
+async function saveConditional() {
+  if (!conditionalCart.length) return alert("Adicione produtos ao condicional.");
+  const customer = findCustomerByName(els.conditionalCustomerSearch.value.trim());
+  if (!customer) return alert("Selecione um cliente cadastrado para enviar condicional.");
+  const doc = {
+    customerId: customer.id,
+    customerName: customer.name,
+    items: conditionalCart.map((item) => ({ ...item, total: round(item.quantity * item.unitPrice) })),
+    status: "open",
+    createdAt: new Date().toISOString(),
+  };
+  if (BACKEND_ENABLED) {
+    try {
+      const response = await fetch("/api/conditionals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(doc),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || "Não foi possível salvar o condicional.");
+        return;
+      }
+      upsertConditional(payload.data);
+      persistLocalOnly();
+      clearConditional();
+      renderAll();
+      return;
+    } catch (error) {
+      console.warn(error);
+      alert("Não foi possível conectar ao servidor para salvar o condicional.");
+      return;
+    }
+  }
+  upsertConditional({ ...doc, id: nextConditionalCode(), updatedAt: new Date().toISOString() });
+  persist();
+  clearConditional();
+}
+
+function upsertConditional(doc) {
+  if (!doc?.id) return;
+  db.conditionals = [doc, ...db.conditionals.filter((item) => item.id !== doc.id)];
+}
+
+function renderConditionalOpenList() {
+  if (!els.conditionalOpenList) return;
+  const openItems = (db.conditionals || []).filter((item) => item.status !== "finalized" && item.status !== "cancelled");
+  els.conditionalOpenList.innerHTML = "";
+  els.conditionalOpenList.classList.toggle("empty", openItems.length === 0);
+  if (!openItems.length) {
+    els.conditionalOpenList.textContent = "Nenhum condicional em aberto.";
+    return;
+  }
+  openItems.forEach((doc) => {
+    const total = sum(doc.items || [], "total");
+    const pieces = (doc.items || []).reduce((value, item) => value + Number(item.quantity || 0), 0);
+    const row = document.createElement("article");
+    row.className = "conditional-open-row";
+    row.innerHTML = `
+      <div><strong>${escapeHtml(doc.id)}</strong><small>${formatDateTime(doc.createdAt)}</small></div>
+      <div><strong>${escapeHtml(doc.customerName || "-")}</strong><small>${pieces} peça${pieces === 1 ? "" : "s"} enviada${pieces === 1 ? "" : "s"}</small></div>
+      <strong>${money.format(total)}</strong>
+      <div class="table-actions"></div>
+    `;
+    row.querySelector(".table-actions").append(button("Finalizar", "primary small-action", () => {
+      selectedConditionalId = doc.id;
+      renderConditionalFinalizePanel();
+    }));
+    els.conditionalOpenList.append(row);
+  });
+}
+
+function renderConditionalFinalizePanel() {
+  if (!els.conditionalFinalizePanel) return;
+  const doc = (db.conditionals || []).find((item) => item.id === selectedConditionalId);
+  if (!doc) {
+    els.conditionalFinalizePanel.hidden = true;
+    els.conditionalFinalizePanel.innerHTML = "";
+    return;
+  }
+  els.conditionalFinalizePanel.hidden = false;
+  const rows = (doc.items || []).map((item) => `
+    <label class="conditional-finalize-row">
+      <input type="checkbox" class="conditional-keep-item" value="${escapeHtml(item.productId)}" checked>
+      <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.barcode || "-")} | ${Number(item.quantity || 0)} peça${Number(item.quantity || 0) === 1 ? "" : "s"}</small></span>
+      <b>${money.format(Number(item.quantity || 0) * Number(item.unitPrice || 0))}</b>
+    </label>
+  `).join("");
+  els.conditionalFinalizePanel.innerHTML = `
+    <div class="section-title tight">
+      <div><h2>Finalizar ${escapeHtml(doc.id)}</h2><span>${escapeHtml(doc.customerName || "-")}</span></div>
+      <button class="ghost" type="button" id="closeConditionalFinalizeButton">Fechar</button>
+    </div>
+    <div class="conditional-finalize-list">${rows}</div>
+    <div class="conditional-finalize-actions">
+      <button class="ghost" type="button" id="finishConditionalEmptyButton">Finalizar sem venda</button>
+      <button class="primary" type="button" id="finishConditionalSaleButton">Levar selecionados para venda</button>
+    </div>
+  `;
+  els.conditionalFinalizePanel.querySelector("#closeConditionalFinalizeButton").addEventListener("click", () => {
+    selectedConditionalId = "";
+    renderConditionalFinalizePanel();
+  });
+  els.conditionalFinalizePanel.querySelector("#finishConditionalEmptyButton").addEventListener("click", () => finishConditional(false));
+  els.conditionalFinalizePanel.querySelector("#finishConditionalSaleButton").addEventListener("click", () => finishConditional(true));
+}
+
+async function finishConditional(sendToSale) {
+  const doc = (db.conditionals || []).find((item) => item.id === selectedConditionalId);
+  if (!doc) return;
+  const selectedProductIds = new Set([...els.conditionalFinalizePanel.querySelectorAll(".conditional-keep-item:checked")].map((input) => input.value));
+  const finalItems = sendToSale ? (doc.items || []).filter((item) => selectedProductIds.has(item.productId)) : [];
+  const updated = { ...doc, status: "finalized", finalItems, finalizedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  if (BACKEND_ENABLED) {
+    try {
+      const response = await fetch(`/api/conditionals/${encodeURIComponent(doc.id)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "finalized", finalItems }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || "Não foi possível finalizar o condicional.");
+        return;
+      }
+      upsertConditional(payload.data);
+      persistLocalOnly();
+    } catch (error) {
+      console.warn(error);
+      alert("Não foi possível conectar ao servidor para finalizar o condicional.");
+      return;
+    }
+  } else {
+    upsertConditional(updated);
+    persist();
+  }
+  selectedConditionalId = "";
+  if (sendToSale && finalItems.length) {
+    moveConditionalItemsToSale(doc, finalItems);
+    activateSubtab("nova-venda");
+    alert("Itens selecionados foram enviados para a venda atual.");
+  } else {
+    alert("Condicional finalizado sem venda.");
+  }
+  renderAll();
+}
+
+function moveConditionalItemsToSale(doc, items) {
+  els.saleCustomerSearch.value = doc.customerName || "";
+  items.forEach((item) => {
+    const product = db.products.find((entry) => entry.id === item.productId);
+    if (!product) return;
+    const existing = cart.find((entry) => entry.productId === item.productId);
+    const quantity = Math.min(Number(item.quantity || 0), Math.max(0, Number(product.stock || 0) - cartQty(item.productId)));
+    if (quantity <= 0) return;
+    if (existing) existing.quantity += quantity;
+    else cart.push({ productId: product.id, barcode: product.barcode, name: product.name, brand: product.brand, quantity, unitCost: product.cost, unitPrice: product.price });
+  });
 }
 
 function addPaymentRow(method = "cash", rerender = true) {
@@ -3845,6 +4102,14 @@ function nextSaleCode() {
     return match ? Math.max(highest, Number(match[1])) : highest;
   }, 0);
   return `VENDA${String(max + 1).padStart(3, "0")}`;
+}
+
+function nextConditionalCode() {
+  const max = (db.conditionals || []).reduce((highest, item) => {
+    const match = String(item.id || "").match(/^COND(\d+)$/i);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0);
+  return `COND${String(max + 1).padStart(3, "0")}`;
 }
 
 function validCnpj(value) {

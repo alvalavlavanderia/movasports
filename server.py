@@ -505,6 +505,7 @@ def default_state() -> dict:
         "cash": [],
         "cashClosings": [],
         "returns": [],
+        "conditionals": [],
     }
 
 
@@ -1791,6 +1792,59 @@ def next_sale_code_db(conn: sqlite3.Connection, store_id: str = "matriz") -> str
         if sale_id.upper().startswith("VENDA") and sale_id[5:].isdigit():
             highest = max(highest, int(sale_id[5:]))
     return f"VENDA{highest + 1:03d}"
+
+
+def next_conditional_code(state: dict) -> str:
+    highest = 0
+    for item in state.get("conditionals", []) or []:
+        conditional_id = str(item.get("id", "") or "")
+        if conditional_id.upper().startswith("COND") and conditional_id[4:].isdigit():
+            highest = max(highest, int(conditional_id[4:]))
+    return f"COND{highest + 1:03d}"
+
+
+def build_conditional_from_payload(payload: dict, state: dict, conditional_id: str) -> tuple[dict | None, str | None]:
+    customer_id = str(payload.get("customerId", "") or "").strip()
+    customers = state.get("customers", []) or []
+    customer = next((item for item in customers if str(item.get("id", "")) == customer_id), None)
+    if not customer:
+        return None, "Cliente cadastrado é obrigatório para condicional."
+
+    products_by_id = {str(product.get("id", "")): product for product in (state.get("products", []) or [])}
+    items = []
+    for item in payload.get("items") or []:
+        product_id = str(item.get("productId", "") or "").strip()
+        quantity = max(0, int(float(item.get("quantity", 0) or 0)))
+        product = products_by_id.get(product_id)
+        if not product or quantity <= 0:
+            return None, "Item de condicional inválido."
+        if int(product.get("stock") or 0) < quantity:
+            return None, f"Estoque insuficiente para {product.get('name', 'produto')}."
+        unit_price = float(item.get("unitPrice", product.get("price", 0)) or 0)
+        unit_cost = float(item.get("unitCost", product.get("cost", 0)) or 0)
+        items.append({
+            "productId": product_id,
+            "barcode": product.get("barcode", ""),
+            "name": product.get("name", ""),
+            "brand": product.get("brand", ""),
+            "quantity": quantity,
+            "unitCost": unit_cost,
+            "unitPrice": unit_price,
+            "total": money_round(quantity * unit_price),
+        })
+    if not items:
+        return None, "Adicione produtos ao condicional."
+
+    now = utc_now()
+    return {
+        "id": conditional_id,
+        "customerId": customer["id"],
+        "customerName": customer.get("name", ""),
+        "items": items,
+        "status": "open",
+        "createdAt": str(payload.get("createdAt") or now),
+        "updatedAt": now,
+    }, None
 
 
 def parse_iso_datetime(value: str) -> datetime:
@@ -3466,6 +3520,63 @@ def list_returns():
         row["items"] = items_by_return.get(row["id"], [])
         data.append(row)
     return jsonify({"ok": True, "data": data})
+
+
+@app.get("/api/conditionals")
+def list_conditionals():
+    state, _ = read_state()
+    data = sorted(state.get("conditionals", []) or [], key=lambda item: item.get("createdAt", ""), reverse=True)
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/conditionals")
+def create_conditional_api():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    state, _ = read_state()
+    conditional_id = str(payload.get("id") or "").strip() or next_conditional_code(state)
+    if any(str(item.get("id", "")) == conditional_id for item in state.get("conditionals", []) or []):
+        conditional_id = next_conditional_code(state)
+    conditional, error = build_conditional_from_payload(payload, state, conditional_id)
+    if error:
+        return jsonify({"ok": False, "error": error}), 400
+    state["conditionals"] = [conditional, *[item for item in state.get("conditionals", []) if item.get("id") != conditional["id"]]]
+    write_app_state_only(state)
+    record_audit("create", "conditional", conditional["id"], {"conditional": conditional})
+    return jsonify({"ok": True, "data": conditional}), 201
+
+
+@app.put("/api/conditionals/<conditional_id>")
+def update_conditional_api(conditional_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    state, _ = read_state()
+    conditionals = state.get("conditionals", []) or []
+    conditional = next((item for item in conditionals if str(item.get("id", "")) == conditional_id), None)
+    if not conditional:
+        return jsonify({"ok": False, "error": "Condicional não encontrado."}), 404
+    if conditional.get("status") == "finalized":
+        return jsonify({"ok": False, "error": "Condicional já finalizado."}), 409
+
+    selected_ids = {str(item.get("productId", "")) for item in payload.get("finalItems") or []}
+    final_items = [item for item in conditional.get("items", []) or [] if str(item.get("productId", "")) in selected_ids]
+    updated = {
+        **conditional,
+        "status": "finalized",
+        "finalItems": final_items,
+        "finalizedAt": utc_now(),
+        "updatedAt": utc_now(),
+    }
+    state["conditionals"] = [updated if str(item.get("id", "")) == conditional_id else item for item in conditionals]
+    write_app_state_only(state)
+    record_audit("update", "conditional", conditional_id, {"finalItems": final_items, "status": "finalized"})
+    return jsonify({"ok": True, "data": updated})
 
 
 @app.post("/api/returns")

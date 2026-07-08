@@ -775,6 +775,98 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   margin-top: 6px;
 }
 
+.conditional-layout {
+  margin-bottom: 14px;
+}
+
+.conditional-note {
+  min-height: 62px;
+  display: grid;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid #f3c7d5;
+  border-radius: 8px;
+  background: #fff5f8;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.conditional-open-panel,
+.conditional-finalize-panel {
+  margin-top: 14px;
+  border-radius: 10px;
+  box-shadow: 0 14px 36px rgba(23, 33, 47, 0.07);
+}
+
+.conditional-open-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr) 130px auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.conditional-open-row strong,
+.conditional-open-row small {
+  display: block;
+}
+
+.conditional-open-row small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.small-action {
+  min-height: 34px;
+  padding: 8px 14px;
+  font-size: 12px;
+}
+
+.conditional-finalize-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.conditional-finalize-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.conditional-finalize-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+}
+
+.conditional-finalize-row strong,
+.conditional-finalize-row small {
+  display: block;
+}
+
+.conditional-finalize-row small {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.conditional-finalize-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
 .sale-history-panel {
   padding: 18px;
   border-radius: 10px;
@@ -4477,6 +4569,8 @@ input:focus, select:focus {
   .dashboard-cards, .dashboard-grid, .tabs, .cadastro-grid, .credit-kpis, .cash-kpis, .payable-kpis, .database-status-grid, .cash-expense-summary, .sale-history-kpis { grid-template-columns: 1fr; }
   .cash-summary-grid { grid-template-columns: 1fr; }
   .sale-search-row, .sale-customer-row, .sale-total-row, .sale-payment-head, .sale-current-card .payment-row, .sale-history-summary { grid-template-columns: 1fr; }
+  .conditional-open-row, .conditional-finalize-row { grid-template-columns: 1fr; }
+  .conditional-finalize-actions { display: grid; }
   .return-search-row, .return-actions, .manual-general-grid, .manual-values-grid, .cancel-filter-row, .cancel-date-range, .cancel-sale-row { grid-template-columns: 1fr; }
   .return-table-head { display: none; }
   .return-item-row { grid-template-columns: 1fr; }

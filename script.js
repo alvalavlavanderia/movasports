@@ -80,6 +80,9 @@ function bindEvents() {
   els.productTableSearch.addEventListener("input", renderProducts);
   els.productTableFilter.addEventListener("input", renderProducts);
   els.productPhoto.addEventListener("change", readProductPhoto);
+  els.productCost.addEventListener("input", updateProductMarginFromPrice);
+  els.productPrice.addEventListener("input", updateProductMarginFromPrice);
+  els.productMargin.addEventListener("input", updateProductPriceFromMargin);
   els.customerForm.addEventListener("submit", saveCustomer);
   els.clearCustomerButton.addEventListener("click", resetCustomerForm);
   els.supplierForm.addEventListener("submit", saveSupplier);
@@ -421,6 +424,20 @@ function updateCadastroHeader(tabId) {
   document.querySelectorAll(".customer-only-action").forEach((element) => element.hidden = tabId !== "cad-cliente");
 }
 
+function updateProductMarginFromPrice() {
+  const cost = readNumber(els.productCost.value);
+  const price = readNumber(els.productPrice.value);
+  const margin = cost > 0 ? ((price - cost) / cost) * 100 : 0;
+  els.productMargin.value = fixed(margin);
+}
+
+function updateProductPriceFromMargin() {
+  const cost = readNumber(els.productCost.value);
+  const margin = readNumber(els.productMargin.value);
+  const price = cost > 0 ? cost * (1 + margin / 100) : 0;
+  els.productPrice.value = fixed(price);
+}
+
 async function saveProduct(event) {
   event.preventDefault();
   const id = els.editingProductId.value || createId();
@@ -500,6 +517,7 @@ function resetProductForm() {
   els.productActive.checked = true;
   els.productCost.value = "0";
   els.productPrice.value = "0";
+  els.productMargin.value = "0";
   productPhotoData = "";
   productPhotoFile = null;
 }
@@ -521,6 +539,7 @@ function editProduct(id) {
   els.productActive.checked = product.active !== false;
   els.productCost.value = fixed(product.cost);
   els.productPrice.value = fixed(product.price);
+  updateProductMarginFromPrice();
   productPhotoData = product.photo || "";
   productPhotoFile = null;
   activateTab("cadastros");

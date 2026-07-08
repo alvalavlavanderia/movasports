@@ -2229,7 +2229,12 @@ function applyCancelSaleResultLocally(result) {
 
 function renderCreditCustomers() {
   const query = normalize(els.creditCustomerSearch.value);
-  const creditItems = db.receivables.filter((item) => item.method === "storeCredit" && item.status !== "cancelled" && receivableBalance(item) > 0);
+  const customers = db.customers.filter((customer) => {
+    const text = [customer.name, customer.whatsapp, customer.phone, customer.cpf].join(" ");
+    return customerCreditStats(customer.id).open > 0 && (!query || normalize(text).includes(query));
+  });
+  const customerIds = new Set(customers.map((customer) => customer.id));
+  const creditItems = db.receivables.filter((item) => item.method === "storeCredit" && item.status !== "cancelled" && receivableBalance(item) > 0 && customerIds.has(item.customerId));
   const openTotal = creditItems.reduce((total, item) => total + receivableBalance(item), 0);
   const dueItems = creditItems.filter((item) => item.dueDate >= todayIso);
   const overdueItems = creditItems.filter((item) => item.dueDate < todayIso);
@@ -2239,10 +2244,6 @@ function renderCreditCustomers() {
   els.creditDueCount.textContent = `${dueItems.length} parcela${dueItems.length === 1 ? "" : "s"}`;
   els.creditOverdueTotal.textContent = money.format(overdueItems.reduce((total, item) => total + receivableBalance(item), 0));
   els.creditOverdueCount.textContent = `${overdueItems.length} parcela${overdueItems.length === 1 ? "" : "s"}`;
-  const customers = db.customers.filter((customer) => {
-    const text = [customer.name, customer.whatsapp, customer.phone, customer.cpf].join(" ");
-    return customerCreditStats(customer.id).open > 0 && (!query || normalize(text).includes(query));
-  });
   els.creditCustomerList.innerHTML = "";
   els.creditFooter.innerHTML = "";
   if (!customers.length) {

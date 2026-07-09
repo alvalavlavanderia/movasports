@@ -2412,6 +2412,51 @@ textarea {
   font-size: 20px;
 }
 
+.credit-main-layout {
+  display: grid;
+  grid-template-columns: minmax(620px, 1.6fr) minmax(280px, 0.78fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.credit-filter-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin: 4px 0 14px;
+}
+
+.credit-filter-tabs button {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+  min-height: 30px;
+  padding: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.credit-filter-tabs button.active {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.credit-filter-tabs span {
+  min-width: 22px;
+  min-height: 20px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #f1e8ff;
+  color: #6930b8;
+  font-size: 11px;
+}
+
 .credit-table-wrap {
   overflow-x: hidden;
   border: 1px solid var(--line);
@@ -2439,6 +2484,15 @@ textarea {
   color: var(--muted);
   font-size: 10px;
   text-transform: uppercase;
+}
+
+.credit-table tbody tr {
+  cursor: pointer;
+}
+
+.credit-table tbody tr.selected {
+  background: #fff7fb;
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
 .credit-table th:nth-child(1),
@@ -2505,8 +2559,13 @@ textarea {
 }
 
 .credit-status.overdue {
-  background: #fff0d9;
-  color: #d57900;
+  background: #ffe6e8;
+  color: #e22d3d;
+}
+
+.credit-status.paid {
+  background: #eef1f5;
+  color: #697789;
 }
 
 .credit-actions {
@@ -2530,6 +2589,117 @@ textarea {
   background: #f3f6fa;
   border-color: var(--line);
   color: #9aa8ba;
+}
+
+.credit-menu-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: #6b3bd2;
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.credit-detail-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 10px;
+}
+
+.credit-detail-panel.empty {
+  min-height: 220px;
+  place-items: center;
+  color: var(--muted);
+  font-weight: 900;
+  text-align: center;
+}
+
+.credit-detail-head {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.credit-detail-head > span {
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #6b35d7, #4c1fb0);
+  color: #fff;
+  font-weight: 900;
+}
+
+.credit-detail-head strong,
+.credit-detail-head small,
+.credit-detail-head em {
+  display: block;
+}
+
+.credit-detail-head small,
+.credit-detail-head em {
+  margin-top: 4px;
+  color: var(--muted);
+  font-style: normal;
+  font-weight: 800;
+}
+
+.credit-detail-list,
+.credit-detail-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.credit-detail-list div,
+.credit-detail-summary div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding-bottom: 9px;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.credit-detail-list span,
+.credit-detail-summary span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.credit-detail-summary h3 {
+  margin: 6px 0 2px;
+  font-size: 14px;
+}
+
+.credit-detail-summary small {
+  grid-column: 2;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  margin-right: 7px;
+  border-radius: 50%;
+}
+
+.dot.green { background: #18a85b; }
+.dot.red { background: #ef3f75; }
+.dot.gray { background: #9aa8ba; }
+
+.credit-detail-actions {
+  display: grid;
+  gap: 10px;
 }
 
 .credit-footer {
@@ -4564,6 +4734,7 @@ input:focus, select:focus {
 
 .login-panel h2 { margin: 0; }
 .value-bad { color: var(--danger); font-weight: 800; }
+.value-ok { color: #159655; font-weight: 800; }
 
 @media print {
   .topbar, .tabs, .subtabs, .section-title button, form, .row-actions { display: none !important; }
@@ -4578,7 +4749,7 @@ input:focus, select:focus {
     height: auto;
   }
   .tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .two-column, .sale-layout, .sale-register-layout, .sale-history-layout, .sale-history-filter-grid, .sale-history-results-layout, .return-grid, .manual-receipt-grid, .credit-summary-panel, .dashboard-head, .product-register-layout, .customer-register-layout, .cadastro-register-layout, .cadastro-register-layout.compact-register, .audit-toolbar, .restore-grid, .password-grid { grid-template-columns: 1fr; }
+  .two-column, .sale-layout, .sale-register-layout, .sale-history-layout, .sale-history-filter-grid, .sale-history-results-layout, .return-grid, .manual-receipt-grid, .credit-summary-panel, .credit-main-layout, .dashboard-head, .product-register-layout, .customer-register-layout, .cadastro-register-layout, .cadastro-register-layout.compact-register, .audit-toolbar, .restore-grid, .password-grid { grid-template-columns: 1fr; }
   .dashboard-cards, .dashboard-grid, .database-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cash-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cadastro-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -639,25 +639,34 @@
           <article><span class="orange"><svg viewBox="0 0 24 24"><path d="M12 4 4 20h16L12 4Z"></path><path d="M12 10v4"></path><path d="M12 17h.01"></path></svg></span><small>Atrasadas</small><strong id="creditOverdueTotal">R$ 0,00</strong><em id="creditOverdueCount">0 parcelas</em></article>
         </div>
       </section>
-      <section class="panel credit-table-panel">
-        <div class="section-title tight"><h2>Clientes</h2></div>
-        <div class="credit-table-wrap">
-          <table class="credit-table">
-            <thead>
-              <tr>
-                <th>Cliente</th>
-                <th>Limite</th>
-                <th>Saldo devedor</th>
-                <th>Parcelas</th>
-                <th>Situação</th>
-                <th>Ações</th>
-              </tr>
-            </thead>
-            <tbody id="creditCustomerList"></tbody>
-          </table>
-        </div>
-        <div id="creditFooter" class="credit-footer"></div>
-      </section>
+      <div class="credit-main-layout">
+        <section class="panel credit-table-panel">
+          <div class="section-title tight"><h2>Clientes</h2><button id="creditExportButton" class="ghost" type="button">Exportar</button></div>
+          <div class="credit-filter-tabs">
+            <button class="active" type="button" data-credit-filter="all">Todos <span id="creditFilterAllCount">0</span></button>
+            <button type="button" data-credit-filter="ok">Em dia <span id="creditFilterOkCount">0</span></button>
+            <button type="button" data-credit-filter="overdue">Atrasadas <span id="creditFilterOverdueCount">0</span></button>
+            <button type="button" data-credit-filter="paid">Quitados <span id="creditFilterPaidCount">0</span></button>
+          </div>
+          <div class="credit-table-wrap">
+            <table class="credit-table">
+              <thead>
+                <tr>
+                  <th>Cliente</th>
+                  <th>Limite</th>
+                  <th>Saldo devedor</th>
+                  <th>Parcelas</th>
+                  <th>Situação</th>
+                  <th>Ações</th>
+                </tr>
+              </thead>
+              <tbody id="creditCustomerList"></tbody>
+            </table>
+          </div>
+          <div id="creditFooter" class="credit-footer"></div>
+        </section>
+        <aside id="creditCustomerDetail" class="panel credit-detail-panel empty">Selecione um cliente para visualizar o resumo.</aside>
+      </div>
     </section>
 
     <section id="contas" class="tab-panel">

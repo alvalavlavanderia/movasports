@@ -32,6 +32,8 @@ let cart = [];
 let conditionalCart = [];
 let selectedConditionalId = "";
 let conditionalView = "list";
+let selectedCreditCustomerId = "";
+let creditFilterStatus = "all";
 let productPhotoData = "";
 let productPhotoFile = null;
 let catalogViewMode = "grid";
@@ -111,6 +113,11 @@ function bindEvents() {
   els.creditReceiveList.addEventListener("input", renderCreditReceiveTotal);
   els.creditReceiveCloseButton.addEventListener("click", closeCreditReceiveModal);
   els.creditReceiveCancelButton.addEventListener("click", closeCreditReceiveModal);
+  els.creditExportButton.addEventListener("click", exportCreditCustomers);
+  document.querySelectorAll("[data-credit-filter]").forEach((button) => button.addEventListener("click", () => {
+    creditFilterStatus = button.dataset.creditFilter;
+    renderCreditCustomers();
+  }));
   els.creditNewCustomerButton.addEventListener("click", () => {
     resetCustomerForm();
     activateTab("cadastros");
@@ -2780,7 +2787,7 @@ function applyCancelSaleResultLocally(result) {
   db.cash = [...(result.cash || []), ...db.cash];
 }
 
-function renderCreditCustomers() {
+function renderCreditCustomersLegacy() {
   const query = normalize(els.creditCustomerSearch.value);
   const customers = db.customers.filter((customer) => {
     const text = [customer.name, customer.whatsapp, customer.phone, customer.cpf].join(" ");
@@ -2830,6 +2837,150 @@ function renderCreditCustomers() {
     <span>Mostrando 1 a ${customers.length} de ${customers.length} cliente${customers.length === 1 ? "" : "s"}</span>
     <div class="credit-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
   `;
+}
+
+function renderCreditCustomers() {
+  const query = normalize(els.creditCustomerSearch.value);
+  const searchedCustomers = db.customers.filter((customer) => {
+    const stats = customerCreditStats(customer.id);
+    const text = [customer.name, customer.whatsapp, customer.phone, customer.cpf].join(" ");
+    return stats.totalCount > 0 && (!query || normalize(text).includes(query));
+  });
+  const countByStatus = {
+    all: searchedCustomers.length,
+    ok: searchedCustomers.filter((customer) => creditStatusFromStats(customerCreditStats(customer.id)) === "ok").length,
+    overdue: searchedCustomers.filter((customer) => creditStatusFromStats(customerCreditStats(customer.id)) === "overdue").length,
+    paid: searchedCustomers.filter((customer) => creditStatusFromStats(customerCreditStats(customer.id)) === "paid").length,
+  };
+  const customers = searchedCustomers.filter((customer) => creditFilterStatus === "all" || creditStatusFromStats(customerCreditStats(customer.id)) === creditFilterStatus);
+  const customerIds = new Set(customers.map((customer) => customer.id));
+  const creditItems = db.receivables.filter((item) => item.method === "storeCredit" && item.status !== "cancelled" && customerIds.has(item.customerId));
+  const openItems = creditItems.filter((item) => receivableBalance(item) > 0);
+  const openTotal = openItems.reduce((total, item) => total + receivableBalance(item), 0);
+  const dueItems = openItems.filter((item) => item.dueDate >= todayIso);
+  const overdueItems = openItems.filter((item) => item.dueDate < todayIso);
+  els.creditOpenTotal.textContent = money.format(openTotal);
+  els.creditOpenCount.textContent = `${openItems.length} parcela${openItems.length === 1 ? "" : "s"}`;
+  els.creditDueTotal.textContent = money.format(dueItems.reduce((total, item) => total + receivableBalance(item), 0));
+  els.creditDueCount.textContent = `${dueItems.length} parcela${dueItems.length === 1 ? "" : "s"}`;
+  els.creditOverdueTotal.textContent = money.format(overdueItems.reduce((total, item) => total + receivableBalance(item), 0));
+  els.creditOverdueCount.textContent = `${overdueItems.length} parcela${overdueItems.length === 1 ? "" : "s"}`;
+  if (els.creditFilterAllCount) els.creditFilterAllCount.textContent = countByStatus.all;
+  if (els.creditFilterOkCount) els.creditFilterOkCount.textContent = countByStatus.ok;
+  if (els.creditFilterOverdueCount) els.creditFilterOverdueCount.textContent = countByStatus.overdue;
+  if (els.creditFilterPaidCount) els.creditFilterPaidCount.textContent = countByStatus.paid;
+  document.querySelectorAll("[data-credit-filter]").forEach((button) => button.classList.toggle("active", button.dataset.creditFilter === creditFilterStatus));
+  els.creditCustomerList.innerHTML = "";
+  els.creditFooter.innerHTML = "";
+  if (!customers.length) {
+    els.creditCustomerList.innerHTML = `<tr><td colspan="6" class="empty-cell">Nenhum cliente encontrado.</td></tr>`;
+    els.creditFooter.textContent = "Mostrando 0 clientes";
+    renderCreditCustomerDetail(null);
+    return;
+  }
+  if (!customers.some((customer) => customer.id === selectedCreditCustomerId)) selectedCreditCustomerId = customers[0].id;
+  customers.forEach((customer) => {
+    const stats = customerCreditStats(customer.id);
+    const statusKey = creditStatusFromStats(stats);
+    const row = document.createElement("tr");
+    row.className = customer.id === selectedCreditCustomerId ? "selected" : "";
+    row.innerHTML = `
+      <td>
+        <div class="credit-client-cell">
+          <span>${escapeHtml(initialsFromName(customer.name || "CL"))}</span>
+          <div><strong>${escapeHtml(customer.name)}</strong><small>${escapeHtml(customer.whatsapp || "-")} | CPF: ${escapeHtml(customer.cpf || "-")}</small></div>
+        </div>
+      </td>
+      <td>${money.format(customerLimit(customer))}</td>
+      <td class="${stats.overdueCount > 0 ? "value-bad" : stats.open > 0 ? "value-ok" : ""}">${money.format(stats.open)}</td>
+      <td><strong>${stats.openCount}</strong><small>${stats.totalCount} no histórico</small></td>
+      <td><span class="credit-status ${statusKey === "overdue" ? "overdue" : statusKey === "paid" ? "paid" : "ok"}">${creditStatusLabel(statusKey)}</span></td>
+      <td><div class="credit-actions"></div></td>
+    `;
+    row.addEventListener("click", () => {
+      selectedCreditCustomerId = customer.id;
+      renderCreditCustomers();
+    });
+    row.querySelector(".credit-actions").append(button("⋮", "credit-menu-button", () => {
+      selectedCreditCustomerId = customer.id;
+      renderCreditCustomers();
+    }));
+    els.creditCustomerList.append(row);
+  });
+  els.creditFooter.innerHTML = `
+    <span>Mostrando 1 a ${customers.length} de ${searchedCustomers.length} cliente${searchedCustomers.length === 1 ? "" : "s"}</span>
+    <div class="credit-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
+  `;
+  renderCreditCustomerDetail(db.customers.find((customer) => customer.id === selectedCreditCustomerId));
+}
+
+function renderCreditCustomerDetail(customer) {
+  if (!els.creditCustomerDetail) return;
+  if (!customer) {
+    els.creditCustomerDetail.className = "panel credit-detail-panel empty";
+    els.creditCustomerDetail.textContent = "Selecione um cliente para visualizar o resumo.";
+    return;
+  }
+  const stats = customerCreditStats(customer.id);
+  const statusKey = creditStatusFromStats(stats);
+  const nextDue = stats.openItems.slice().sort((a, b) => String(a.dueDate || "").localeCompare(String(b.dueDate || "")))[0]?.dueDate || "";
+  els.creditCustomerDetail.className = "panel credit-detail-panel";
+  els.creditCustomerDetail.innerHTML = `
+    <div class="credit-detail-head">
+      <span>${escapeHtml(initialsFromName(customer.name || "CL"))}</span>
+      <div><strong>${escapeHtml(customer.name || "-")}</strong><small>${escapeHtml(customer.whatsapp || customer.phone || "-")}</small><em>Cliente desde ${formatDate(customer.createdAt || customer.updatedAt || todayIso)}</em></div>
+      <b class="credit-status ${statusKey === "overdue" ? "overdue" : statusKey === "paid" ? "paid" : "ok"}">${creditStatusLabel(statusKey)}</b>
+    </div>
+    <div class="credit-detail-list">
+      <div><span>Limite de crédito</span><strong>${money.format(customerLimit(customer))}</strong></div>
+      <div><span>Saldo devedor</span><strong class="${stats.open > 0 ? "value-bad" : ""}">${money.format(stats.open)}</strong></div>
+      <div><span>Parcelas em aberto</span><strong>${stats.openCount}</strong></div>
+      <div><span>Próximo vencimento</span><strong>${nextDue ? formatDate(nextDue) : "-"}</strong></div>
+    </div>
+    <section class="credit-detail-summary">
+      <h3>Resumo por situação</h3>
+      <div><span><i class="dot green"></i>Em dia</span><strong>${money.format(stats.due)}</strong><small>${stats.dueCount} parcelas</small></div>
+      <div><span><i class="dot red"></i>Atrasadas</span><strong>${money.format(stats.overdue)}</strong><small>${stats.overdueCount} parcelas</small></div>
+      <div><span><i class="dot gray"></i>Quitadas</span><strong>${money.format(stats.paid)}</strong><small>${stats.paidCount} parcelas</small></div>
+    </section>
+    <div class="credit-detail-actions">
+      <button class="primary" type="button" id="creditDetailReceiveButton"${stats.open <= 0 ? " disabled" : ""}>Registrar pagamento</button>
+      <button class="ghost" type="button" id="creditDetailEditButton">Editar cliente</button>
+    </div>
+  `;
+  els.creditCustomerDetail.querySelector("#creditDetailReceiveButton").addEventListener("click", () => openCreditReceiveModal(customer.id));
+  els.creditCustomerDetail.querySelector("#creditDetailEditButton").addEventListener("click", () => editCustomer(customer.id));
+}
+
+function exportCreditCustomers() {
+  const rows = filteredCreditCustomersForExport().map((customer) => {
+    const stats = customerCreditStats(customer.id);
+    return {
+      cliente: customer.name,
+      cpf: customer.cpf,
+      telefone: customer.whatsapp || customer.phone,
+      limite: fixed(customerLimit(customer)),
+      saldo_devedor: fixed(stats.open),
+      parcelas_abertas: stats.openCount,
+      situacao: creditStatusLabel(creditStatusFromStats(stats)),
+    };
+  });
+  const blob = new Blob([`\uFEFF${toCsv(rows)}`], { type: "text/csv;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `crediario-${todayIso}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+function filteredCreditCustomersForExport() {
+  const query = normalize(els.creditCustomerSearch.value);
+  return db.customers.filter((customer) => {
+    const stats = customerCreditStats(customer.id);
+    const status = creditStatusFromStats(stats);
+    const text = [customer.name, customer.whatsapp, customer.phone, customer.cpf].join(" ");
+    return stats.totalCount > 0 && (!query || normalize(text).includes(query)) && (creditFilterStatus === "all" || status === creditFilterStatus);
+  });
 }
 
 function openCreditReceiveModal(customerId) {
@@ -2949,12 +3100,38 @@ function customerCreditStats(customerId) {
   const items = db.receivables.filter((item) => item.customerId === customerId && item.method === "storeCredit" && item.status !== "cancelled");
   const openItems = items.filter((item) => receivableBalance(item) > 0);
   const overdueItems = openItems.filter((item) => item.dueDate < todayIso);
+  const dueItems = openItems.filter((item) => item.dueDate >= todayIso);
+  const paidItems = items.filter((item) => receivableBalance(item) <= 0);
   return {
+    items,
+    openItems,
+    dueItems,
+    overdueItems,
+    paidItems,
     totalCount: items.length,
     openCount: openItems.length,
+    dueCount: dueItems.length,
     overdueCount: overdueItems.length,
+    paidCount: paidItems.length,
     open: openItems.reduce((total, item) => total + receivableBalance(item), 0),
+    due: dueItems.reduce((total, item) => total + receivableBalance(item), 0),
+    overdue: overdueItems.reduce((total, item) => total + receivableBalance(item), 0),
+    paid: paidItems.reduce((total, item) => total + Number(item.received || item.amount || 0), 0),
   };
+}
+
+function creditStatusFromStats(stats) {
+  if (stats.overdueCount > 0) return "overdue";
+  if (stats.openCount <= 0) return "paid";
+  return "ok";
+}
+
+function creditStatusLabel(status) {
+  return status === "overdue" ? "Atrasado" : status === "paid" ? "Quitado" : "Em dia";
+}
+
+function customerLimit(customer) {
+  return Number(customer.limit ?? customer.creditLimit ?? 0);
 }
 
 async function savePayable(event) {

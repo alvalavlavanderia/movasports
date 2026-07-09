@@ -435,6 +435,18 @@ function updateCadastroHeader(tabId) {
   const [title, subtitle] = labels[tabId] || labels["cad-home"];
   els.cadastroTitle.textContent = title;
   els.cadastroSubtitle.textContent = subtitle;
+  const crumbs = {
+    "cad-home": "Cadastros",
+    "cad-produto": "Produto",
+    "cad-cliente": "Cliente",
+    "cad-fornecedor": "Fornecedor",
+    "cad-marca": "Marca",
+    "cad-categoria": "Categoria",
+    "cad-usuario": "Usuários",
+  };
+  const crumb = crumbs[tabId] || "Cadastros";
+  els.cadastroTitle.textContent = crumb === "Cadastros" ? "Mova Sports | Cadastros" : `Mova Sports | Cadastros | ${crumb}`;
+  els.cadastroSubtitle.hidden = true;
   els.cadastroPageActions.hidden = tabId === "cad-home";
   document.querySelectorAll(".product-only-action").forEach((element) => element.hidden = tabId !== "cad-produto");
   document.querySelectorAll(".customer-only-action").forEach((element) => element.hidden = tabId !== "cad-cliente");

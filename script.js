@@ -415,6 +415,7 @@ function activateSubtab(tabId) {
   parent.querySelectorAll(".subtab").forEach((button) => button.classList.toggle("active", button.dataset.subtab === tabId));
   parent.querySelectorAll(".subtab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === tabId));
   updateCadastroHeader(tabId);
+  updateSaleHeader(tabId);
 }
 
 function showCadastroHome() {
@@ -437,6 +438,19 @@ function updateCadastroHeader(tabId) {
   els.cadastroPageActions.hidden = tabId === "cad-home";
   document.querySelectorAll(".product-only-action").forEach((element) => element.hidden = tabId !== "cad-produto");
   document.querySelectorAll(".customer-only-action").forEach((element) => element.hidden = tabId !== "cad-cliente");
+}
+
+function updateSaleHeader(tabId) {
+  if (!els.saleBreadcrumbTitle) return;
+  const labels = {
+    "nova-venda": "Nova venda",
+    condicional: "Condicional",
+    devolucao: "Devolução/troca",
+    "historico-vendas": "Histórico",
+    "cancelar-venda": "Cancelar venda",
+  };
+  if (!labels[tabId]) return;
+  els.saleBreadcrumbTitle.textContent = `Mova Sports | Vendas | ${labels[tabId]}`;
 }
 
 function updateProductMarginFromPrice() {

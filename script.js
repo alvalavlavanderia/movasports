@@ -1490,7 +1490,7 @@ function renderSaleProducts() {
     row.className = "sale-product-row";
     row.innerHTML = `
       ${product.photo ? `<img src="${product.photo}" alt="">` : `<div class="sale-product-photo"></div>`}
-      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | ${escapeHtml(productStockLabel(product))}</small></div>
+      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(productListMeta(product))}</small></div>
       <strong>${money.format(product.price)}</strong>
       <div class="table-actions"></div>
     `;
@@ -1539,6 +1539,10 @@ function productStockLabel(product) {
   const reserved = openConditionalReservedQty(product.id);
   const available = availableProductStock(product);
   return reserved > 0 ? `Disponível: ${available} | Condicional: ${reserved}` : `Estoque: ${Number(product.stock || 0)}`;
+}
+
+function productListMeta(product) {
+  return `${product.barcode || "-"} | ${product.size || "-"} | ${product.color || "-"} | ${productStockLabel(product)}`;
 }
 
 function renderCart() {
@@ -1597,7 +1601,7 @@ function renderConditionalProducts() {
     row.className = "sale-product-row";
     row.innerHTML = `
       ${product.photo ? `<img src="${product.photo}" alt="">` : `<div class="sale-product-photo"></div>`}
-      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | ${escapeHtml(productStockLabel(product))}</small></div>
+      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(productListMeta(product))}</small></div>
       <strong>${money.format(product.price)}</strong>
       <div class="table-actions"></div>
     `;

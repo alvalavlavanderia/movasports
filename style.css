@@ -3323,6 +3323,16 @@ textarea {
   justify-content: center;
 }
 
+.payable-pay-button {
+  min-width: 74px;
+  min-height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 900;
+  background: linear-gradient(135deg, #ff377d, #ee3f75);
+}
+
 .payable-icon-button {
   min-width: 32px;
   min-height: 32px;
@@ -3420,7 +3430,8 @@ textarea {
 }
 
 .credit-receive-summary,
-.credit-receive-total {
+.credit-receive-total,
+.payable-payment-summary {
   display: flex;
   justify-content: space-between;
   gap: 14px;
@@ -3432,8 +3443,18 @@ textarea {
 }
 
 .credit-receive-summary span,
-.credit-receive-total span {
+.credit-receive-total span,
+.payable-payment-summary span {
   color: var(--muted);
+}
+
+.payable-payment-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.payable-payment-summary > div:last-child {
+  text-align: right;
 }
 
 .credit-receive-list {
@@ -3485,6 +3506,12 @@ textarea {
 .credit-receive-fields {
   display: grid;
   grid-template-columns: 170px 180px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.payable-payment-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -4786,6 +4813,7 @@ input:focus, select:focus {
   .credit-footer { display: grid; }
   .credit-receive-row,
   .credit-receive-fields,
+  .payable-payment-fields,
   .modal-actions,
   .cash-movement-form,
   .bank-account-form,

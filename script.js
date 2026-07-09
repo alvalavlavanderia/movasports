@@ -143,6 +143,11 @@ function bindEvents() {
   els.manualReceiptForm.addEventListener("input", renderManualReceiptSummary);
   els.payableForm.addEventListener("submit", savePayable);
   els.payableNewButton.addEventListener("click", () => els.payableFormPanel.hidden = !els.payableFormPanel.hidden);
+  els.payablePaymentForm.addEventListener("submit", savePayablePayment);
+  els.payablePaymentCloseButton.addEventListener("click", closePayablePaymentModal);
+  els.payablePaymentCancelButton.addEventListener("click", closePayablePaymentModal);
+  els.payablePaymentFee.addEventListener("input", renderPayablePaymentTotal);
+  els.payablePaymentDiscount.addEventListener("input", renderPayablePaymentTotal);
   els.cashClosingButton.addEventListener("click", () => els.cashClosingPanel.hidden = !els.cashClosingPanel.hidden);
   els.cashClosingForm.addEventListener("submit", saveCashClosing);
   els.cashClosingForm.addEventListener("input", renderCashClosingSummary);
@@ -3226,19 +3231,49 @@ function renderPayables() {
       <td>${escapeHtml(item.category || "-")}</td>
       <td>${escapeHtml(item.notes || item.category || "-")}</td>
       <td>${formatDate(item.dueDate)}</td>
-      <td>${money.format(item.amount + (item.fee || 0))}</td>
+      <td>${money.format(item.paidAmount || item.amount + (item.fee || 0) - (item.discount || 0))}</td>
       <td>${payableStatusBadge(item)}</td>
       <td><div class="payable-actions"></div></td>
     `;
     const actions = row.querySelector(".payable-actions");
     actions.append(button("Ver", "ghost payable-icon-button", () => alert(`${item.supplier}\n${item.notes || item.category}\nVencimento: ${formatDate(item.dueDate)}\nValor: ${money.format(item.amount)}`)));
-    actions.append(button("...", "stock-menu-button", () => payPayable(item.id), status === "paid"));
+    actions.append(button("Pagar", "primary payable-pay-button", () => openPayablePaymentModal(item.id), status === "paid"));
     els.payableList.append(row);
   });
   els.payableFooter.innerHTML = `
     <span>Mostrando 1 a ${items.length} de ${items.length} conta${items.length === 1 ? "" : "s"}</span>
     <div class="payable-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
   `;
+}
+
+function openPayablePaymentModal(id) {
+  const item = db.payables.find((entry) => entry.id === id);
+  if (!item || payableStatus(item) === "paid") return;
+  els.payablePaymentId.value = id;
+  els.payablePaymentTitle.textContent = `${item.supplier || "Fornecedor"} | ${item.notes || item.category || "Conta a pagar"}`;
+  els.payablePaymentOriginal.textContent = money.format(item.amount || 0);
+  els.payablePaymentDate.value = todayIso;
+  els.payablePaymentMethod.value = "pix";
+  els.payablePaymentFee.value = "0";
+  els.payablePaymentDiscount.value = "0";
+  els.payablePaymentNote.value = "";
+  renderPayablePaymentTotal();
+  els.payablePaymentModal.hidden = false;
+}
+
+function closePayablePaymentModal() {
+  els.payablePaymentModal.hidden = true;
+  els.payablePaymentForm.reset();
+  els.payablePaymentId.value = "";
+}
+
+function renderPayablePaymentTotal() {
+  const item = db.payables.find((entry) => entry.id === els.payablePaymentId.value);
+  const base = Number(item?.amount || 0);
+  const fee = readNumber(els.payablePaymentFee.value);
+  const discount = readNumber(els.payablePaymentDiscount.value);
+  const total = Math.max(0, round(base + fee - discount));
+  els.payablePaymentTotal.textContent = money.format(total);
 }
 
 function payableStatusBadge(item) {
@@ -3248,17 +3283,24 @@ function payableStatusBadge(item) {
   return `<span class="payable-status ${status}">${labels[status]}${extra}</span>`;
 }
 
-async function payPayable(id) {
+async function savePayablePayment(event) {
+  event.preventDefault();
+  const id = els.payablePaymentId.value;
   const item = db.payables.find((entry) => entry.id === id);
   if (!item) return;
-  const fee = readNumber(prompt("Juros ou multa", "0"));
-  const amount = item.amount + fee;
+  const fee = readNumber(els.payablePaymentFee.value);
+  const discount = readNumber(els.payablePaymentDiscount.value);
+  const amount = Math.max(0, round(item.amount + fee - discount));
+  if (amount <= 0) return alert("O valor final do pagamento deve ser maior que zero.");
+  const paidAt = timestampForDateInput(els.payablePaymentDate.value || todayIso);
+  const method = els.payablePaymentMethod.value;
+  const note = els.payablePaymentNote.value.trim();
   if (BACKEND_ENABLED) {
     try {
       const response = await fetch(`/api/payables/${encodeURIComponent(id)}/pay`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fee, amount, method: "pix", paidAt: new Date().toISOString() }),
+        body: JSON.stringify({ fee, discount, amount, method, paidAt, note }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -3267,6 +3309,7 @@ async function payPayable(id) {
       }
       applyPayablePaymentResultLocally(payload.data);
       persistLocalOnly();
+      closePayablePaymentModal();
       renderAll();
       return;
     } catch (error) {
@@ -3276,11 +3319,14 @@ async function payPayable(id) {
     }
   }
   item.fee = fee;
+  item.discount = discount;
   item.paidAmount = amount;
   item.status = "paid";
-  item.paidAt = new Date().toISOString();
-  addCash("out", "contas a pagar", item.category, "pix", amount, item.id);
+  item.paidAt = paidAt;
+  const description = note ? `${item.category} - ${note}` : item.category;
+  addCash("out", "contas a pagar", description, method, amount, item.id, paidAt);
   persist();
+  closePayablePaymentModal();
   renderAll();
 }
 

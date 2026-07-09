@@ -870,6 +870,7 @@ def init_db() -> None:
                 notes TEXT,
                 paid_amount REAL NOT NULL DEFAULT 0,
                 fee REAL NOT NULL DEFAULT 0,
+                discount REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'pending',
                 paid_at TEXT,
                 created_at TEXT NOT NULL,
@@ -878,6 +879,9 @@ def init_db() -> None:
             )
             """
         )
+        payable_columns = {row["name"] for row in conn.execute("PRAGMA table_info(payables)").fetchall()}
+        if "discount" not in payable_columns:
+            conn.execute("ALTER TABLE payables ADD COLUMN discount REAL NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_store_due ON payables(store_id, due_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_status ON payables(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier)")
@@ -1305,9 +1309,9 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
             """
             INSERT INTO payables (
                 id, store_id, supplier, category, amount, issue_date, due_date,
-                notes, paid_amount, fee, status, paid_at, created_at, updated_at
+                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payable.get("id"),
@@ -1320,6 +1324,7 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
                 payable.get("notes", ""),
                 float(payable.get("paidAmount") or 0),
                 float(payable.get("fee") or 0),
+                float(payable.get("discount") or 0),
                 payable.get("status", "pending"),
                 payable.get("paidAt", ""),
                 payable.get("createdAt", now),
@@ -2070,6 +2075,7 @@ def payable_from_row(row: sqlite3.Row | dict) -> dict:
         "notes": row["notes"] or "",
         "paidAmount": money_round(row["paidAmount"]),
         "fee": money_round(row["fee"]),
+        "discount": money_round(row["discount"] if "discount" in row.keys() else 0),
         "status": row["status"] or "pending",
         "paidAt": row["paidAt"] or "",
         "createdAt": row["createdAt"] or utc_now(),
@@ -2090,6 +2096,7 @@ def normalize_payable_payload(payload: dict, existing: dict | None = None) -> di
         "notes": str(payload.get("notes", existing.get("notes", "")) or "").strip(),
         "paidAmount": money_round(payload.get("paidAmount", existing.get("paidAmount", 0))),
         "fee": money_round(payload.get("fee", existing.get("fee", 0))),
+        "discount": money_round(payload.get("discount", existing.get("discount", 0))),
         "status": str(payload.get("status", existing.get("status", "pending")) or "pending").strip(),
         "paidAt": str(payload.get("paidAt", existing.get("paidAt", "")) or "").strip(),
         "createdAt": str(payload.get("createdAt", existing.get("createdAt", now)) or now),
@@ -3984,7 +3991,7 @@ def list_payables():
             """
             SELECT id, supplier, category, amount, issue_date AS issueDate,
                    due_date AS dueDate, notes, paid_amount AS paidAmount,
-                   fee, status, paid_at AS paidAt, created_at AS createdAt,
+                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
                    updated_at AS updatedAt
             FROM payables
             WHERE store_id = ?
@@ -4024,7 +4031,7 @@ def update_payable_api(payable_id: str):
             """
             SELECT id, supplier, category, amount, issue_date AS issueDate,
                    due_date AS dueDate, notes, paid_amount AS paidAmount,
-                   fee, status, paid_at AS paidAt, created_at AS createdAt,
+                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
                    updated_at AS updatedAt
             FROM payables
             WHERE store_id = ? AND id = ?
@@ -4054,7 +4061,7 @@ def pay_payable_api(payable_id: str):
             """
             SELECT id, supplier, category, amount, issue_date AS issueDate,
                    due_date AS dueDate, notes, paid_amount AS paidAmount,
-                   fee, status, paid_at AS paidAt, created_at AS createdAt,
+                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
                    updated_at AS updatedAt
             FROM payables
             WHERE store_id = ? AND id = ?
@@ -4067,12 +4074,14 @@ def pay_payable_api(payable_id: str):
     if payable["status"] == "paid":
         return jsonify({"ok": False, "error": "Conta já está paga."}), 409
     fee = money_round(payload.get("fee", 0))
-    amount = money_round(payload.get("amount", payable["amount"] + fee))
+    discount = money_round(payload.get("discount", 0))
+    amount = money_round(payload.get("amount", payable["amount"] + fee - discount))
     if amount <= 0:
         return jsonify({"ok": False, "error": "Valor pago deve ser maior que zero."}), 400
     paid_at = str(payload.get("paidAt") or utc_now())
     method = str(payload.get("method") or "pix").strip()
     payable["fee"] = fee
+    payable["discount"] = discount
     payable["paidAmount"] = amount
     payable["status"] = "paid"
     payable["paidAt"] = paid_at
@@ -4080,7 +4089,7 @@ def pay_payable_api(payable_id: str):
     movement = normalize_cash_movement_payload({
         "direction": "out",
         "type": "contas a pagar",
-        "description": payable["category"],
+        "description": f"{payable['category']}{' - ' + str(payload.get('note')).strip() if payload.get('note') else ''}",
         "method": method,
         "amount": amount,
         "refId": payable_id,

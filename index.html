@@ -1013,6 +1013,34 @@
     </form>
   </div>
 
+  <div id="payablePaymentModal" class="modal-backdrop" hidden>
+    <form id="payablePaymentForm" class="modal-panel payable-payment-modal">
+      <input id="payablePaymentId" type="hidden">
+      <div class="modal-head">
+        <div>
+          <h2>Confirmar pagamento</h2>
+          <p id="payablePaymentTitle">Conta a pagar</p>
+        </div>
+        <button id="payablePaymentCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div class="payable-payment-summary">
+        <div><span>Valor original</span><strong id="payablePaymentOriginal">R$ 0,00</strong></div>
+        <div><span>Total a pagar</span><strong id="payablePaymentTotal">R$ 0,00</strong></div>
+      </div>
+      <div class="payable-payment-fields">
+        <label class="field">Data do pagamento<input id="payablePaymentDate" type="date" required></label>
+        <label class="field">Forma de pagamento<select id="payablePaymentMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+        <label class="field">Juros / multa<input id="payablePaymentFee" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Desconto<input id="payablePaymentDiscount" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field span-2">Observação<input id="payablePaymentNote" type="text" placeholder="Opcional"></label>
+      </div>
+      <div class="modal-actions">
+        <button id="payablePaymentCancelButton" class="ghost" type="button">Cancelar</button>
+        <button class="primary" type="submit">Confirmar pagamento</button>
+      </div>
+    </form>
+  </div>
+
   <div id="loginScreen" class="login-screen">
     <form id="loginForm" class="login-panel" autocomplete="off">
       <h2>Entrar no Mova Sports</h2>

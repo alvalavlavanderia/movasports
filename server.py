@@ -1803,6 +1803,21 @@ def next_conditional_code(state: dict) -> str:
     return f"COND{highest + 1:03d}"
 
 
+def conditional_reserved_quantities(state: dict, exclude_conditional_id: str = "") -> dict[str, int]:
+    reserved: dict[str, int] = {}
+    for conditional in state.get("conditionals", []) or []:
+        if str(conditional.get("id", "")) == exclude_conditional_id:
+            continue
+        if conditional.get("status") in {"finalized", "cancelled"}:
+            continue
+        for item in conditional.get("items", []) or []:
+            product_id = str(item.get("productId", "") or "")
+            if not product_id:
+                continue
+            reserved[product_id] = reserved.get(product_id, 0) + max(0, int(float(item.get("quantity", 0) or 0)))
+    return reserved
+
+
 def build_conditional_from_payload(payload: dict, state: dict, conditional_id: str) -> tuple[dict | None, str | None]:
     customer_id = str(payload.get("customerId", "") or "").strip()
     customers = state.get("customers", []) or []
@@ -1811,6 +1826,8 @@ def build_conditional_from_payload(payload: dict, state: dict, conditional_id: s
         return None, "Cliente cadastrado é obrigatório para condicional."
 
     products_by_id = {str(product.get("id", "")): product for product in (state.get("products", []) or [])}
+    reserved_by_product = conditional_reserved_quantities(state, conditional_id)
+    requested_by_product: dict[str, int] = {}
     items = []
     for item in payload.get("items") or []:
         product_id = str(item.get("productId", "") or "").strip()
@@ -1818,8 +1835,10 @@ def build_conditional_from_payload(payload: dict, state: dict, conditional_id: s
         product = products_by_id.get(product_id)
         if not product or quantity <= 0:
             return None, "Item de condicional inválido."
-        if int(product.get("stock") or 0) < quantity:
-            return None, f"Estoque insuficiente para {product.get('name', 'produto')}."
+        requested_by_product[product_id] = requested_by_product.get(product_id, 0) + quantity
+        available = int(product.get("stock") or 0) - int(reserved_by_product.get(product_id, 0) or 0)
+        if available < requested_by_product[product_id]:
+            return None, f"Estoque disponivel insuficiente para {product.get('name', 'produto')}. Existem pecas em condicional."
         unit_price = float(item.get("unitPrice", product.get("price", 0)) or 0)
         unit_cost = float(item.get("unitCost", product.get("cost", 0)) or 0)
         items.append({
@@ -1862,8 +1881,10 @@ def date_input_from_datetime(value: datetime) -> str:
     return value.date().isoformat()
 
 
-def build_sale_from_payload(payload: dict, product_rows: dict[str, sqlite3.Row], sale_id: str) -> tuple[dict | None, str | None]:
+def build_sale_from_payload(payload: dict, product_rows: dict[str, sqlite3.Row], sale_id: str, reserved_by_product: dict[str, int] | None = None) -> tuple[dict | None, str | None]:
     created_at = str(payload.get("createdAt") or utc_now())
+    reserved_by_product = reserved_by_product or {}
+    requested_by_product: dict[str, int] = {}
     items = []
     for index, item in enumerate(payload.get("items") or [], start=1):
         product_id = str(item.get("productId", "")).strip()
@@ -1873,8 +1894,10 @@ def build_sale_from_payload(payload: dict, product_rows: dict[str, sqlite3.Row],
         row = product_rows.get(product_id)
         if not row:
             return None, "Produto não encontrado."
-        if int(row["stock"] or 0) < quantity:
-            return None, f"Estoque insuficiente para {row['name']}."
+        requested_by_product[product_id] = requested_by_product.get(product_id, 0) + quantity
+        available = int(row["stock"] or 0) - int(reserved_by_product.get(product_id, 0) or 0)
+        if available < requested_by_product[product_id]:
+            return None, f"Estoque disponivel insuficiente para {row['name']}. Existem pecas em condicional."
         unit_price = float(item.get("unitPrice", row["price"]) or 0)
         unit_cost = float(item.get("unitCost", row["cost"]) or 0)
         items.append({
@@ -3352,7 +3375,9 @@ def create_sale():
         existing = conn.execute("SELECT id FROM sales WHERE store_id = ? AND id = ?", ("matriz", sale_id)).fetchone()
         if existing:
             sale_id = next_sale_code_db(conn)
-        sale, error = build_sale_from_payload(payload, products_by_id, sale_id)
+        state, _ = read_state()
+        reserved_by_product = conditional_reserved_quantities(state)
+        sale, error = build_sale_from_payload(payload, products_by_id, sale_id, reserved_by_product)
         if error:
             return jsonify({"ok": False, "error": error}), 400
 

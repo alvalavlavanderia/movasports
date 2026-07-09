@@ -1477,30 +1477,31 @@ function stockStatus(product) {
 
 function renderSaleProducts() {
   const query = normalize(els.saleProductSearch.value);
-  const products = db.products.filter((product) => !query || normalize(product.name).startsWith(query) || normalize(product.barcode).includes(query));
+  const products = db.products.filter((product) => availableProductStock(product) > 0 && (!query || normalize(product.name).startsWith(query) || normalize(product.barcode).includes(query)));
   els.saleProductList.innerHTML = "";
   els.saleProductList.classList.toggle("empty", products.length === 0);
   if (!products.length) {
-    els.saleProductList.textContent = "Nenhum produto encontrado.";
+    els.saleProductList.textContent = "Nenhum produto disponível encontrado.";
     return;
   }
   products.slice(0, 8).forEach((product) => {
+    const available = availableProductStock(product);
     const row = document.createElement("article");
     row.className = "sale-product-row";
     row.innerHTML = `
       ${product.photo ? `<img src="${product.photo}" alt="">` : `<div class="sale-product-photo"></div>`}
-      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | Estoque: ${product.stock}</small></div>
+      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | ${escapeHtml(productStockLabel(product))}</small></div>
       <strong>${money.format(product.price)}</strong>
       <div class="table-actions"></div>
     `;
-    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToCart(product.id), product.stock <= cartQty(product.id)));
+    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToCart(product.id), available <= cartQty(product.id)));
     els.saleProductList.append(row);
   });
 }
 
 function addToCart(productId) {
   const product = db.products.find((item) => item.id === productId);
-  if (!product || product.stock <= cartQty(product.id)) return alert("Produto sem estoque.");
+  if (!product || availableProductStock(product) <= cartQty(product.id)) return alert("Produto sem estoque disponível. Verifique condicionais em aberto.");
   const existing = cart.find((item) => item.productId === product.id);
   if (existing) existing.quantity += 1;
   else cart.push({ productId: product.id, barcode: product.barcode, name: product.name, brand: product.brand, quantity: 1, unitCost: product.cost, unitPrice: product.price });
@@ -1517,8 +1518,27 @@ function changeCartQty(productId, delta) {
   if (!item || !product) return;
   item.quantity += delta;
   if (item.quantity <= 0) cart = cart.filter((entry) => entry.productId !== productId);
-  if (item.quantity > product.stock) item.quantity = product.stock;
+  const available = availableProductStock(product);
+  if (item.quantity > available) item.quantity = available;
   renderAll();
+}
+
+function openConditionalReservedQty(productId) {
+  return (db.conditionals || [])
+    .filter((doc) => doc.status !== "finalized" && doc.status !== "cancelled")
+    .flatMap((doc) => doc.items || [])
+    .filter((item) => item.productId === productId)
+    .reduce((total, item) => total + Number(item.quantity || 0), 0);
+}
+
+function availableProductStock(product) {
+  return Math.max(0, Number(product?.stock || 0) - openConditionalReservedQty(product?.id));
+}
+
+function productStockLabel(product) {
+  const reserved = openConditionalReservedQty(product.id);
+  const available = availableProductStock(product);
+  return reserved > 0 ? `Disponível: ${available} | Condicional: ${reserved}` : `Estoque: ${Number(product.stock || 0)}`;
 }
 
 function renderCart() {
@@ -1564,23 +1584,24 @@ function renderConditionalPanels() {
 function renderConditionalProducts() {
   if (!els.conditionalProductList) return;
   const query = normalize(els.conditionalProductSearch.value);
-  const products = db.products.filter((product) => Number(product.stock || 0) > 0 && (!query || normalize(product.name).startsWith(query) || normalize(product.barcode).includes(query)));
+  const products = db.products.filter((product) => availableProductStock(product) > 0 && (!query || normalize(product.name).startsWith(query) || normalize(product.barcode).includes(query)));
   els.conditionalProductList.innerHTML = "";
   els.conditionalProductList.classList.toggle("empty", products.length === 0);
   if (!products.length) {
-    els.conditionalProductList.textContent = "Nenhum produto com estoque encontrado.";
+    els.conditionalProductList.textContent = "Nenhum produto com estoque disponível encontrado.";
     return;
   }
   products.slice(0, 8).forEach((product) => {
+    const available = availableProductStock(product);
     const row = document.createElement("article");
     row.className = "sale-product-row";
     row.innerHTML = `
       ${product.photo ? `<img src="${product.photo}" alt="">` : `<div class="sale-product-photo"></div>`}
-      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | Estoque: ${product.stock}</small></div>
+      <div><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.barcode)} | ${escapeHtml(productStockLabel(product))}</small></div>
       <strong>${money.format(product.price)}</strong>
       <div class="table-actions"></div>
     `;
-    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToConditionalCart(product.id), conditionalView !== "new" || product.stock <= conditionalCartQty(product.id)));
+    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToConditionalCart(product.id), conditionalView !== "new" || available <= conditionalCartQty(product.id)));
     els.conditionalProductList.append(row);
   });
 }
@@ -1588,7 +1609,7 @@ function renderConditionalProducts() {
 function addToConditionalCart(productId) {
   if (conditionalView !== "new") return alert("Clique em Novo para iniciar um condicional.");
   const product = db.products.find((item) => item.id === productId);
-  if (!product || Number(product.stock || 0) <= conditionalCartQty(product.id)) return alert("Produto sem estoque.");
+  if (!product || availableProductStock(product) <= conditionalCartQty(product.id)) return alert("Produto sem estoque disponível. Verifique condicionais em aberto.");
   const existing = conditionalCart.find((item) => item.productId === product.id);
   if (existing) existing.quantity += 1;
   else conditionalCart.push({ productId: product.id, barcode: product.barcode, name: product.name, brand: product.brand, quantity: 1, unitCost: product.cost, unitPrice: product.price });
@@ -1605,7 +1626,8 @@ function changeConditionalCartQty(productId, delta) {
   if (!item || !product) return;
   item.quantity += delta;
   if (item.quantity <= 0) conditionalCart = conditionalCart.filter((entry) => entry.productId !== productId);
-  if (item.quantity > product.stock) item.quantity = product.stock;
+  const available = availableProductStock(product);
+  if (item.quantity > available) item.quantity = available;
   renderAll();
 }
 

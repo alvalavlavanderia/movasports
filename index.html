@@ -435,7 +435,8 @@
             </div>
             <div id="conditionalProductList" class="table-list empty">Nenhum produto encontrado.</div>
           </section>
-          <section class="panel sale-current-card">
+          <div class="conditional-side">
+          <section id="conditionalCurrentCard" class="panel sale-current-card" hidden>
             <div class="section-title"><h2>Condicional atual</h2><button id="clearConditionalButton" class="ghost" type="button">Limpar</button></div>
             <div class="sale-customer-row">
               <label class="field">Cliente cadastrado<input id="conditionalCustomerSearch" list="customerOptions" placeholder="Digite o nome do cliente" required></label>
@@ -451,12 +452,16 @@
             </div>
             <button id="sendConditionalButton" class="primary finish-button" type="button">Enviar condicional</button>
           </section>
+          <section id="conditionalOpenPanel" class="panel conditional-open-panel">
+            <div class="section-title tight"><h2>Condicionais em aberto</h2><button id="newConditionalButton" class="primary" type="button">Novo</button></div>
+            <div class="conditional-search-row">
+              <input id="conditionalOpenSearch" type="search" placeholder="Buscar por nome ou CPF do cliente...">
+            </div>
+            <div id="conditionalOpenList" class="table-list empty">Nenhum condicional em aberto.</div>
+          </section>
+          <section id="conditionalFinalizePanel" class="panel conditional-finalize-panel" hidden></section>
+          </div>
         </div>
-        <section class="panel conditional-open-panel">
-          <div class="section-title tight"><h2>Condicionais em aberto</h2><span>Finalize quando o cliente devolver ou escolher as peças.</span></div>
-          <div id="conditionalOpenList" class="table-list empty">Nenhum condicional em aberto.</div>
-        </section>
-        <section id="conditionalFinalizePanel" class="panel conditional-finalize-panel" hidden></section>
       </section>
       <section id="devolucao" class="subtab-panel">
         <section class="panel return-panel">

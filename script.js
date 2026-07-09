@@ -31,6 +31,7 @@ let session = loadSession();
 let cart = [];
 let conditionalCart = [];
 let selectedConditionalId = "";
+let conditionalView = "list";
 let productPhotoData = "";
 let productPhotoFile = null;
 let catalogViewMode = "grid";
@@ -125,7 +126,8 @@ function bindEvents() {
   els.addPaymentButton.addEventListener("click", () => addPaymentRow("cash"));
   els.finishSaleButton.addEventListener("click", finishSale);
   els.conditionalProductSearch.addEventListener("input", renderConditionalProducts);
-  els.conditionalCustomerSearch.addEventListener("input", renderConditionalOpenList);
+  els.conditionalOpenSearch.addEventListener("input", renderConditionalOpenList);
+  els.newConditionalButton.addEventListener("click", startNewConditional);
   els.clearConditionalButton.addEventListener("click", clearConditional);
   els.sendConditionalButton.addEventListener("click", saveConditional);
   els.returnForm.addEventListener("submit", registerReturn);
@@ -1014,6 +1016,7 @@ function renderAll() {
     renderStock,
     renderSaleProducts,
     renderCart,
+    renderConditionalPanels,
     renderConditionalProducts,
     renderConditionalCart,
     renderConditionalOpenList,
@@ -1549,6 +1552,15 @@ function renderCart() {
   renderCartTotalOnly();
 }
 
+function renderConditionalPanels() {
+  if (els.conditionalCurrentCard) els.conditionalCurrentCard.hidden = conditionalView !== "new";
+  if (els.conditionalOpenPanel) els.conditionalOpenPanel.hidden = conditionalView !== "list";
+  if (els.conditionalFinalizePanel && conditionalView !== "detail") {
+    els.conditionalFinalizePanel.hidden = true;
+    els.conditionalFinalizePanel.innerHTML = "";
+  }
+}
+
 function renderConditionalProducts() {
   if (!els.conditionalProductList) return;
   const query = normalize(els.conditionalProductSearch.value);
@@ -1568,12 +1580,13 @@ function renderConditionalProducts() {
       <strong>${money.format(product.price)}</strong>
       <div class="table-actions"></div>
     `;
-    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToConditionalCart(product.id), product.stock <= conditionalCartQty(product.id)));
+    row.querySelector(".table-actions").append(button("Adicionar", "sale-add-product", () => addToConditionalCart(product.id), conditionalView !== "new" || product.stock <= conditionalCartQty(product.id)));
     els.conditionalProductList.append(row);
   });
 }
 
 function addToConditionalCart(productId) {
+  if (conditionalView !== "new") return alert("Clique em Novo para iniciar um condicional.");
   const product = db.products.find((item) => item.id === productId);
   if (!product || Number(product.stock || 0) <= conditionalCartQty(product.id)) return alert("Produto sem estoque.");
   const existing = conditionalCart.find((item) => item.productId === product.id);
@@ -1627,9 +1640,18 @@ function renderConditionalCart() {
   if (els.conditionalTotal) els.conditionalTotal.textContent = money.format(conditionalTotal());
 }
 
+function startNewConditional() {
+  conditionalView = "new";
+  selectedConditionalId = "";
+  conditionalCart = [];
+  if (els.conditionalCustomerSearch) els.conditionalCustomerSearch.value = "";
+  renderAll();
+}
+
 function clearConditional() {
   conditionalCart = [];
   selectedConditionalId = "";
+  conditionalView = "list";
   if (els.conditionalCustomerSearch) els.conditionalCustomerSearch.value = "";
   renderAll();
 }
@@ -1678,18 +1700,25 @@ function upsertConditional(doc) {
   db.conditionals = [doc, ...db.conditionals.filter((item) => item.id !== doc.id)];
 }
 
-function renderConditionalOpenList() {
+function renderConditionalOpenListLegacy() {
   if (!els.conditionalOpenList) return;
-  const openItems = (db.conditionals || []).filter((item) => item.status !== "finalized" && item.status !== "cancelled");
+  const query = normalize(els.conditionalOpenSearch?.value || "");
+  const openItems = (db.conditionals || []).filter((item) => {
+    if (item.status === "finalized" || item.status === "cancelled") return false;
+    const customer = customerForConditional(item);
+    const searchText = normalize(`${item.customerName || ""} ${customer?.cpf || ""}`);
+    return !query || searchText.includes(query);
+  });
   els.conditionalOpenList.innerHTML = "";
   els.conditionalOpenList.classList.toggle("empty", openItems.length === 0);
   if (!openItems.length) {
-    els.conditionalOpenList.textContent = "Nenhum condicional em aberto.";
+    els.conditionalOpenList.textContent = query ? "Nenhum condicional encontrado para a busca." : "Nenhum condicional em aberto.";
     return;
   }
   openItems.forEach((doc) => {
     const total = sum(doc.items || [], "total");
     const pieces = (doc.items || []).reduce((value, item) => value + Number(item.quantity || 0), 0);
+    const customer = customerForConditional(doc);
     const row = document.createElement("article");
     row.className = "conditional-open-row";
     row.innerHTML = `
@@ -1706,8 +1735,53 @@ function renderConditionalOpenList() {
   });
 }
 
+function customerForConditional(doc) {
+  return db.customers.find((customer) => customer.id === doc.customerId || normalize(customer.name) === normalize(doc.customerName));
+}
+
+function renderConditionalOpenList() {
+  if (!els.conditionalOpenList) return;
+  const query = normalize(els.conditionalOpenSearch?.value || "");
+  const openItems = (db.conditionals || []).filter((item) => {
+    if (item.status === "finalized" || item.status === "cancelled") return false;
+    const customer = customerForConditional(item);
+    const searchText = normalize(`${item.customerName || ""} ${customer?.cpf || ""}`);
+    return !query || searchText.includes(query);
+  });
+  els.conditionalOpenList.innerHTML = "";
+  els.conditionalOpenList.classList.toggle("empty", openItems.length === 0);
+  if (!openItems.length) {
+    els.conditionalOpenList.textContent = query ? "Nenhum condicional encontrado para a busca." : "Nenhum condicional em aberto.";
+    return;
+  }
+  openItems.forEach((doc) => {
+    const total = sum(doc.items || [], "total");
+    const pieces = (doc.items || []).reduce((value, item) => value + Number(item.quantity || 0), 0);
+    const customer = customerForConditional(doc);
+    const row = document.createElement("article");
+    row.className = "conditional-open-row";
+    row.innerHTML = `
+      <div><strong>${escapeHtml(doc.id)}</strong><small>${formatDateTime(doc.createdAt)}</small></div>
+      <div><strong>${escapeHtml(doc.customerName || "-")}</strong><small>CPF: ${escapeHtml(customer?.cpf || "-")} | ${pieces} peça${pieces === 1 ? "" : "s"}</small></div>
+      <strong>${money.format(total)}</strong>
+      <div class="table-actions"></div>
+    `;
+    row.querySelector(".table-actions").append(button("Visualizar", "primary small-action", () => {
+      selectedConditionalId = doc.id;
+      conditionalView = "detail";
+      renderAll();
+    }));
+    els.conditionalOpenList.append(row);
+  });
+}
+
 function renderConditionalFinalizePanel() {
   if (!els.conditionalFinalizePanel) return;
+  if (conditionalView !== "detail") {
+    els.conditionalFinalizePanel.hidden = true;
+    els.conditionalFinalizePanel.innerHTML = "";
+    return;
+  }
   const doc = (db.conditionals || []).find((item) => item.id === selectedConditionalId);
   if (!doc) {
     els.conditionalFinalizePanel.hidden = true;
@@ -1725,17 +1799,19 @@ function renderConditionalFinalizePanel() {
   els.conditionalFinalizePanel.innerHTML = `
     <div class="section-title tight">
       <div><h2>Finalizar ${escapeHtml(doc.id)}</h2><span>${escapeHtml(doc.customerName || "-")}</span></div>
-      <button class="ghost" type="button" id="closeConditionalFinalizeButton">Fechar</button>
+      <button class="ghost" type="button" id="closeConditionalFinalizeButton">Voltar</button>
     </div>
+    <p class="conditional-detail-help">Deixe marcado o que o cliente ficou. Desmarque as peças devolvidas.</p>
     <div class="conditional-finalize-list">${rows}</div>
     <div class="conditional-finalize-actions">
-      <button class="ghost" type="button" id="finishConditionalEmptyButton">Finalizar sem venda</button>
+      <button class="ghost" type="button" id="finishConditionalEmptyButton">Finalizar tudo devolvido</button>
       <button class="primary" type="button" id="finishConditionalSaleButton">Levar selecionados para venda</button>
     </div>
   `;
   els.conditionalFinalizePanel.querySelector("#closeConditionalFinalizeButton").addEventListener("click", () => {
     selectedConditionalId = "";
-    renderConditionalFinalizePanel();
+    conditionalView = "list";
+    renderAll();
   });
   els.conditionalFinalizePanel.querySelector("#finishConditionalEmptyButton").addEventListener("click", () => finishConditional(false));
   els.conditionalFinalizePanel.querySelector("#finishConditionalSaleButton").addEventListener("click", () => finishConditional(true));
@@ -1771,6 +1847,7 @@ async function finishConditional(sendToSale) {
     persist();
   }
   selectedConditionalId = "";
+  conditionalView = "list";
   if (sendToSale && finalItems.length) {
     moveConditionalItemsToSale(doc, finalItems);
     activateSubtab("nova-venda");

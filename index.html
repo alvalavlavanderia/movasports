@@ -702,16 +702,26 @@
           <label class="field">Fim<input id="payableEnd" type="date"></label>
         </div>
       </section>
-      <section class="panel payable-table-panel">
-        <div class="section-title tight"><h2>Todas as contas</h2><span id="payableFoundCount" class="muted-count">0 contas encontradas</span></div>
-        <div class="payable-table-wrap">
-          <table class="payable-table">
-            <thead><tr><th>Fornecedor</th><th>Categoria</th><th>Descrição</th><th>Vencimento</th><th>Valor</th><th>Status</th><th>Ações</th></tr></thead>
-            <tbody id="payableList"></tbody>
-          </table>
-        </div>
-        <div id="payableFooter" class="payable-footer"></div>
-      </section>
+      <div class="payable-main-layout">
+        <section class="panel payable-table-panel">
+          <div class="section-title tight"><h2>Todas as contas</h2><span id="payableFoundCount" class="muted-count">0 contas encontradas</span></div>
+          <div class="payable-filter-tabs">
+            <button class="active" type="button" data-payable-filter="all">Todas <span id="payableTabAllCount">0</span></button>
+            <button type="button" data-payable-filter="open">Em aberto <span id="payableTabOpenCount">0</span></button>
+            <button type="button" data-payable-filter="overdue">Vencidas <span id="payableTabOverdueCount">0</span></button>
+            <button type="button" data-payable-filter="today">Hoje <span id="payableTabTodayCount">0</span></button>
+            <button type="button" data-payable-filter="paid">Pagas <span id="payableTabPaidCount">0</span></button>
+          </div>
+          <div class="payable-table-wrap">
+            <table class="payable-table">
+              <thead><tr><th>Fornecedor</th><th>Categoria</th><th>Descrição</th><th>Vencimento</th><th>Valor</th><th>Status</th><th>Ações</th></tr></thead>
+              <tbody id="payableList"></tbody>
+            </table>
+          </div>
+          <div id="payableFooter" class="payable-footer"></div>
+        </section>
+        <aside id="payableDetailPanel" class="panel payable-detail-panel empty">Selecione uma conta para visualizar o resumo.</aside>
+      </div>
     </section>
 
     <section id="caixa" class="tab-panel">

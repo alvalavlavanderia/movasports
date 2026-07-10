@@ -34,6 +34,7 @@ let selectedConditionalId = "";
 let conditionalView = "list";
 let selectedCreditCustomerId = "";
 let creditFilterStatus = "all";
+let selectedPayableId = "";
 let productPhotoData = "";
 let productPhotoFile = null;
 let catalogViewMode = "grid";
@@ -148,6 +149,10 @@ function bindEvents() {
   els.payablePaymentCancelButton.addEventListener("click", closePayablePaymentModal);
   els.payablePaymentFee.addEventListener("input", renderPayablePaymentTotal);
   els.payablePaymentDiscount.addEventListener("input", renderPayablePaymentTotal);
+  document.querySelectorAll("[data-payable-filter]").forEach((button) => button.addEventListener("click", () => {
+    els.payableFilter.value = button.dataset.payableFilter;
+    renderAll();
+  }));
   els.cashClosingButton.addEventListener("click", () => els.cashClosingPanel.hidden = !els.cashClosingPanel.hidden);
   els.cashClosingForm.addEventListener("submit", saveCashClosing);
   els.cashClosingForm.addEventListener("input", renderCashClosingSummary);
@@ -3203,12 +3208,28 @@ function renderPayables() {
   const filter = els.payableFilter.value;
   const start = els.payableStart.value || "0000-01-01";
   const end = els.payableEnd.value || "9999-12-31";
-  const items = db.payables.filter((item) => {
-    const status = payableStatus(item);
+  const baseItems = db.payables.filter((item) => {
     const text = [item.supplier, item.category, item.notes].join(" ");
     if (query && !normalize(text).includes(query)) return false;
     if (category !== "all" && item.category !== category) return false;
     if (item.dueDate < start || item.dueDate > end) return false;
+    return true;
+  });
+  const tabCounts = {
+    all: baseItems.length,
+    open: baseItems.filter((item) => ["pending", "today", "overdue"].includes(payableStatus(item))).length,
+    overdue: baseItems.filter((item) => payableStatus(item) === "overdue").length,
+    today: baseItems.filter((item) => payableStatus(item) === "today").length,
+    paid: baseItems.filter((item) => payableStatus(item) === "paid").length,
+  };
+  if (els.payableTabAllCount) els.payableTabAllCount.textContent = tabCounts.all;
+  if (els.payableTabOpenCount) els.payableTabOpenCount.textContent = tabCounts.open;
+  if (els.payableTabOverdueCount) els.payableTabOverdueCount.textContent = tabCounts.overdue;
+  if (els.payableTabTodayCount) els.payableTabTodayCount.textContent = tabCounts.today;
+  if (els.payableTabPaidCount) els.payableTabPaidCount.textContent = tabCounts.paid;
+  document.querySelectorAll("[data-payable-filter]").forEach((button) => button.classList.toggle("active", button.dataset.payableFilter === filter));
+  const items = baseItems.filter((item) => {
+    const status = payableStatus(item);
     if (filter === "all") return true;
     if (filter === "open") return status === "pending" || status === "today" || status === "overdue";
     if (filter === "today") return status === "today";
@@ -3220,12 +3241,16 @@ function renderPayables() {
   if (!items.length) {
     els.payableList.innerHTML = `<tr><td colspan="7" class="empty-cell">Nenhuma conta encontrada.</td></tr>`;
     els.payableFooter.textContent = "Mostrando 0 contas";
+    renderPayableDetail(null);
     return;
   }
+  if (!items.some((item) => item.id === selectedPayableId)) selectedPayableId = items[0].id;
+  renderPayableDetail(db.payables.find((item) => item.id === selectedPayableId));
   items.forEach((item) => {
     const status = payableStatus(item);
     const row = document.createElement("tr");
     const initials = (item.supplier || "CP").split(" ").filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+    row.className = item.id === selectedPayableId ? "selected" : "";
     row.innerHTML = `
       <td><div class="payable-supplier-cell"><span>${escapeHtml(initials)}</span><div><strong>${escapeHtml(item.supplier || "-")}</strong><small>CNPJ: -</small></div></div></td>
       <td>${escapeHtml(item.category || "-")}</td>
@@ -3235,8 +3260,12 @@ function renderPayables() {
       <td>${payableStatusBadge(item)}</td>
       <td><div class="payable-actions"></div></td>
     `;
+    row.addEventListener("click", () => {
+      selectedPayableId = item.id;
+      renderPayables();
+    });
     const actions = row.querySelector(".payable-actions");
-    actions.append(button("Ver", "ghost payable-icon-button", () => alert(`${item.supplier}\n${item.notes || item.category}\nVencimento: ${formatDate(item.dueDate)}\nValor: ${money.format(item.amount)}`)));
+    actions.addEventListener("click", (event) => event.stopPropagation());
     actions.append(button("Pagar", "primary payable-pay-button", () => openPayablePaymentModal(item.id), status === "paid"));
     els.payableList.append(row);
   });
@@ -3244,6 +3273,38 @@ function renderPayables() {
     <span>Mostrando 1 a ${items.length} de ${items.length} conta${items.length === 1 ? "" : "s"}</span>
     <div class="payable-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
   `;
+}
+
+function renderPayableDetail(item) {
+  if (!els.payableDetailPanel) return;
+  if (!item) {
+    els.payableDetailPanel.className = "panel payable-detail-panel empty";
+    els.payableDetailPanel.textContent = "Selecione uma conta para visualizar o resumo.";
+    return;
+  }
+  const status = payableStatus(item);
+  const finalAmount = item.paidAmount || Math.max(0, round(item.amount + (item.fee || 0) - (item.discount || 0)));
+  els.payableDetailPanel.className = "panel payable-detail-panel";
+  els.payableDetailPanel.innerHTML = `
+    <div class="payable-detail-head">
+      <span>${escapeHtml((item.supplier || "CP").split(" ").filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "CP")}</span>
+      <div><strong>${escapeHtml(item.supplier || "-")}</strong><small>${escapeHtml(item.category || "-")}</small><em>${escapeHtml(item.notes || "Sem observação")}</em></div>
+      ${payableStatusBadge(item)}
+    </div>
+    <div class="payable-detail-list">
+      <div><span>Valor original</span><strong>${money.format(item.amount || 0)}</strong></div>
+      <div><span>Juros / multa</span><strong>${money.format(item.fee || 0)}</strong></div>
+      <div><span>Desconto</span><strong>${money.format(item.discount || 0)}</strong></div>
+      <div><span>Total</span><strong class="${status === "paid" ? "value-ok" : status === "overdue" ? "value-bad" : ""}">${money.format(finalAmount)}</strong></div>
+      <div><span>Emissão</span><strong>${formatDate(item.issueDate)}</strong></div>
+      <div><span>Vencimento</span><strong>${formatDate(item.dueDate)}</strong></div>
+      <div><span>Pagamento</span><strong>${item.paidAt ? formatDate(item.paidAt) : "-"}</strong></div>
+    </div>
+    <div class="payable-detail-actions">
+      <button class="primary payable-pay-button" type="button" id="payableDetailPayButton"${status === "paid" ? " disabled" : ""}>Pagar</button>
+    </div>
+  `;
+  els.payableDetailPanel.querySelector("#payableDetailPayButton").addEventListener("click", () => openPayablePaymentModal(item.id));
 }
 
 function openPayablePaymentModal(id) {

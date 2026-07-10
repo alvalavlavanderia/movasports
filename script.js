@@ -10,6 +10,8 @@ const paymentLabels = { cash: "Dinheiro", pix: "PIX", debit: "Débito", credit: 
 const cashExpenseTypes = ["Gasolina", "Lanche", "Estacionamento", "Motoboy", "Material de limpeza", "Pequenas compras", "Correios", "Outros"];
 const BACKEND_ENABLED = location.protocol !== "file:";
 const STATE_API_URL = "/api/state";
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => nativeFetch(input, { ...init, credentials: init.credentials || "same-origin" });
 const MODULE_API_ENDPOINTS = {
   products: "/api/products",
   customers: "/api/customers",
@@ -318,6 +320,7 @@ async function saveStateToServer(version = localChangeVersion) {
 }
 
 function loadSession() {
+  if (BACKEND_ENABLED) return null;
   try {
     return JSON.parse(sessionStorage.getItem(SESSION_KEY)) || null;
   } catch {
@@ -410,6 +413,15 @@ function applySession() {
   els.currentUserRole.textContent = logged ? (session.role === "admin" ? "Administrador" : "Operador") : "";
   document.querySelectorAll(".admin-only").forEach((element) => element.hidden = session?.role !== "admin");
   document.querySelectorAll(".manager-only").forEach((element) => element.hidden = session?.role !== "admin");
+}
+
+function handleUnauthorized(response, payload = {}) {
+  if (response.status !== 401) return false;
+  session = null;
+  saveSession();
+  applySession();
+  alert(payload.error || "Sua sessão expirou. Faça login novamente.");
+  return true;
 }
 
 function isAdmin() {
@@ -538,6 +550,7 @@ async function saveProduct(event) {
         payload = { error: raw ? raw.slice(0, 180) : "" };
       }
       if (!response.ok) {
+        if (handleUnauthorized(response, payload)) return;
         alert(payload.error || "Não foi possível salvar o produto.");
         return;
       }
@@ -669,6 +682,7 @@ async function saveCustomer(event) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (handleUnauthorized(response, payload)) return;
         alert(payload.error || "Não foi possível salvar o cliente.");
         return;
       }
@@ -773,6 +787,7 @@ async function saveSupplier(event) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (handleUnauthorized(response, payload)) return;
         alert(payload.error || "Não foi possível salvar o fornecedor.");
         return;
       }
@@ -818,6 +833,7 @@ async function saveSimpleName(event, collection, input) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (handleUnauthorized(response, payload)) return;
         alert(payload.error || "Não foi possível salvar o cadastro.");
         return;
       }
@@ -876,6 +892,7 @@ async function saveUser(event) {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        if (handleUnauthorized(response, payload)) return;
         alert(payload.error || "Não foi possível salvar o usuário.");
         return;
       }

@@ -879,9 +879,12 @@ def init_db() -> None:
             )
             """
         )
-        payable_columns = {row["name"] for row in conn.execute("PRAGMA table_info(payables)").fetchall()}
-        if "discount" not in payable_columns:
-            conn.execute("ALTER TABLE payables ADD COLUMN discount REAL NOT NULL DEFAULT 0")
+        if USE_POSTGRES:
+            conn.execute("ALTER TABLE payables ADD COLUMN IF NOT EXISTS discount REAL NOT NULL DEFAULT 0")
+        else:
+            payable_columns = {row["name"] for row in conn.execute("PRAGMA table_info(payables)").fetchall()}
+            if "discount" not in payable_columns:
+                conn.execute("ALTER TABLE payables ADD COLUMN discount REAL NOT NULL DEFAULT 0")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_store_due ON payables(store_id, due_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_status ON payables(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier)")

@@ -1035,13 +1035,15 @@
       </div>
       <div class="payable-payment-summary">
         <div><span>Valor original</span><strong id="payablePaymentOriginal">R$ 0,00</strong></div>
-        <div><span>Total a pagar</span><strong id="payablePaymentTotal">R$ 0,00</strong></div>
+        <div><span>Saldo em aberto</span><strong id="payablePaymentOpen">R$ 0,00</strong></div>
+        <div><span>Após pagamento</span><strong id="payablePaymentRemaining">R$ 0,00</strong></div>
       </div>
       <div class="payable-payment-fields">
         <label class="field">Data do pagamento<input id="payablePaymentDate" type="date" required></label>
         <label class="field">Forma de pagamento<select id="payablePaymentMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
         <label class="field">Juros / multa<input id="payablePaymentFee" type="number" min="0" step="0.01" value="0"></label>
         <label class="field">Desconto<input id="payablePaymentDiscount" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Valor pago agora<input id="payablePaymentAmount" type="number" min="0.01" step="0.01" required></label>
         <label class="field span-2">Observação<input id="payablePaymentNote" type="text" placeholder="Opcional"></label>
       </div>
       <div class="modal-actions">

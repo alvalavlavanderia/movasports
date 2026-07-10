@@ -2119,6 +2119,16 @@ def validate_payable(payable: dict) -> str | None:
     return None
 
 
+def payable_total_due(payable: dict) -> float:
+    return money_round(float(payable.get("amount") or 0) + float(payable.get("fee") or 0) - float(payable.get("discount") or 0))
+
+
+def payable_open_amount(payable: dict) -> float:
+    if payable.get("status") == "cancelled":
+        return 0
+    return max(0, money_round(payable_total_due(payable) - float(payable.get("paidAmount") or 0)))
+
+
 def parse_date_input(value: str, fallback: str | None = None) -> str:
     if value:
         try:
@@ -2141,7 +2151,7 @@ def receivable_open_amount(receivable: dict) -> float:
 
 
 def payable_dashboard_status(payable: dict, today: str) -> str:
-    if payable.get("status") == "paid":
+    if payable.get("status") == "paid" or payable_open_amount(payable) <= 0.01:
         return "paid"
     due_date = str(payable.get("dueDate") or "")
     if due_date == today:
@@ -2218,7 +2228,7 @@ def build_dashboard_summary(state: dict, days: int, today: str) -> dict:
             "cashBalance": money_round(cash_balance),
             "cashInToday": money_round(sum(float(item.get("amount") or 0) for item in today_cash if item.get("direction") == "in")),
             "cashOutToday": money_round(sum(float(item.get("amount") or 0) for item in today_cash if item.get("direction") == "out")),
-            "payablesOpen": money_round(sum(float(item.get("amount") or 0) for item in open_payables)),
+            "payablesOpen": money_round(sum(payable_open_amount(item) for item in open_payables)),
             "payablesCount": len(open_payables),
             "receivableOpen": money_round(sum(receivable_open_amount(item) for item in open_receivables)),
             "receivableCount": len(open_receivables),
@@ -2255,7 +2265,7 @@ def build_reports_summary(state: dict, start: str, end: str, today: str) -> dict
         if item.get("method") == "storeCredit" and str(item.get("dueDate") or "") < today and receivable_open_amount(item) > 0
     }
     open_payables = sum(
-        float(item.get("amount") or 0)
+        payable_open_amount(item)
         for item in state.get("payables", [])
         if payable_dashboard_status(item, today) != "paid"
     )
@@ -4076,17 +4086,21 @@ def pay_payable_api(payable_id: str):
     payable = payable_from_row(row)
     if payable["status"] == "paid":
         return jsonify({"ok": False, "error": "Conta já está paga."}), 409
-    fee = money_round(payload.get("fee", 0))
-    discount = money_round(payload.get("discount", 0))
-    amount = money_round(payload.get("amount", payable["amount"] + fee - discount))
-    if amount <= 0:
+    fee = money_round(payload.get("fee", payable.get("fee", 0)))
+    discount = money_round(payload.get("discount", payable.get("discount", 0)))
+    total_due = money_round(payable["amount"] + fee - discount)
+    open_amount = max(0, money_round(total_due - float(payable.get("paidAmount") or 0)))
+    payment_amount = money_round(payload.get("amount", open_amount))
+    if payment_amount <= 0:
         return jsonify({"ok": False, "error": "Valor pago deve ser maior que zero."}), 400
+    if payment_amount - open_amount > 0.01:
+        return jsonify({"ok": False, "error": "Valor pago nao pode ser maior que o saldo em aberto."}), 400
     paid_at = str(payload.get("paidAt") or utc_now())
     method = str(payload.get("method") or "pix").strip()
     payable["fee"] = fee
     payable["discount"] = discount
-    payable["paidAmount"] = amount
-    payable["status"] = "paid"
+    payable["paidAmount"] = money_round(float(payable.get("paidAmount") or 0) + payment_amount)
+    payable["status"] = "paid" if payable["paidAmount"] + 0.01 >= total_due else "pending"
     payable["paidAt"] = paid_at
     payable["updatedAt"] = utc_now()
     movement = normalize_cash_movement_payload({
@@ -4094,7 +4108,7 @@ def pay_payable_api(payable_id: str):
         "type": "contas a pagar",
         "description": f"{payable['category']}{' - ' + str(payload.get('note')).strip() if payload.get('note') else ''}",
         "method": method,
-        "amount": amount,
+        "amount": payment_amount,
         "refId": payable_id,
         "createdAt": paid_at,
     })

@@ -3361,6 +3361,11 @@ textarea {
   color: #e28117;
 }
 
+.payable-status.partial {
+  background: #f2eaff;
+  color: #9d54db;
+}
+
 .payable-status.pending {
   background: #ddf8e8;
   color: #159655;

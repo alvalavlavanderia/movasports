@@ -151,6 +151,7 @@ function bindEvents() {
   els.payablePaymentCancelButton.addEventListener("click", closePayablePaymentModal);
   els.payablePaymentFee.addEventListener("input", renderPayablePaymentTotal);
   els.payablePaymentDiscount.addEventListener("input", renderPayablePaymentTotal);
+  els.payablePaymentAmount.addEventListener("input", renderPayablePaymentTotal);
   document.querySelectorAll("[data-payable-filter]").forEach((button) => button.addEventListener("click", () => {
     els.payableFilter.value = button.dataset.payableFilter;
     renderAll();
@@ -3212,13 +3213,13 @@ function renderPayables() {
   const overdueItems = db.payables.filter((item) => payableStatus(item) === "overdue");
   const todayItems = db.payables.filter((item) => payableStatus(item) === "today");
   const futureItems = db.payables.filter((item) => payableStatus(item) === "pending");
-  els.payableTotalOpen.textContent = money.format(openItems.reduce((total, item) => total + item.amount, 0));
+  els.payableTotalOpen.textContent = money.format(openItems.reduce((total, item) => total + payableBalance(item), 0));
   els.payableTotalCount.textContent = `${openItems.length} conta${openItems.length === 1 ? "" : "s"}`;
-  els.payableOverdueTotal.textContent = money.format(overdueItems.reduce((total, item) => total + item.amount, 0));
+  els.payableOverdueTotal.textContent = money.format(overdueItems.reduce((total, item) => total + payableBalance(item), 0));
   els.payableOverdueCount.textContent = `${overdueItems.length} conta${overdueItems.length === 1 ? "" : "s"}`;
-  els.payableTodayTotal.textContent = money.format(todayItems.reduce((total, item) => total + item.amount, 0));
+  els.payableTodayTotal.textContent = money.format(todayItems.reduce((total, item) => total + payableBalance(item), 0));
   els.payableTodayCount.textContent = `${todayItems.length} conta${todayItems.length === 1 ? "" : "s"}`;
-  els.payableFutureTotal.textContent = money.format(futureItems.reduce((total, item) => total + item.amount, 0));
+  els.payableFutureTotal.textContent = money.format(futureItems.reduce((total, item) => total + payableBalance(item), 0));
   els.payableFutureCount.textContent = `${futureItems.length} conta${futureItems.length === 1 ? "" : "s"}`;
   const query = normalize(els.payableSearch.value);
   const category = els.payableCategoryFilter.value;
@@ -3273,7 +3274,7 @@ function renderPayables() {
       <td>${escapeHtml(item.category || "-")}</td>
       <td>${escapeHtml(item.notes || item.category || "-")}</td>
       <td>${formatDate(item.dueDate)}</td>
-      <td>${money.format(item.paidAmount || item.amount + (item.fee || 0) - (item.discount || 0))}</td>
+      <td>${money.format(payableStatus(item) === "paid" ? payableTotalDue(item) : payableBalance(item))}</td>
       <td>${payableStatusBadge(item)}</td>
       <td><div class="payable-actions"></div></td>
     `;
@@ -3300,7 +3301,8 @@ function renderPayableDetail(item) {
     return;
   }
   const status = payableStatus(item);
-  const finalAmount = item.paidAmount || Math.max(0, round(item.amount + (item.fee || 0) - (item.discount || 0)));
+  const finalAmount = payableTotalDue(item);
+  const openAmount = payableBalance(item);
   els.payableDetailPanel.className = "panel payable-detail-panel";
   els.payableDetailPanel.innerHTML = `
     <div class="payable-detail-head">
@@ -3313,6 +3315,8 @@ function renderPayableDetail(item) {
       <div><span>Juros / multa</span><strong>${money.format(item.fee || 0)}</strong></div>
       <div><span>Desconto</span><strong>${money.format(item.discount || 0)}</strong></div>
       <div><span>Total</span><strong class="${status === "paid" ? "value-ok" : status === "overdue" ? "value-bad" : ""}">${money.format(finalAmount)}</strong></div>
+      <div><span>Já pago</span><strong>${money.format(item.paidAmount || 0)}</strong></div>
+      <div><span>Saldo em aberto</span><strong class="${openAmount > 0 ? "value-bad" : "value-ok"}">${money.format(openAmount)}</strong></div>
       <div><span>Emissão</span><strong>${formatDate(item.issueDate)}</strong></div>
       <div><span>Vencimento</span><strong>${formatDate(item.dueDate)}</strong></div>
       <div><span>Pagamento</span><strong>${item.paidAt ? formatDate(item.paidAt) : "-"}</strong></div>
@@ -3327,13 +3331,16 @@ function renderPayableDetail(item) {
 function openPayablePaymentModal(id) {
   const item = db.payables.find((entry) => entry.id === id);
   if (!item || payableStatus(item) === "paid") return;
+  const openAmount = payableBalance(item);
   els.payablePaymentId.value = id;
   els.payablePaymentTitle.textContent = `${item.supplier || "Fornecedor"} | ${item.notes || item.category || "Conta a pagar"}`;
   els.payablePaymentOriginal.textContent = money.format(item.amount || 0);
+  els.payablePaymentOpen.textContent = money.format(openAmount);
   els.payablePaymentDate.value = todayIso;
   els.payablePaymentMethod.value = "pix";
-  els.payablePaymentFee.value = "0";
-  els.payablePaymentDiscount.value = "0";
+  els.payablePaymentFee.value = fixed(item.fee || 0);
+  els.payablePaymentDiscount.value = fixed(item.discount || 0);
+  els.payablePaymentAmount.value = fixed(openAmount);
   els.payablePaymentNote.value = "";
   renderPayablePaymentTotal();
   els.payablePaymentModal.hidden = false;
@@ -3347,18 +3354,24 @@ function closePayablePaymentModal() {
 
 function renderPayablePaymentTotal() {
   const item = db.payables.find((entry) => entry.id === els.payablePaymentId.value);
+  const currentPaid = Number(item?.paidAmount || 0);
   const base = Number(item?.amount || 0);
   const fee = readNumber(els.payablePaymentFee.value);
   const discount = readNumber(els.payablePaymentDiscount.value);
-  const total = Math.max(0, round(base + fee - discount));
-  els.payablePaymentTotal.textContent = money.format(total);
+  const totalDue = Math.max(0, round(base + fee - discount));
+  const openAmount = Math.max(0, round(totalDue - currentPaid));
+  const paidNow = readNumber(els.payablePaymentAmount.value);
+  const remaining = Math.max(0, round(openAmount - paidNow));
+  els.payablePaymentOpen.textContent = money.format(openAmount);
+  els.payablePaymentRemaining.textContent = money.format(remaining);
 }
 
 function payableStatusBadge(item) {
   const status = payableStatus(item);
   const labels = { paid: "Pago", overdue: "Vencida", today: "Vence hoje", pending: "A vencer" };
-  const extra = status === "overdue" ? `<small>${diffDays(item.dueDate, todayIso)} dias de atraso</small>` : status === "pending" ? `<small>${diffDays(todayIso, item.dueDate)} dias</small>` : "";
-  return `<span class="payable-status ${status}">${labels[status]}${extra}</span>`;
+  const isPartial = status !== "paid" && Number(item.paidAmount || 0) > 0;
+  const extra = isPartial ? `<small>${money.format(payableBalance(item))}</small>` : status === "overdue" ? `<small>${diffDays(item.dueDate, todayIso)} dias de atraso</small>` : status === "pending" ? `<small>${diffDays(todayIso, item.dueDate)} dias</small>` : "";
+  return `<span class="payable-status ${isPartial ? "partial" : status}">${isPartial ? "Parcial" : labels[status]}${extra}</span>`;
 }
 
 async function savePayablePayment(event) {
@@ -3368,8 +3381,11 @@ async function savePayablePayment(event) {
   if (!item) return;
   const fee = readNumber(els.payablePaymentFee.value);
   const discount = readNumber(els.payablePaymentDiscount.value);
-  const amount = Math.max(0, round(item.amount + fee - discount));
-  if (amount <= 0) return alert("O valor final do pagamento deve ser maior que zero.");
+  const totalDue = Math.max(0, round(item.amount + fee - discount));
+  const openAmount = Math.max(0, round(totalDue - Number(item.paidAmount || 0)));
+  const amount = readNumber(els.payablePaymentAmount.value);
+  if (amount <= 0) return alert("Informe um valor pago maior que zero.");
+  if (amount - openAmount > 0.01) return alert("O valor pago não pode ser maior que o saldo em aberto.");
   const paidAt = timestampForDateInput(els.payablePaymentDate.value || todayIso);
   const method = els.payablePaymentMethod.value;
   const note = els.payablePaymentNote.value.trim();
@@ -3398,8 +3414,8 @@ async function savePayablePayment(event) {
   }
   item.fee = fee;
   item.discount = discount;
-  item.paidAmount = amount;
-  item.status = "paid";
+  item.paidAmount = round(Number(item.paidAmount || 0) + amount);
+  item.status = item.paidAmount + 0.01 >= totalDue ? "paid" : "pending";
   item.paidAt = paidAt;
   const description = note ? `${item.category} - ${note}` : item.category;
   addCash("out", "contas a pagar", description, method, amount, item.id, paidAt);
@@ -3762,7 +3778,7 @@ function renderDashboard() {
   els.dashCashBalance.textContent = money.format(cashBalance);
   els.dashCashIn.textContent = money.format(cashInToday);
   els.dashCashOut.textContent = money.format(cashOutToday);
-  els.dashPayablesOpen.textContent = money.format(openPayables.reduce((total, item) => total + item.amount, 0));
+  els.dashPayablesOpen.textContent = money.format(openPayables.reduce((total, item) => total + payableBalance(item), 0));
   els.dashPayablesCount.textContent = `${openPayables.length} conta${openPayables.length === 1 ? "" : "s"} em aberto`;
   els.dashReceivableOpen.textContent = money.format(openReceivables.reduce((total, item) => total + receivableBalance(item), 0));
   els.dashReceivableCount.textContent = `${openReceivables.length} parcela${openReceivables.length === 1 ? "" : "s"} em aberto`;
@@ -3948,7 +3964,7 @@ function renderStoppedProductsFromSummary(rows) {
 
 function renderFinanceSummary() {
   const openReceivables = db.receivables.filter((item) => item.method === "storeCredit").reduce((total, item) => total + receivableBalance(item), 0);
-  const openPayables = db.payables.filter((item) => payableStatus(item) !== "paid").reduce((total, item) => total + item.amount, 0);
+  const openPayables = db.payables.filter((item) => payableStatus(item) !== "paid").reduce((total, item) => total + payableBalance(item), 0);
   const cards = db.receivables.filter((item) => item.status === "cardPending").reduce((total, item) => total + item.amount - item.received, 0);
   const overdue = db.receivables.filter((item) => item.method === "storeCredit" && item.dueDate < todayIso).reduce((total, item) => total + receivableBalance(item), 0);
   els.financeSummaryList.innerHTML = [
@@ -4038,7 +4054,7 @@ function renderReports() {
   const reports = [
     ["Venda", [`Total: ${money.format(sum(validSales, "total"))}`, `Ticket médio: ${money.format(validSales.length ? sum(validSales, "total") / validSales.length : 0)}`, `Produtos vendidos: ${pieces.reduce((total, item) => total + item.quantity, 0)}`, `Canceladas: ${sales.filter((sale) => sale.status === "cancelled").length}`]],
     ["Clientes", [`Cadastrados: ${db.customers.length}`, `Mais compram: ${topCustomers.slice(0, 3).map((item) => `${item.name} ${money.format(item.total)}`).join(", ") || "-"}`, `Inadimplentes: ${new Set(db.receivables.filter((item) => item.method === "storeCredit" && item.dueDate < todayIso && receivableBalance(item) > 0).map((item) => item.customerId)).size}`]],
-    ["Contas a pagar", [`Pendentes: ${money.format(db.payables.filter((item) => payableStatus(item) !== "paid").reduce((total, item) => total + item.amount, 0))}`]],
+    ["Contas a pagar", [`Pendentes: ${money.format(db.payables.filter((item) => payableStatus(item) !== "paid").reduce((total, item) => total + payableBalance(item), 0))}`]],
     ["Contas a receber", [`Crediário: ${money.format(db.receivables.filter((item) => item.method === "storeCredit").reduce((total, item) => total + receivableBalance(item), 0))}`]],
     ["Recebimentos", Object.keys(paymentLabels).map((method) => `${paymentLabels[method]}: ${money.format(validSales.flatMap((sale) => sale.payments).filter((payment) => payment.method === method).reduce((total, payment) => total + payment.amount, 0))}`)],
     ["Produtos parados", stopped.slice(0, 8).map((product) => product.name)],
@@ -4506,8 +4522,17 @@ function receivableBalance(item) {
   return Math.max(0, round(item.amount - item.received));
 }
 
+function payableTotalDue(item) {
+  return Math.max(0, round(Number(item.amount || 0) + Number(item.fee || 0) - Number(item.discount || 0)));
+}
+
+function payableBalance(item) {
+  if (item.status === "cancelled") return 0;
+  return Math.max(0, round(payableTotalDue(item) - Number(item.paidAmount || 0)));
+}
+
 function payableStatus(item) {
-  if (item.status === "paid") return "paid";
+  if (item.status === "paid" || payableBalance(item) <= 0.01) return "paid";
   if (item.dueDate === todayIso) return "today";
   if (item.dueDate < todayIso) return "overdue";
   return "pending";

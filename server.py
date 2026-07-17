@@ -2516,6 +2516,54 @@ def sync_cash_movements_to_state(movements: list[dict], settle_card_amount: floa
     return changed_receivables
 
 
+def persist_cash_movement(movement: dict, store_id: str = "matriz") -> str:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO cash_movements (
+                id, store_id, direction, type, description, method, amount, ref_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                movement["id"],
+                store_id,
+                movement["direction"],
+                movement["type"],
+                movement["description"],
+                movement["method"],
+                float(movement["amount"]),
+                movement["refId"],
+                movement["createdAt"],
+            ),
+        )
+
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+        if row:
+            try:
+                state = json.loads(row["data"])
+            except json.JSONDecodeError:
+                state = default_state()
+        else:
+            state = default_state()
+        if not isinstance(state, dict):
+            state = default_state()
+        current_cash = state.get("cash")
+        state["cash"] = [movement, *(current_cash if isinstance(current_cash, list) else [])]
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(state, ensure_ascii=False), updated_at),
+        )
+        record_audit("create", "cash", movement["id"], {"movement": movement}, conn=conn)
+    return updated_at
+
+
 def cash_closing_metrics(state: dict, date: str) -> dict:
     until_date = str(date or "")[:10]
     movements_until = [item for item in state.get("cash", []) if str(item.get("createdAt", ""))[:10] <= until_date]
@@ -3902,8 +3950,7 @@ def create_cash_movement_api():
         return jsonify({"ok": False, "error": "Descrição é obrigatória."}), 400
     if movement["direction"] == "out" and movement["type"] in {"", "manual"}:
         return jsonify({"ok": False, "error": "Tipo de despesa obrigatorio para saidas."}), 400
-    sync_cash_movements_to_state([movement])
-    record_audit("create", "cash", movement["id"], {"movement": movement})
+    persist_cash_movement(movement)
     return jsonify({"ok": True, "data": {"cash": [movement], "receivables": []}}), 201
 
 

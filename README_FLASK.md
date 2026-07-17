@@ -25,14 +25,7 @@ python server.py
 
 ## Usuario inicial
 
-Em desenvolvimento, se nada for configurado, o sistema cria:
-
-```text
-usuario: admin
-senha: 1234
-```
-
-Para alterar o administrador inicial antes de criar o banco:
+Antes de criar um banco novo, configure explicitamente o administrador inicial:
 
 ```powershell
 $env:MOVA_ADMIN_NAME="Administrador"
@@ -41,9 +34,12 @@ $env:MOVA_ADMIN_PASSWORD="uma-senha-forte"
 python server.py
 ```
 
+Sem `MOVA_ADMIN_PASSWORD`, o sistema inicia normalmente, mas nao cria o administrador.
+Instalacoes existentes nao reconstroem usuarios a partir do estado legado.
+
 ## Producao
 
-Em producao, configure obrigatoriamente:
+Em producao, configure:
 
 ```powershell
 $env:APP_ENV="production"

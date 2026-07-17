@@ -432,3 +432,6 @@ Validar exclusivamente com banco temporário e sem conexão externa:
 - navegador sem credenciais em objetos globais, `localStorage` ou `sessionStorage`;
 - abertura via `file:` e falha da API sem fallback local de autenticação;
 - login, sessão e logout normais pelo backend Flask.
+- banco novo com e sem `MOVA_ADMIN_PASSWORD`, tanto em development quanto em production;
+- ausência da configuração sem criação de administrador, sem segredo em log e sem falha geral de inicialização;
+- inexistência de senha padrão no bootstrap e nos testes.

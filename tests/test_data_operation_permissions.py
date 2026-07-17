@@ -34,20 +34,32 @@ class DataOperationPermissionTest(unittest.TestCase):
         server.ENVIRONMENT = self.environment("development", False)
         server.init_db()
         with server.connect_db() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO users (id, store_id, name, login, password_hash, role, active, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    "operator-test",
-                    "matriz",
-                    "Operador Teste",
-                    "operator-test",
-                    "not-used",
-                    "operator",
-                    1,
-                    server.utc_now(),
+                    (
+                        "admin",
+                        "matriz",
+                        "Administrador",
+                        "admin",
+                        "not-used",
+                        "admin",
+                        1,
+                        server.utc_now(),
+                    ),
+                    (
+                        "operator-test",
+                        "matriz",
+                        "Operador Teste",
+                        "operator-test",
+                        "not-used",
+                        "operator",
+                        1,
+                        server.utc_now(),
+                    ),
                 ),
             )
         self.client = server.app.test_client()

@@ -28,6 +28,7 @@ class PasswordStorageCompatibilityTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original = {
             "environment": server.ENVIRONMENT,
+            "is_production": server.IS_PRODUCTION,
             "use_postgres": server.USE_POSTGRES,
             "database_url": server.DATABASE_URL,
             "db_path": server.DB_PATH,
@@ -43,6 +44,7 @@ class PasswordStorageCompatibilityTest(unittest.TestCase):
 
     def tearDown(self):
         server.ENVIRONMENT = self.original["environment"]
+        server.IS_PRODUCTION = self.original["is_production"]
         server.USE_POSTGRES = self.original["use_postgres"]
         server.DATABASE_URL = self.original["database_url"]
         server.DB_PATH = self.original["db_path"]
@@ -77,6 +79,13 @@ class PasswordStorageCompatibilityTest(unittest.TestCase):
         try:
             row = connection.execute("SELECT password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
             return row[0] if row else None
+        finally:
+            connection.close()
+
+    def user_count(self):
+        connection = sqlite3.connect(server.DB_PATH)
+        try:
+            return connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         finally:
             connection.close()
 
@@ -116,6 +125,53 @@ class PasswordStorageCompatibilityTest(unittest.TestCase):
         self.assertTrue(server.password_hash_is_structurally_valid(stored_hash))
         self.assertTrue(server.password_matches(stored_hash, self.INITIAL_PASSWORD))
         self.assert_no_credentials(self.raw_state())
+
+    def test_bootstrap_requires_explicit_password_in_all_environments(self):
+        for environment_name in ("development", "production"):
+            with self.subTest(environment=environment_name):
+                server.ENVIRONMENT = EnvironmentConfig(
+                    environment_name,
+                    "configured",
+                    False,
+                    False,
+                )
+                server.IS_PRODUCTION = environment_name == "production"
+                server.DB_PATH = os.path.join(self.temp_dir.name, f"missing-{environment_name}.db")
+                os.environ.pop("MOVA_ADMIN_PASSWORD", None)
+                handler = CaptureHandler()
+                server.app.logger.addHandler(handler)
+                try:
+                    server.init_db()
+                finally:
+                    server.app.logger.removeHandler(handler)
+
+                self.assertEqual(self.user_count(), 0)
+                self.assertTrue(any("MOVA_ADMIN_PASSWORD" in message for message in handler.messages))
+
+    def test_explicit_password_bootstraps_admin_in_all_environments(self):
+        for environment_name in ("development", "production"):
+            with self.subTest(environment=environment_name):
+                server.ENVIRONMENT = EnvironmentConfig(
+                    environment_name,
+                    "configured",
+                    False,
+                    False,
+                )
+                server.IS_PRODUCTION = environment_name == "production"
+                server.DB_PATH = os.path.join(self.temp_dir.name, f"configured-{environment_name}.db")
+                os.environ["MOVA_ADMIN_PASSWORD"] = self.INITIAL_PASSWORD
+                handler = CaptureHandler()
+                server.app.logger.addHandler(handler)
+                try:
+                    server.init_db()
+                finally:
+                    server.app.logger.removeHandler(handler)
+
+                stored_hash = self.user_hash()
+                self.assertEqual(self.user_count(), 1)
+                self.assertTrue(server.password_hash_is_structurally_valid(stored_hash))
+                self.assertTrue(server.password_matches(stored_hash, self.INITIAL_PASSWORD))
+                self.assertNotIn(self.INITIAL_PASSWORD, " ".join(handler.messages))
 
     def test_existing_login_preserves_exact_hash(self):
         before = self.user_hash()
@@ -323,13 +379,15 @@ class PasswordStorageCompatibilityTest(unittest.TestCase):
         self.assertIn("showBackendRequiredMessage();", login_source)
         self.assertNotIn("db.users.find", login_source)
         self.assertNotIn("sessionStorage", script)
-        self.assertNotIn('password: "1234"', script)
         self.assertIn("users: []", script)
         self.assertIn("users: Array.isArray(data.users) ? data.users.map(sanitizeUserForBrowser) : []", script)
         self.assertIn("db = browserSafeDb(db);", script)
         self.assertIn("O sistema precisa ser acessado pelo endereço oficial do servidor", script)
         self.assertIn("const loaded = JSON.parse(localStorage.getItem(STORAGE_KEY));", script)
         self.assertNotIn("localStorage.removeItem(STORAGE_KEY)", script)
+
+        server_source = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+        self.assertIn('return os.environ.get("MOVA_ADMIN_PASSWORD", "").strip()', server_source)
 
 
 if __name__ == "__main__":

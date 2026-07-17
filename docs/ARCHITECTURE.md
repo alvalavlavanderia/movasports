@@ -172,8 +172,10 @@ Há controle de excesso de tentativas de login em memória, usando `MOVA_LOGIN_A
 
 Usuário inicial:
 
-- em desenvolvimento, se não configurado, o padrão é `admin` / `1234`;
-- em produção, `MOVA_ADMIN_PASSWORD` é obrigatório e precisa atender validações mínimas.
+- não existe senha padrão para o administrador em nenhum ambiente;
+- `MOVA_ADMIN_PASSWORD` deve ser configurada explicitamente antes do primeiro bootstrap;
+- sem essa variável, a aplicação continua iniciando, mas o administrador não é criado;
+- em produção, a senha configurada precisa atender validações mínimas.
 - a credencial inicial é transformada em hash diretamente na tabela `users` quando há evidência de banco novo;
 - `app_state` não é fonte de autenticação nem de reconstrução da tabela `users`.
 

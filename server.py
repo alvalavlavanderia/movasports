@@ -71,10 +71,11 @@ POSTGRES_CAMEL_ALIASES = (
 if IS_PRODUCTION:
     if not SECRET_KEY or len(SECRET_KEY) < 32:
         raise RuntimeError("Defina MOVA_SECRET_KEY com pelo menos 32 caracteres em produção.")
-    admin_password = os.environ.get("MOVA_ADMIN_PASSWORD", "")
-    if not admin_password:
-        raise RuntimeError("Defina MOVA_ADMIN_PASSWORD para criar o administrador inicial em produção.")
-    if len(admin_password) < 8 or admin_password.lower() in {"1234", "admin", "senha", "password"}:
+    admin_password = os.environ.get("MOVA_ADMIN_PASSWORD", "").strip()
+    if admin_password and (
+        len(admin_password) < 8
+        or admin_password.lower() in {"1234", "admin", "senha", "password"}
+    ):
         raise RuntimeError("MOVA_ADMIN_PASSWORD deve ter pelo menos 8 caracteres e não pode ser uma senha comum.")
 
 app = Flask(__name__, static_folder=APP_DIR, static_url_path="")
@@ -534,7 +535,7 @@ def save_product_image(file_storage) -> dict:
 
 
 def initial_admin_password() -> str:
-    return os.environ.get("MOVA_ADMIN_PASSWORD", "1234" if not IS_PRODUCTION else "")
+    return os.environ.get("MOVA_ADMIN_PASSWORD", "").strip()
 
 
 def initial_admin_user() -> dict:
@@ -1012,12 +1013,15 @@ def init_db() -> None:
                 sync_business_tables(conn, default_state())
 
 
-def create_initial_admin_user(conn: sqlite3.Connection, store_id: str = "matriz") -> None:
+def create_initial_admin_user(conn: sqlite3.Connection, store_id: str = "matriz") -> bool:
     now = utc_now()
     user = initial_admin_user()
     password = initial_admin_password()
     if not password:
-        raise RuntimeError("Nao foi possivel criar o administrador inicial sem credencial configurada.")
+        app.logger.error(
+            "Administrador inicial nao criado: configure MOVA_ADMIN_PASSWORD antes do primeiro acesso."
+        )
+        return False
     conn.execute(
         """
         INSERT INTO users (id, store_id, name, login, password_hash, role, active, updated_at)
@@ -1034,6 +1038,7 @@ def create_initial_admin_user(conn: sqlite3.Connection, store_id: str = "matriz"
             now,
         ),
     )
+    return True
 
 
 def public_user(row: sqlite3.Row | dict) -> dict:

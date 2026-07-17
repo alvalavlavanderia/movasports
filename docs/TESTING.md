@@ -402,3 +402,16 @@ Testar sem conexão de banco ou rede:
 - importação de `wsgi.py` sem inicialização ou alteração de banco.
 
 Os testes devem fornecer um mapa de variáveis diretamente à função de configuração. Não devem alterar variáveis do Railway, abrir o banco de produção ou utilizar credenciais reais.
+
+## 18. IMPORTAÇÃO E RESET
+
+Validar com banco temporário e descartável:
+
+- bloqueio sem autenticação e para operador;
+- bloqueio com flag desabilitada, ambiente ausente ou inválido;
+- bloqueio permanente em produção;
+- permissão exclusiva para administrador em `development` ou `staging` com flag explicitamente habilitada;
+- autorização antes de ler payload, arquivo ou acessar o banco;
+- ausência de escrita e de conteúdo sensível nos logs de tentativas bloqueadas;
+- capacidade booleana da sessão e limpeza imediata no logout, expiração ou troca de usuário;
+- ocultamento exclusivo dos controles Restaurar dados e Zerar sistema.

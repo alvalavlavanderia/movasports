@@ -86,6 +86,35 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=SESSION_HOURS),
 )
 
+DATA_IMPORT_RESET_OPERATIONS = {
+    "/api/import": "import",
+    "/api/reset": "reset",
+}
+
+
+def data_import_reset_denial_reason(user: dict | None) -> str | None:
+    if not user:
+        return "unauthenticated"
+    if user.get("role") != "admin":
+        return "not_admin"
+    if ENVIRONMENT.environment not in {"development", "staging"}:
+        return "capability_disabled"
+    if not ENVIRONMENT.allow_data_import_reset:
+        return "capability_disabled"
+    return None
+
+
+def data_import_reset_capabilities(user: dict | None) -> dict:
+    return {"dataImportReset": data_import_reset_denial_reason(user) is None}
+
+
+def log_blocked_data_operation(operation: str, reason: str) -> None:
+    app.logger.warning(
+        "Operacao destrutiva bloqueada. operation=%s reason=%s",
+        operation,
+        reason,
+    )
+
 
 @app.after_request
 def no_cache(response):
@@ -108,7 +137,25 @@ def require_login_for_api():
     if request.path in {"/api/health", "/api/session", "/api/login", "/api/logout"}:
         return None
     if not session.get("user"):
+        operation = DATA_IMPORT_RESET_OPERATIONS.get(request.path)
+        if operation:
+            log_blocked_data_operation(operation, "unauthenticated")
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    return None
+
+
+@app.before_request
+def protect_data_import_reset_before_database_access():
+    operation = DATA_IMPORT_RESET_OPERATIONS.get(request.path)
+    if not operation:
+        return None
+    reason = data_import_reset_denial_reason(session.get("user"))
+    if reason == "not_admin":
+        log_blocked_data_operation(operation, reason)
+        return jsonify({"ok": False, "error": "Apenas administrador pode realizar esta ação."}), 403
+    if reason == "capability_disabled":
+        log_blocked_data_operation(operation, reason)
+        return jsonify({"ok": False, "error": "Operação indisponível neste ambiente."}), 403
     return None
 
 
@@ -121,6 +168,9 @@ def validate_active_session_for_api():
     if not session.get("user"):
         return None
     if not refresh_session_user():
+        operation = DATA_IMPORT_RESET_OPERATIONS.get(request.path)
+        if operation:
+            log_blocked_data_operation(operation, "invalid_session")
         session.clear()
         return jsonify({"ok": False, "error": "Sessao expirada. Faca login novamente."}), 401
     return None
@@ -992,6 +1042,20 @@ def require_admin() -> tuple[dict | None, tuple | None]:
         return None, (jsonify({"ok": False, "error": "Login obrigatório."}), 401)
     if user.get("role") != "admin":
         return None, (jsonify({"ok": False, "error": "Apenas administrador pode realizar esta ação."}), 403)
+    return user, None
+
+
+def require_data_import_reset_permission(operation: str) -> tuple[dict | None, tuple | None]:
+    current_user = session.get("user")
+    user, error_response = require_admin()
+    if error_response:
+        reason = "unauthenticated" if not current_user else "not_admin"
+        log_blocked_data_operation(operation, reason)
+        return None, error_response
+    reason = data_import_reset_denial_reason(user)
+    if reason:
+        log_blocked_data_operation(operation, reason)
+        return None, (jsonify({"ok": False, "error": "Operação indisponível neste ambiente."}), 403)
     return user, None
 
 
@@ -2495,7 +2559,7 @@ def normalize_import_payload(payload: dict) -> tuple[dict | None, str | None]:
 
 @app.post("/api/import")
 def import_data_api():
-    _, error_response = require_admin()
+    _, error_response = require_data_import_reset_permission("import")
     if error_response:
         return error_response
     confirmation = ""
@@ -2532,7 +2596,7 @@ def import_data_api():
 
 @app.post("/api/reset")
 def reset_data_api():
-    _, error_response = require_admin()
+    _, error_response = require_data_import_reset_permission("reset")
     if error_response:
         return error_response
     payload = request.get_json(silent=True) or {}
@@ -2667,7 +2731,7 @@ def api_login():
     session.permanent = True
     session["user"] = user
     record_audit("login", "auth", user["id"], {"login": user["login"]})
-    return jsonify({"ok": True, "user": user})
+    return jsonify({"ok": True, "user": user, "capabilities": data_import_reset_capabilities(user)})
 
 
 @app.post("/api/logout")
@@ -2676,7 +2740,7 @@ def api_logout():
     if user:
         record_audit("logout", "auth", user.get("id", ""), {"login": user.get("login", "")})
     session.pop("user", None)
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "capabilities": data_import_reset_capabilities(None)})
 
 
 @app.get("/api/session")
@@ -2684,7 +2748,7 @@ def api_session():
     user = refresh_session_user() if session.get("user") else None
     if session.get("user") and not user:
         session.clear()
-    return jsonify({"ok": True, "user": user})
+    return jsonify({"ok": True, "user": user, "capabilities": data_import_reset_capabilities(user)})
 
 
 @app.post("/api/me/password")

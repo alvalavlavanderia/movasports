@@ -30,6 +30,7 @@ const MODULE_API_ENDPOINTS = {
 
 let db = loadDb();
 let session = loadSession();
+let sessionCapabilities = { dataImportReset: false };
 let cart = [];
 let conditionalCart = [];
 let selectedConditionalId = "";
@@ -334,9 +335,25 @@ function saveSession() {
   else sessionStorage.removeItem(SESSION_KEY);
 }
 
+function setSessionCapabilities(capabilities) {
+  sessionCapabilities = {
+    dataImportReset: capabilities?.dataImportReset === true,
+  };
+}
+
+function clearSessionCapabilities() {
+  setSessionCapabilities(null);
+}
+
+function canImportOrResetData() {
+  return Boolean(session && isAdmin() && sessionCapabilities.dataImportReset);
+}
+
 async function login(event) {
   event.preventDefault();
   els.loginMessage.hidden = true;
+  clearSessionCapabilities();
+  applySession();
   if (BACKEND_ENABLED) {
     try {
       const response = await fetch("/api/login", {
@@ -347,6 +364,7 @@ async function login(event) {
       const payload = await response.json();
       if (response.ok && payload.user) {
         session = payload.user;
+        setSessionCapabilities(payload.capabilities);
         saveSession();
         applySession();
         await syncFromServer();
@@ -372,6 +390,10 @@ async function login(event) {
 }
 
 async function logout() {
+  session = null;
+  clearSessionCapabilities();
+  saveSession();
+  applySession();
   if (BACKEND_ENABLED) {
     try {
       await fetch("/api/logout", { method: "POST" });
@@ -379,30 +401,37 @@ async function logout() {
       console.warn(error);
     }
   }
-  session = null;
-  saveSession();
-  applySession();
 }
 
 async function syncSessionFromServer() {
   if (!BACKEND_ENABLED) return;
   try {
     const response = await fetch("/api/session", { cache: "no-store" });
-    if (!response.ok) return;
+    if (!response.ok) {
+      session = null;
+      clearSessionCapabilities();
+      saveSession();
+      applySession();
+      return;
+    }
     const payload = await response.json();
     if (payload.user) {
       session = payload.user;
+      setSessionCapabilities(payload.capabilities);
       saveSession();
       applySession();
       await syncFromServer();
       renderAll();
     } else {
       session = null;
+      clearSessionCapabilities();
       saveSession();
       applySession();
       renderAll();
     }
   } catch (error) {
+    clearSessionCapabilities();
+    applySession();
     console.warn(error);
   }
 }
@@ -414,11 +443,19 @@ function applySession() {
   els.currentUserRole.textContent = logged ? (session.role === "admin" ? "Administrador" : "Operador") : "";
   document.querySelectorAll(".admin-only").forEach((element) => element.hidden = session?.role !== "admin");
   document.querySelectorAll(".manager-only").forEach((element) => element.hidden = session?.role !== "admin");
+  const allowDataOperations = Boolean(
+    session?.role === "admin"
+    && typeof sessionCapabilities !== "undefined"
+    && sessionCapabilities.dataImportReset,
+  );
+  if (els.importDataPanel) els.importDataPanel.hidden = !allowDataOperations;
+  if (els.resetDataPanel) els.resetDataPanel.hidden = !allowDataOperations;
 }
 
 function handleUnauthorized(response, payload = {}) {
   if (response.status !== 401) return false;
   session = null;
+  clearSessionCapabilities();
   saveSession();
   applySession();
   alert(payload.error || "Sua sessão expirou. Faça login novamente.");
@@ -4244,7 +4281,7 @@ async function exportSystemData() {
 }
 
 async function importSystemData() {
-  if (!BACKEND_ENABLED || !isAdmin()) return;
+  if (!BACKEND_ENABLED || !canImportOrResetData()) return;
   const file = els.importDataFile.files?.[0];
   const confirmation = els.importDataConfirmation.value.trim();
   if (!file) return alert("Selecione um arquivo JSON exportado pelo sistema.");
@@ -4284,7 +4321,7 @@ async function importSystemData() {
 }
 
 async function resetSystemData() {
-  if (!BACKEND_ENABLED || !isAdmin()) return;
+  if (!BACKEND_ENABLED || !canImportOrResetData()) return;
   const confirmation = els.resetDataConfirmation.value.trim();
   if (confirmation !== "ZERAR") return alert("Digite ZERAR para confirmar a limpeza do sistema.");
   const accepted = confirm("Esta ação apaga cadastros, vendas, caixa e financeiro. Usuários serão mantidos. Deseja continuar?");

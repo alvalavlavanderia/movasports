@@ -103,6 +103,10 @@ Nunca:
 - Bancos, segredos e uploads não devem ser compartilhados entre ambientes.
 - A importação de `wsgi.py` não pode alterar banco ou dados.
 - As regras operacionais estão documentadas em `docs/ENVIRONMENTS.md`.
+- Importação e reset exigem administrador autenticado, ambiente de desenvolvimento ou homologação e liberação explícita da capacidade.
+- Produção, ambiente ausente e ambiente inválido sempre bloqueiam importação e reset.
+- Tentativas bloqueadas devem usar log seguro sem payload, arquivos, identificação pessoal, credenciais ou escrita de auditoria no banco.
+- A interface recebe apenas capacidades booleanas calculadas pelo backend; elas não substituem a autorização das rotas.
 
 ---
 

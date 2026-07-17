@@ -27,7 +27,14 @@ Enquanto a configuração obrigatória não for implantada, `APP_ENV` ausente ou
 
 As flags sensíveis somente produzem capacidade efetiva em `development` ou `staging`. Em `production`, com `APP_ENV` ausente ou com valor inválido, permanecem desabilitadas mesmo quando a variável contém `true`.
 
-Nesta fase, as capacidades são apenas centralizadas e diagnosticáveis. A aplicação delas às rotas de importação e reset pertence a uma tarefa posterior.
+Valores aceitos para flags booleanas:
+
+- habilitados: `1`, `true`, `yes`, `on`;
+- desabilitados: valor vazio, `0`, `false`, `no`, `off`.
+
+Outros valores são tratados como inválidos e desabilitados. As rotas `/api/import` e `/api/reset` exigem administrador autenticado e a capacidade efetiva `MOVA_ALLOW_DATA_IMPORT_RESET`. Em produção elas permanecem bloqueadas independentemente do valor textual configurado.
+
+O frontend recebe somente o booleano `dataImportReset` calculado pelo servidor para a sessão atual. Nome do ambiente, flags e configurações internas não são expostos.
 
 ## Configuração manual no Railway
 
@@ -64,4 +71,3 @@ Uma fase posterior, dependente de autorização, poderá:
 - tornar `APP_ENV` obrigatória;
 - interromper o startup diante de ambiente inválido;
 - ampliar validações de segredo, PostgreSQL e cookies seguros;
-- aplicar as capacidades centralizadas às rotas sensíveis.

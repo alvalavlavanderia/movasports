@@ -114,15 +114,24 @@ class DataOperationPermissionTest(unittest.TestCase):
         self.assert_safe_error(unauthenticated, 401)
         self.assertEqual(unauthenticated.get_json()["error"], "Login obrigatório.")
 
+        state_unauthenticated = self.client.put("/api/state", json={})
+        self.assert_safe_error(state_unauthenticated, 401)
+        self.assertEqual(state_unauthenticated.get_json()["error"], "Login obrigatório.")
+
         self.authenticate("operator")
         operator = self.client.post("/api/reset", json={"confirmation": "ZERAR"})
         self.assert_safe_error(operator, 403)
         self.assertEqual(operator.get_json()["error"], "Apenas administrador pode realizar esta ação.")
+
+        state_operator = self.client.put("/api/state", json={})
+        self.assert_safe_error(state_operator, 403)
+        self.assertEqual(state_operator.get_json()["error"], "Apenas administrador pode realizar esta ação.")
         self.assertEqual(before, self.database_dump())
 
     def test_blocked_matrix_never_changes_data(self):
         cases = (
             ("development", False),
+            ("staging", False),
             ("production", False),
             ("production", True),
             (None, False),
@@ -134,6 +143,8 @@ class DataOperationPermissionTest(unittest.TestCase):
                 before = self.database_dump()
                 response = self.client.post("/api/reset", json={"confirmation": "ZERAR"})
                 self.assert_safe_error(response, 403)
+                state_response = self.client.put("/api/state", json={"products": [{"id": "blocked"}]})
+                self.assert_safe_error(state_response, 403)
                 self.assertEqual(before, self.database_dump())
 
         server.ENVIRONMENT = EnvironmentConfig(None, "invalid", False, False)
@@ -141,6 +152,8 @@ class DataOperationPermissionTest(unittest.TestCase):
         before = self.database_dump()
         response = self.client.post("/api/reset", json={"confirmation": "ZERAR"})
         self.assert_safe_error(response, 403)
+        state_response = self.client.put("/api/state", json={"products": [{"id": "blocked"}]})
+        self.assert_safe_error(state_response, 403)
         self.assertEqual(before, self.database_dump())
 
     def test_block_occurs_before_payload_file_or_database_access(self):
@@ -152,6 +165,7 @@ class DataOperationPermissionTest(unittest.TestCase):
             mock.patch.object(server, "connect_db") as connect_db,
             mock.patch.object(server, "read_state") as read_state,
             mock.patch.object(server, "write_state") as write_state,
+            mock.patch.object(server, "sync_business_tables") as sync_business_tables,
             mock.patch.object(server, "reset_business_data") as reset_business_data,
             mock.patch.object(server, "record_audit") as record_audit,
             mock.patch("flask.wrappers.Request.get_json", side_effect=AssertionError("Payload lido")) as get_json,
@@ -164,13 +178,23 @@ class DataOperationPermissionTest(unittest.TestCase):
                 content_length=stream.getbuffer().nbytes,
             )
             reset_response = self.client.post("/api/reset", data=b"sensitive-confirmation")
+            server.ENVIRONMENT = self.environment("production", True)
+            state_response = self.client.open(
+                "/api/state",
+                method="PUT",
+                input_stream=FailOnReadStream(b"invalid-state-content" * 100_000),
+                content_type="application/json",
+                content_length=len(b"invalid-state-content" * 100_000),
+            )
 
         self.assertEqual(import_response.status_code, 403)
         self.assertEqual(reset_response.status_code, 403)
+        self.assertEqual(state_response.status_code, 403)
         init_db.assert_not_called()
         connect_db.assert_not_called()
         read_state.assert_not_called()
         write_state.assert_not_called()
+        sync_business_tables.assert_not_called()
         reset_business_data.assert_not_called()
         record_audit.assert_not_called()
         get_json.assert_not_called()
@@ -194,10 +218,17 @@ class DataOperationPermissionTest(unittest.TestCase):
                     "file": (io.BytesIO(" ".join(sensitive_values).encode()), sensitive_values[0]),
                 },
             )
+            state_response = self.client.put(
+                "/api/state",
+                data=" ".join(sensitive_values),
+                content_type="application/json",
+            )
 
         self.assertEqual(response.status_code, 403)
+        self.assertEqual(state_response.status_code, 403)
         logs = " ".join(captured.output)
         self.assertIn("operation=import", logs)
+        self.assertIn("operation=state_replace", logs)
         self.assertIn("reason=capability_disabled", logs)
         for sensitive in sensitive_values:
             self.assertNotIn(sensitive, logs)
@@ -215,6 +246,16 @@ class DataOperationPermissionTest(unittest.TestCase):
             json={"confirmation": "RESTAURAR", "payload": {}},
         )
         self.assertEqual(staging.status_code, 200)
+
+        for environment in ("development", "staging"):
+            with self.subTest(state_replace_environment=environment):
+                server.ENVIRONMENT = self.environment(environment, True)
+                self.authenticate("admin")
+                state_replace = self.client.put("/api/state", json=server.default_state())
+                self.assertEqual(state_replace.status_code, 200)
+                payload = state_replace.get_json()
+                self.assertTrue(payload["ok"])
+                self.assertIn("updatedAt", payload)
 
     def test_session_capability_follows_real_user_and_is_cleared(self):
         server.ENVIRONMENT = self.environment("development", True)
@@ -248,6 +289,24 @@ class DataOperationPermissionTest(unittest.TestCase):
         self.authenticate("admin")
         response = self.client.post("/api/reset", json={"confirmation": "ZERAR"})
         self.assertEqual(response.status_code, 403)
+
+    def test_state_replace_capability_remains_false_in_production(self):
+        server.ENVIRONMENT = self.environment("production", True)
+        self.authenticate("admin")
+
+        session_payload = self.client.get("/api/session").get_json()
+
+        self.assertTrue(session_payload["ok"])
+        self.assertFalse(session_payload["capabilities"]["dataImportReset"])
+
+    def test_state_read_remains_available_in_production(self):
+        server.ENVIRONMENT = self.environment("production", True)
+        self.authenticate("operator")
+
+        response = self.client.get("/api/state")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
 
     def test_documented_flag_values_are_parsed_strictly(self):
         for value in ("1", "true", "yes", "on"):

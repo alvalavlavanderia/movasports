@@ -32,7 +32,7 @@ Valores aceitos para flags booleanas:
 - habilitados: `1`, `true`, `yes`, `on`;
 - desabilitados: valor vazio, `0`, `false`, `no`, `off`.
 
-Outros valores são tratados como inválidos e desabilitados. As rotas `/api/import` e `/api/reset` exigem administrador autenticado e a capacidade efetiva `MOVA_ALLOW_DATA_IMPORT_RESET`. Em produção elas permanecem bloqueadas independentemente do valor textual configurado.
+Outros valores são tratados como inválidos e desabilitados. As rotas `/api/import`, `/api/reset` e `PUT /api/state` exigem administrador autenticado e a capacidade efetiva `MOVA_ALLOW_DATA_IMPORT_RESET`. Em produção elas permanecem bloqueadas independentemente do valor textual configurado.
 
 O frontend recebe somente o booleano `dataImportReset` calculado pelo servidor para a sessão atual. Nome do ambiente, flags e configurações internas não são expostos.
 

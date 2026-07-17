@@ -88,9 +88,14 @@ app.config.update(
 )
 
 DATA_IMPORT_RESET_OPERATIONS = {
-    "/api/import": "import",
-    "/api/reset": "reset",
+    ("POST", "/api/import"): "import",
+    ("POST", "/api/reset"): "reset",
+    ("PUT", "/api/state"): "state_replace",
 }
+
+
+def current_data_import_reset_operation() -> str | None:
+    return DATA_IMPORT_RESET_OPERATIONS.get((request.method, request.path))
 
 
 def data_import_reset_denial_reason(user: dict | None) -> str | None:
@@ -138,7 +143,7 @@ def require_login_for_api():
     if request.path in {"/api/health", "/api/session", "/api/login", "/api/logout"}:
         return None
     if not session.get("user"):
-        operation = DATA_IMPORT_RESET_OPERATIONS.get(request.path)
+        operation = current_data_import_reset_operation()
         if operation:
             log_blocked_data_operation(operation, "unauthenticated")
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
@@ -147,7 +152,7 @@ def require_login_for_api():
 
 @app.before_request
 def protect_data_import_reset_before_database_access():
-    operation = DATA_IMPORT_RESET_OPERATIONS.get(request.path)
+    operation = current_data_import_reset_operation()
     if not operation:
         return None
     reason = data_import_reset_denial_reason(session.get("user"))
@@ -169,7 +174,7 @@ def validate_active_session_for_api():
     if not session.get("user"):
         return None
     if not refresh_session_user():
-        operation = DATA_IMPORT_RESET_OPERATIONS.get(request.path)
+        operation = current_data_import_reset_operation()
         if operation:
             log_blocked_data_operation(operation, "invalid_session")
         session.clear()
@@ -4266,7 +4271,7 @@ def pay_payable_api(payable_id: str):
 
 @app.put("/api/state")
 def put_state():
-    _, error_response = require_admin()
+    _, error_response = require_data_import_reset_permission("state_replace")
     if error_response:
         return error_response
     payload = request.get_json(silent=True)

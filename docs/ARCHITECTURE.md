@@ -174,6 +174,16 @@ Usuário inicial:
 
 - em desenvolvimento, se não configurado, o padrão é `admin` / `1234`;
 - em produção, `MOVA_ADMIN_PASSWORD` é obrigatório e precisa atender validações mínimas.
+- a credencial inicial é transformada em hash diretamente na tabela `users` quando há evidência de banco novo;
+- `app_state` não é fonte de autenticação nem de reconstrução da tabela `users`.
+
+Credenciais:
+
+- `users.password_hash` é a única fonte de autenticação e atualização de senha;
+- criação e alteração recebem a senha somente durante a requisição e persistem apenas o hash;
+- respostas de estado, exportação, sessão e usuários não expõem `password` ou `password_hash`;
+- chaves legadas permanecem internamente no `app_state` durante a Fase 1, sem uso, alteração ou exposição;
+- instalação existente com `users` vazia e usuários apenas no JSON tem o bootstrap automático bloqueado para evitar perda de acesso.
 
 Permissões:
 
@@ -310,10 +320,14 @@ Fluxo web confirmado:
 8. O backend valida sessão, processa a operação, grava no banco e registra auditoria quando aplicável.
 9. O frontend atualiza o estado em memória/localStorage e re-renderiza a interface.
 
-Fallback confirmado:
+Autenticação e cache:
 
-- se o sistema for aberto via `file:`, `script.js` desativa o backend e usa `localStorage`;
-- quando servido via Flask, usa APIs do backend e mantém `localStorage` como cache/estado local.
+- o modo autenticado via `file:` foi descontinuado;
+- o ERP exige acesso pelo backend Flask em HTTP/HTTPS;
+- indisponibilidade do backend não autoriza login local;
+- o navegador não é fonte de sessão, perfil, permissão ou credencial;
+- `localStorage` permanece como cache de dados públicos e operacionais, sem senha ou hash;
+- dados locais antigos não são usados para autenticação e não recebem novas credenciais.
 
 ## Arquivos Analisados
 

@@ -533,13 +533,15 @@ def save_product_image(file_storage) -> dict:
     return {"url": f"/uploads/products/{filename}", "filename": filename, "size": os.path.getsize(path), "storage": "local"}
 
 
+def initial_admin_password() -> str:
+    return os.environ.get("MOVA_ADMIN_PASSWORD", "1234" if not IS_PRODUCTION else "")
+
+
 def initial_admin_user() -> dict:
-    password = os.environ.get("MOVA_ADMIN_PASSWORD", "1234" if not IS_PRODUCTION else "")
     return {
         "id": "admin",
         "name": os.environ.get("MOVA_ADMIN_NAME", "Administrador").strip() or "Administrador",
         "login": os.environ.get("MOVA_ADMIN_LOGIN", "admin").strip() or "admin",
-        "password": password,
         "role": "admin",
         "active": True,
     }
@@ -561,6 +563,50 @@ def default_state() -> dict:
         "returns": [],
         "conditionals": [],
     }
+
+
+SENSITIVE_CREDENTIAL_KEYS = {"password", "password_hash"}
+
+
+class LegacyUsersWithoutHashesError(RuntimeError):
+    pass
+
+
+def sanitize_credentials(value):
+    if isinstance(value, dict):
+        return {
+            key: sanitize_credentials(item)
+            for key, item in value.items()
+            if str(key).lower() not in SENSITIVE_CREDENTIAL_KEYS
+        }
+    if isinstance(value, list):
+        return [sanitize_credentials(item) for item in value]
+    return value
+
+
+def password_hash_is_structurally_valid(value: str | None) -> bool:
+    parts = str(value or "").split("$")
+    return len(parts) == 3 and all(parts)
+
+
+def password_matches(stored_hash: str | None, candidate: str) -> bool:
+    if not password_hash_is_structurally_valid(stored_hash):
+        app.logger.warning("Autenticacao bloqueada: usuario sem password_hash valido.")
+        return False
+    try:
+        return check_password_hash(str(stored_hash), candidate)
+    except (TypeError, ValueError):
+        app.logger.warning("Autenticacao bloqueada: usuario sem password_hash valido.")
+        return False
+
+
+@app.errorhandler(LegacyUsersWithoutHashesError)
+def handle_legacy_users_without_hashes(_error):
+    app.logger.warning("Operacao bloqueada: tabela users vazia com estado legado de usuarios.")
+    return jsonify({
+        "ok": False,
+        "error": "O cadastro de usuarios requer verificacao administrativa antes desta operacao.",
+    }), 409
 
 
 def init_db() -> None:
@@ -589,7 +635,8 @@ def init_db() -> None:
             """
         )
         exists = conn.execute("SELECT id FROM app_state WHERE id = 1").fetchone()
-        if not exists:
+        app_state_created = not bool(exists)
+        if app_state_created:
             conn.execute(
                 "INSERT INTO app_state (id, data, updated_at) VALUES (1, ?, ?)",
                 (json.dumps(default_state(), ensure_ascii=False), utc_now()),
@@ -636,7 +683,16 @@ def init_db() -> None:
             state = default_state()
         users_count = conn.execute("SELECT COUNT(*) AS total FROM users").fetchone()["total"]
         if users_count == 0:
-            sync_users_table(conn, state)
+            if app_state_created:
+                create_initial_admin_user(conn)
+            elif state.get("users"):
+                app.logger.warning(
+                    "Bootstrap de usuarios bloqueado: tabela users vazia com estado legado."
+                )
+            else:
+                app.logger.warning(
+                    "Bootstrap de usuarios bloqueado: banco existente sem usuarios autoritativos."
+                )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS brands (
@@ -956,28 +1012,28 @@ def init_db() -> None:
                 sync_business_tables(conn, default_state())
 
 
-def sync_users_table(conn: sqlite3.Connection, state: dict, store_id: str = "matriz") -> None:
+def create_initial_admin_user(conn: sqlite3.Connection, store_id: str = "matriz") -> None:
     now = utc_now()
-    users = state.get("users") or default_state()["users"]
-    conn.execute("DELETE FROM users WHERE store_id = ?", (store_id,))
-    for user in users:
-        password = user.get("password") or initial_admin_user()["password"]
-        conn.execute(
-            """
-            INSERT INTO users (id, store_id, name, login, password_hash, role, active, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user.get("id") or user.get("login"),
-                store_id,
-                user.get("name", ""),
-                user.get("login", ""),
-                generate_password_hash(password),
-                user.get("role", "operator"),
-                1 if user.get("active", True) else 0,
-                user.get("updatedAt", now),
-            ),
-        )
+    user = initial_admin_user()
+    password = initial_admin_password()
+    if not password:
+        raise RuntimeError("Nao foi possivel criar o administrador inicial sem credencial configurada.")
+    conn.execute(
+        """
+        INSERT INTO users (id, store_id, name, login, password_hash, role, active, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            user["id"],
+            store_id,
+            user["name"],
+            user["login"],
+            generate_password_hash(password),
+            user["role"],
+            1,
+            now,
+        ),
+    )
 
 
 def public_user(row: sqlite3.Row | dict) -> dict:
@@ -1091,48 +1147,27 @@ def validate_user_payload(user: dict, creating: bool = False) -> str | None:
 def write_app_state_only(state: dict) -> str:
     updated_at = utc_now()
     with connect_db() as conn:
+        state_to_store = prepare_state_for_storage(conn, state)
         conn.execute(
             """
             INSERT INTO app_state (id, data, updated_at)
             VALUES (1, ?, ?)
             ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
             """,
-            (json.dumps(state, ensure_ascii=False), updated_at),
+            (json.dumps(state_to_store, ensure_ascii=False), updated_at),
         )
     return updated_at
 
 
 def sync_user_to_state(user: dict | None = None, deleted_id: str | None = None) -> None:
     state, _ = read_state()
-    if deleted_id:
-        state["users"] = [item for item in state.get("users", []) if item.get("id") != deleted_id]
-    elif user:
-        existing = next((item for item in state.get("users", []) if item.get("id") == user["id"]), {})
-        users = [item for item in state.get("users", []) if item.get("id") != user["id"]]
-        state_user = {
-            "id": user["id"],
-            "name": user["name"],
-            "login": user["login"],
-            "password": user.get("password") or existing.get("password", ""),
-            "role": user["role"],
-            "active": user.get("active", True),
-        }
-        state["users"] = [state_user, *users]
-    updated_at = utc_now()
-    with connect_db() as conn:
-        conn.execute(
-            """
-            INSERT INTO app_state (id, data, updated_at)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-            """,
-            (json.dumps(state, ensure_ascii=False), updated_at),
-        )
+    # A tabela users ja foi atualizada pelo endpoint especifico. O app_state
+    # recebe apenas o snapshot publico preparado pela fronteira de persistencia.
+    write_app_state_only(state)
 
 
 def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = "matriz") -> None:
     now = utc_now()
-    sync_users_table(conn, state, store_id)
     conn.execute("DELETE FROM sale_return_items WHERE return_id IN (SELECT id FROM sale_returns WHERE store_id = ?)", (store_id,))
     conn.execute("DELETE FROM sale_returns WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM cash_closings WHERE store_id = ?", (store_id,))
@@ -1467,16 +1502,17 @@ def read_state() -> tuple[dict, str]:
     init_db()
     with connect_db() as conn:
         row = conn.execute("SELECT data, updated_at FROM app_state WHERE id = 1").fetchone()
-    if not row:
-        return default_state(), utc_now()
-    try:
-        state = json.loads(row["data"])
-    except json.JSONDecodeError:
-        state = default_state()
-    merged = {**default_state(), **state}
-    if not merged.get("users"):
-        merged["users"] = default_state()["users"]
-    return merged, row["updated_at"]
+        if not row:
+            state = default_state()
+            state["users"] = users_state_from_db(conn)
+            return state, utc_now()
+        try:
+            state = json.loads(row["data"])
+        except json.JSONDecodeError:
+            state = default_state()
+        merged = {**default_state(), **state}
+        merged["users"] = users_state_from_db(conn)
+        return merged, row["updated_at"]
 
 
 def write_state(state: dict) -> str:
@@ -1484,15 +1520,16 @@ def write_state(state: dict) -> str:
     updated_at = utc_now()
     with connect_db() as conn:
         conn.execute("PRAGMA foreign_keys = ON")
+        state_to_store = prepare_state_for_storage(conn, state)
         conn.execute(
             """
             INSERT INTO app_state (id, data, updated_at)
             VALUES (1, ?, ?)
             ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
             """,
-            (json.dumps(state, ensure_ascii=False), updated_at),
+            (json.dumps(state_to_store, ensure_ascii=False), updated_at),
         )
-        sync_business_tables(conn, state)
+        sync_business_tables(conn, state_to_store)
     return updated_at
 
 
@@ -1518,12 +1555,51 @@ def users_state_from_db(conn: sqlite3.Connection, store_id: str = "matriz") -> l
     ]
 
 
+def stored_app_state_from_connection(conn) -> dict:
+    row = conn.execute("SELECT data FROM app_state WHERE id = 1").fetchone()
+    if not row:
+        return default_state()
+    try:
+        value = json.loads(row["data"])
+    except json.JSONDecodeError:
+        return default_state()
+    return value if isinstance(value, dict) else default_state()
+
+
+def prepare_state_for_storage(conn, state: dict, store_id: str = "matriz") -> dict:
+    existing_state = stored_app_state_from_connection(conn)
+    legacy_users = existing_state.get("users") if isinstance(existing_state.get("users"), list) else []
+    public_users = users_state_from_db(conn, store_id)
+    if not public_users and legacy_users:
+        raise LegacyUsersWithoutHashesError()
+
+    protected_users = []
+    for public_user_data in public_users:
+        legacy_user = next((
+            item for item in legacy_users
+            if isinstance(item, dict) and (
+                item.get("id") == public_user_data["id"]
+                or item.get("login") == public_user_data["login"]
+            )
+        ), {})
+        protected = dict(public_user_data)
+        for key, value in legacy_user.items():
+            if str(key).lower() in SENSITIVE_CREDENTIAL_KEYS:
+                protected[key] = value
+        protected_users.append(protected)
+
+    incoming_state = sanitize_credentials(state if isinstance(state, dict) else {})
+    prepared = {**default_state(), **incoming_state}
+    prepared["users"] = protected_users
+    return prepared
+
+
 def reset_business_data(store_id: str = "matriz") -> tuple[str, dict]:
     updated_at = utc_now()
     with connect_db() as conn:
         conn.execute("PRAGMA foreign_keys = ON")
         users = users_state_from_db(conn, store_id)
-        empty_state = {**default_state(), "users": users or default_state()["users"]}
+        empty_state = prepare_state_for_storage(conn, {**default_state(), "users": users}, store_id)
         conn.execute("DELETE FROM sale_return_items WHERE return_id IN (SELECT id FROM sale_returns WHERE store_id = ?)", (store_id,))
         conn.execute("DELETE FROM sale_returns WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM cash_closings WHERE store_id = ?", (store_id,))
@@ -2510,9 +2586,7 @@ def export_data_api():
     if error_response:
         return error_response
     state, updated_at = read_state()
-    safe_state = json.loads(json.dumps(state))
-    for user in safe_state.get("users", []):
-        user.pop("password", None)
+    safe_state = sanitize_credentials(state)
     exported_at = utc_now()
     payload = {
         "system": "Mova Sports",
@@ -2722,7 +2796,7 @@ def api_login():
             """,
             ("matriz", login),
         ).fetchone()
-    if not row or not row["active"] or not check_password_hash(row["password_hash"], password):
+    if not row or not row["active"] or not password_matches(row["password_hash"], password):
         register_login_failure(login)
         return jsonify({"ok": False, "error": "Usuário ou senha inválidos."}), 401
     clear_login_failures(login)
@@ -2779,7 +2853,7 @@ def change_own_password_api():
         ).fetchone()
         if not row or not row["active"]:
             return jsonify({"ok": False, "error": "Usuario nao encontrado ou inativo."}), 404
-        if not check_password_hash(row["password_hash"], current_password):
+        if not password_matches(row["password_hash"], current_password):
             return jsonify({"ok": False, "error": "Senha atual incorreta."}), 401
         now = utc_now()
         conn.execute(
@@ -2791,7 +2865,6 @@ def change_own_password_api():
         "id": row["id"],
         "name": row["name"],
         "login": row["login"],
-        "password": new_password,
         "role": row["role"],
         "active": bool(row["active"]),
     })
@@ -2853,9 +2926,10 @@ def create_user():
                 user["updatedAt"],
             ),
         )
-        record_audit("create", "user", user["id"], {"user": user}, conn)
-    sync_user_to_state(user)
-    return jsonify({"ok": True, "data": {key: value for key, value in user.items() if key != "password"}}), 201
+        public = public_user(user)
+        record_audit("create", "user", user["id"], {"user": public}, conn)
+    sync_user_to_state(public)
+    return jsonify({"ok": True, "data": public}), 201
 
 
 @app.put("/api/users/<user_id>")
@@ -2918,8 +2992,8 @@ def update_user(user_id: str):
             """,
             ("matriz", user_id),
         ).fetchone()
-        record_audit("update", "user", user_id, {"user": user}, conn)
-    sync_user_to_state(user)
+        record_audit("update", "user", user_id, {"user": public_user(user)}, conn)
+    sync_user_to_state(public_user(user))
     public = public_user(updated)
     if current_user and current_user.get("id") == user_id:
         session["user"] = public
@@ -2957,7 +3031,7 @@ def delete_user_api(user_id: str):
 @app.get("/api/state")
 def get_state():
     state, updated_at = read_state()
-    return jsonify({"ok": True, "data": state, "updatedAt": updated_at})
+    return jsonify({"ok": True, "data": sanitize_credentials(state), "updatedAt": updated_at})
 
 
 @app.get("/api/products")

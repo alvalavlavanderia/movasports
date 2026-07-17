@@ -415,3 +415,20 @@ Validar com banco temporário e descartável:
 - ausência de escrita e de conteúdo sensível nos logs de tentativas bloqueadas;
 - capacidade booleana da sessão e limpeza imediata no logout, expiração ou troca de usuário;
 - ocultamento exclusivo dos controles Restaurar dados e Zerar sistema.
+
+## 19. CREDENCIAIS FORA DO APP_STATE
+
+Validar exclusivamente com banco temporário e sem conexão externa:
+
+- login existente sem alteração do hash;
+- criação e alteração de senha gravando somente `users.password_hash`;
+- edição de dados públicos preservando o hash;
+- ausência de senha e hash em estado, exportação, sessão e respostas de usuários;
+- entradas genéricas incapazes de criar ou alterar credenciais;
+- preservação interna, sem uso ou exposição, de chaves legadas do `app_state`;
+- bloqueio de reconstrução quando `users` está vazia em instalação legada;
+- bootstrap com hash somente em banco comprovadamente novo;
+- hash ausente ou inválido bloqueado sem correção automática ou log sensível;
+- navegador sem credenciais em objetos globais, `localStorage` ou `sessionStorage`;
+- abertura via `file:` e falha da API sem fallback local de autenticação;
+- login, sessão e logout normais pelo backend Flask.

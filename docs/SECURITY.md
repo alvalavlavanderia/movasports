@@ -46,6 +46,16 @@ Toda requisição deve validar:
 
 Nunca confiar apenas no frontend.
 
+## Credenciais de usuários
+
+- A tabela `users` e o campo `password_hash` são a única fonte de autenticação.
+- Senhas em texto existem apenas durante requisições específicas de login, criação ou alteração e não são persistidas em estado, logs ou respostas.
+- `app_state`, importações e atualizações genéricas não podem criar ou alterar credenciais.
+- Credenciais legadas no `app_state` permanecem preservadas internamente na Fase 1, mas não são usadas nem expostas.
+- O modo de autenticação offline por `file:` está descontinuado; falha de rede mantém o usuário desconectado.
+- O navegador não deve armazenar senha, hash ou verificador equivalente em memória global, `localStorage` ou `sessionStorage`.
+- Usuário sem hash válido não pode ser corrigido ou reconstruído automaticamente; o fluxo deve ser bloqueado com aviso sem identificação ou credencial.
+
 ---
 
 # Uploads

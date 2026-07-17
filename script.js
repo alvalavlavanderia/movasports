@@ -1,5 +1,4 @@
 const STORAGE_KEY = "mova-sports-v1";
-const SESSION_KEY = "mova-sports-session";
 const OLD_KEYS = ["loja-nova-base-v1", "fashion-store-management-v2", "clothing-products-v1"];
 
 OLD_KEYS.forEach((key) => localStorage.removeItem(key));
@@ -9,6 +8,7 @@ const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL
 const paymentLabels = { cash: "Dinheiro", pix: "PIX", debit: "Débito", credit: "Crédito", storeCredit: "Crediário" };
 const cashExpenseTypes = ["Gasolina", "Lanche", "Estacionamento", "Motoboy", "Material de limpeza", "Pequenas compras", "Correios", "Outros"];
 const BACKEND_ENABLED = location.protocol !== "file:";
+const BACKEND_REQUIRED_MESSAGE = "O sistema precisa ser acessado pelo endereço oficial do servidor. Abra o ERP pelo link utilizado normalmente pela empresa.";
 const STATE_API_URL = "/api/state";
 const nativeFetch = window.fetch.bind(window);
 window.fetch = (input, init = {}) => nativeFetch(input, { ...init, credentials: init.credentials || "same-origin" });
@@ -69,6 +69,7 @@ document.querySelectorAll("[id]").forEach((element) => {
 let chartTooltip = null;
 
 bindEvents();
+if (!BACKEND_ENABLED) showBackendRequiredMessage();
 applySession();
 renderAll();
 syncSessionFromServer();
@@ -196,7 +197,7 @@ function updateCashExpenseField() {
 
 function defaultDb() {
   return {
-    users: [{ id: "admin", name: "Administrador", login: "admin", password: "1234", role: "admin" }],
+    users: [],
     products: [],
     customers: [],
     suppliers: [],
@@ -212,6 +213,21 @@ function defaultDb() {
   };
 }
 
+function sanitizeUserForBrowser(user = {}) {
+  const { password, password_hash, passwordHash, ...publicUser } = user;
+  void password;
+  void password_hash;
+  void passwordHash;
+  return publicUser;
+}
+
+function browserSafeDb(data = {}) {
+  return {
+    ...data,
+    users: Array.isArray(data.users) ? data.users.map(sanitizeUserForBrowser) : [],
+  };
+}
+
 function loadDb() {
   try {
     const loaded = JSON.parse(localStorage.getItem(STORAGE_KEY));
@@ -223,6 +239,7 @@ function loadDb() {
 }
 
 function persist() {
+  db = browserSafeDb(db);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
   invalidateDashboardCache();
   if (!BACKEND_ENABLED) {
@@ -232,6 +249,7 @@ function persist() {
 }
 
 function persistLocalOnly() {
+  db = browserSafeDb(db);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
   invalidateDashboardCache();
 }
@@ -268,17 +286,11 @@ async function loadDbFromModuleApis() {
 }
 
 function mergeServerUsers(users) {
-  const localUsers = db.users || [];
-  const baseUsers = defaultDb().users;
-  return (users || []).map((user) => {
-    const local = localUsers.find((item) => item.id === user.id || item.login === user.login);
-    const base = baseUsers.find((item) => item.id === user.id || item.login === user.login);
-    return { ...user, password: user.password || local?.password || base?.password || "" };
-  });
+  return (users || []).map(sanitizeUserForBrowser);
 }
 
 function applyServerDb(serverDb) {
-  db = serverDb;
+  db = browserSafeDb(serverDb);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
   hasLocalChanges = false;
   invalidateDashboardCache();
@@ -304,8 +316,8 @@ function mergeDb(loaded) {
   Object.keys(base).forEach((key) => {
     if (!Array.isArray(merged[key])) merged[key] = base[key];
   });
-  if (!merged.users.length) merged.users = base.users;
-  return merged;
+  merged.users = merged.users.map(sanitizeUserForBrowser);
+  return browserSafeDb(merged);
 }
 
 function hasBusinessData(data) {
@@ -322,17 +334,11 @@ async function saveStateToServer(version = localChangeVersion) {
 }
 
 function loadSession() {
-  if (BACKEND_ENABLED) return null;
-  try {
-    return JSON.parse(sessionStorage.getItem(SESSION_KEY)) || null;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function saveSession() {
-  if (session) sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  else sessionStorage.removeItem(SESSION_KEY);
+  // A sessao autenticada pertence ao cookie HTTP gerenciado pelo Flask.
 }
 
 function setSessionCapabilities(capabilities) {
@@ -349,44 +355,45 @@ function canImportOrResetData() {
   return Boolean(session && isAdmin() && sessionCapabilities.dataImportReset);
 }
 
+function showBackendRequiredMessage() {
+  els.loginMessage.textContent = BACKEND_REQUIRED_MESSAGE;
+  els.loginMessage.hidden = false;
+}
+
 async function login(event) {
   event.preventDefault();
   els.loginMessage.hidden = true;
   clearSessionCapabilities();
   applySession();
-  if (BACKEND_ENABLED) {
-    try {
-      const response = await fetch("/api/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ login: els.loginUser.value.trim(), password: els.loginPassword.value }),
-      });
-      const payload = await response.json();
-      if (response.ok && payload.user) {
-        session = payload.user;
-        setSessionCapabilities(payload.capabilities);
-        saveSession();
-        applySession();
-        await syncFromServer();
-        renderAll();
-        return;
-      }
-      els.loginMessage.textContent = payload.error || "Usuário ou senha inválidos.";
-      els.loginMessage.hidden = false;
-      return;
-    } catch (error) {
-      console.warn(error);
-    }
-  }
-  const user = db.users.find((item) => item.login === els.loginUser.value.trim() && item.password === els.loginPassword.value);
-  if (!user) {
-    els.loginMessage.textContent = "Usuário ou senha inválidos.";
-    els.loginMessage.hidden = false;
+  if (!BACKEND_ENABLED) {
+    showBackendRequiredMessage();
     return;
   }
-  session = { id: user.id, name: user.name, role: user.role };
-  saveSession();
-  applySession();
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ login: els.loginUser.value.trim(), password: els.loginPassword.value }),
+    });
+    const payload = await response.json();
+    if (response.ok && payload.user) {
+      session = sanitizeUserForBrowser(payload.user);
+      setSessionCapabilities(payload.capabilities);
+      saveSession();
+      applySession();
+      await syncFromServer();
+      renderAll();
+      return;
+    }
+    els.loginMessage.textContent = payload.error || "Usuário ou senha inválidos.";
+    els.loginMessage.hidden = false;
+    return;
+  } catch (error) {
+    console.warn(error);
+    session = null;
+    applySession();
+    showBackendRequiredMessage();
+  }
 }
 
 async function logout() {
@@ -416,7 +423,7 @@ async function syncSessionFromServer() {
     }
     const payload = await response.json();
     if (payload.user) {
-      session = payload.user;
+      session = sanitizeUserForBrowser(payload.user);
       setSessionCapabilities(payload.capabilities);
       saveSession();
       applySession();
@@ -906,56 +913,49 @@ function applySimpleNameLocally(collection, value, previous = "") {
 
 async function saveUser(event) {
   event.preventDefault();
+  if (!BACKEND_ENABLED) return showBackendRequiredMessage();
   if (!isAdmin()) return alert("Apenas admin pode criar usuários.");
   const id = els.editingUserId.value || createId();
   const existing = db.users.find((user) => user.id === id);
   const duplicate = db.users.some((user) => user.login === els.userLogin.value.trim() && user.id !== id);
   if (duplicate) return alert("Usuário já cadastrado.");
+  const password = els.userPassword.value;
   const user = {
     id,
     name: els.userName.value.trim(),
     login: els.userLogin.value.trim(),
-    password: els.userPassword.value,
     role: els.userRole.value,
     active: existing?.active ?? true,
   };
-  if (!existing && !user.password) return alert("Senha é obrigatória para novo usuário.");
+  if (!existing && !password) return alert("Senha é obrigatória para novo usuário.");
 
-  if (BACKEND_ENABLED) {
-    try {
-      const response = await fetch(existing ? `/api/users/${encodeURIComponent(id)}` : "/api/users", {
-        method: existing ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(user),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        if (handleUnauthorized(response, payload)) return;
-        alert(payload.error || "Não foi possível salvar o usuário.");
-        return;
-      }
-      applyUserLocally({ ...(payload.data || user), password: user.password || existing?.password || "" });
-      persistLocalOnly();
-      resetUserForm();
-      renderAll();
-      return;
-    } catch (error) {
-      console.warn(error);
-      alert("Não foi possível conectar ao servidor para salvar o usuário.");
+  try {
+    const response = await fetch(existing ? `/api/users/${encodeURIComponent(id)}` : "/api/users", {
+      method: existing ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...user, ...(password ? { password } : {}) }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (handleUnauthorized(response, payload)) return;
+      alert(payload.error || "Não foi possível salvar o usuário.");
       return;
     }
+    applyUserLocally(payload.data || user);
+    persistLocalOnly();
+    resetUserForm();
+    renderAll();
+  } catch (error) {
+    console.warn(error);
+    alert("Não foi possível conectar ao servidor para salvar o usuário.");
   }
-
-  applyUserLocally(user);
-  persist();
-  resetUserForm();
-  renderAll();
 }
 
 function applyUserLocally(user) {
+  const publicUser = sanitizeUserForBrowser(user);
   db.users = db.users.some((item) => item.id === user.id)
-    ? db.users.map((item) => item.id === user.id ? user : item)
-    : [...db.users, user];
+    ? db.users.map((item) => item.id === publicUser.id ? publicUser : item)
+    : [...db.users, publicUser];
 }
 
 function resetSupplierForm() {

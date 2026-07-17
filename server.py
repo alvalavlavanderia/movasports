@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request, send_from_directory, session
+from environment_config import load_environment_config
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -27,8 +28,11 @@ CLOUDINARY_FOLDER = os.environ.get("CLOUDINARY_FOLDER", "mova-sports/products").
 VALID_CLOUDINARY_URL = CLOUDINARY_URL.startswith("cloudinary://")
 USE_CLOUDINARY = bool(VALID_CLOUDINARY_URL or (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET))
 DB_BUSY_TIMEOUT_MS = max(1000, int(float(os.environ.get("MOVA_DB_BUSY_TIMEOUT_MS", "5000") or 5000)))
-APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
-IS_PRODUCTION = APP_ENV == "production"
+ENVIRONMENT = load_environment_config()
+APP_ENV = ENVIRONMENT.environment or ""
+IS_PRODUCTION = ENVIRONMENT.is_production
+ALLOW_MIGRATIONS = ENVIRONMENT.allow_migrations
+ALLOW_DATA_IMPORT_RESET = ENVIRONMENT.allow_data_import_reset
 SECRET_KEY = os.environ.get("MOVA_SECRET_KEY", "").strip()
 SESSION_HOURS = max(1, int(float(os.environ.get("MOVA_SESSION_HOURS", "12") or 12)))
 LOGIN_ATTEMPT_LIMIT = max(3, int(float(os.environ.get("MOVA_LOGIN_ATTEMPTS", "5") or 5)))

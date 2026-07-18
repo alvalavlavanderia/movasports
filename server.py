@@ -2480,6 +2480,129 @@ def sync_payable_to_state(payable: dict | None = None, cash: list[dict] | None =
     write_state(state)
 
 
+class PayablePaymentError(Exception):
+    def __init__(self, message: str, status_code: int):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "matriz") -> tuple[dict, list[dict]]:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+
+        payable_lock = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT id, supplier, category, amount, issue_date AS issueDate,
+                   due_date AS dueDate, notes, paid_amount AS paidAmount,
+                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
+                   updated_at AS updatedAt
+            FROM payables
+            WHERE store_id = ? AND id = ?{payable_lock}
+            """,
+            (store_id, payable_id),
+        ).fetchone()
+        if not row:
+            raise PayablePaymentError("Conta não encontrada.", 404)
+
+        payable = payable_from_row(row)
+        if payable["status"] == "paid":
+            raise PayablePaymentError("Conta já está paga.", 409)
+
+        fee = money_round(payload.get("fee", payable.get("fee", 0)))
+        discount = money_round(payload.get("discount", payable.get("discount", 0)))
+        total_due = money_round(payable["amount"] + fee - discount)
+        open_amount = max(0, money_round(total_due - float(payable.get("paidAmount") or 0)))
+        payment_amount = money_round(payload.get("amount", open_amount))
+        if payment_amount <= 0:
+            raise PayablePaymentError("Valor pago deve ser maior que zero.", 400)
+        if payment_amount - open_amount > 0.01:
+            raise PayablePaymentError("Valor pago nao pode ser maior que o saldo em aberto.", 400)
+
+        paid_at = str(payload.get("paidAt") or utc_now())
+        method = str(payload.get("method") or "pix").strip()
+        payable["fee"] = fee
+        payable["discount"] = discount
+        payable["paidAmount"] = money_round(float(payable.get("paidAmount") or 0) + payment_amount)
+        payable["status"] = "paid" if payable["paidAmount"] + 0.01 >= total_due else "pending"
+        payable["paidAt"] = paid_at
+        payable["updatedAt"] = utc_now()
+        movement = normalize_cash_movement_payload({
+            "direction": "out",
+            "type": "contas a pagar",
+            "description": f"{payable['category']}{' - ' + str(payload.get('note')).strip() if payload.get('note') else ''}",
+            "method": method,
+            "amount": payment_amount,
+            "refId": payable_id,
+            "createdAt": paid_at,
+        })
+        cash = [movement]
+
+        conn.execute(
+            """
+            UPDATE payables
+            SET paid_amount = ?, fee = ?, discount = ?, status = ?, paid_at = ?, updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                float(payable["paidAmount"]),
+                float(payable["fee"]),
+                float(payable["discount"]),
+                payable["status"],
+                payable["paidAt"],
+                payable["updatedAt"],
+                store_id,
+                payable_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO cash_movements (
+                id, store_id, direction, type, description, method, amount, ref_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                movement["id"],
+                store_id,
+                movement["direction"],
+                movement["type"],
+                movement["description"],
+                movement["method"],
+                float(movement["amount"]),
+                movement["refId"],
+                movement["createdAt"],
+            ),
+        )
+
+        state_lock = " FOR UPDATE" if USE_POSTGRES else ""
+        state_row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{state_lock}").fetchone()
+        if state_row:
+            try:
+                state = json.loads(state_row["data"])
+            except json.JSONDecodeError:
+                state = default_state()
+        else:
+            state = default_state()
+        if not isinstance(state, dict):
+            state = default_state()
+        state["payables"] = [item for item in state.get("payables", []) if item.get("id") != payable_id]
+        state["payables"].append(payable)
+        state["cash"] = [*cash, *state.get("cash", [])]
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(state, ensure_ascii=False), utc_now()),
+        )
+        record_audit("pay", "payable", payable_id, {"payable": payable, "cash": cash}, conn=conn)
+    return payable, cash
+
+
 def persist_payable_creation(payable: dict, store_id: str = "matriz") -> str:
     updated_at = utc_now()
     with connect_db() as conn:
@@ -4460,53 +4583,11 @@ def pay_payable_api(payable_id: str):
     if not session.get("user"):
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
     payload = request.get_json(silent=True) or {}
-    init_db()
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, supplier, category, amount, issue_date AS issueDate,
-                   due_date AS dueDate, notes, paid_amount AS paidAmount,
-                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
-                   updated_at AS updatedAt
-            FROM payables
-            WHERE store_id = ? AND id = ?
-            """,
-            ("matriz", payable_id),
-        ).fetchone()
-    if not row:
-        return jsonify({"ok": False, "error": "Conta não encontrada."}), 404
-    payable = payable_from_row(row)
-    if payable["status"] == "paid":
-        return jsonify({"ok": False, "error": "Conta já está paga."}), 409
-    fee = money_round(payload.get("fee", payable.get("fee", 0)))
-    discount = money_round(payload.get("discount", payable.get("discount", 0)))
-    total_due = money_round(payable["amount"] + fee - discount)
-    open_amount = max(0, money_round(total_due - float(payable.get("paidAmount") or 0)))
-    payment_amount = money_round(payload.get("amount", open_amount))
-    if payment_amount <= 0:
-        return jsonify({"ok": False, "error": "Valor pago deve ser maior que zero."}), 400
-    if payment_amount - open_amount > 0.01:
-        return jsonify({"ok": False, "error": "Valor pago nao pode ser maior que o saldo em aberto."}), 400
-    paid_at = str(payload.get("paidAt") or utc_now())
-    method = str(payload.get("method") or "pix").strip()
-    payable["fee"] = fee
-    payable["discount"] = discount
-    payable["paidAmount"] = money_round(float(payable.get("paidAmount") or 0) + payment_amount)
-    payable["status"] = "paid" if payable["paidAmount"] + 0.01 >= total_due else "pending"
-    payable["paidAt"] = paid_at
-    payable["updatedAt"] = utc_now()
-    movement = normalize_cash_movement_payload({
-        "direction": "out",
-        "type": "contas a pagar",
-        "description": f"{payable['category']}{' - ' + str(payload.get('note')).strip() if payload.get('note') else ''}",
-        "method": method,
-        "amount": payment_amount,
-        "refId": payable_id,
-        "createdAt": paid_at,
-    })
-    sync_payable_to_state(payable, [movement])
-    record_audit("pay", "payable", payable_id, {"payable": payable, "cash": [movement]})
-    return jsonify({"ok": True, "data": {"payable": payable, "cash": [movement]}})
+    try:
+        payable, cash = persist_payable_payment(payable_id, payload)
+    except PayablePaymentError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": {"payable": payable, "cash": cash}})
 
 
 @app.put("/api/state")

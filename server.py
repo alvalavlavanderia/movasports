@@ -2552,6 +2552,93 @@ def persist_payable_creation(payable: dict, store_id: str = "matriz") -> str:
     return updated_at
 
 
+def persist_payable_update(
+    payable_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> tuple[dict | None, str | None]:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT id, supplier, category, amount, issue_date AS issueDate,
+                   due_date AS dueDate, notes, paid_amount AS paidAmount,
+                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
+                   updated_at AS updatedAt
+            FROM payables
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, payable_id),
+        ).fetchone()
+        if not row:
+            return None, None
+
+        payable = normalize_payable_payload(payload, payable_from_row(row))
+        payable["id"] = payable_id
+        error = validate_payable(payable)
+        if error:
+            return None, error
+
+        state_row = conn.execute(
+            f"SELECT data FROM app_state WHERE id = 1{lock_clause}"
+        ).fetchone()
+        if state_row:
+            try:
+                state = json.loads(state_row["data"])
+            except json.JSONDecodeError:
+                state = default_state()
+        else:
+            state = default_state()
+        if not isinstance(state, dict):
+            state = default_state()
+
+        conn.execute(
+            """
+            UPDATE payables
+            SET supplier = ?, category = ?, amount = ?, issue_date = ?, due_date = ?,
+                notes = ?, paid_amount = ?, fee = ?, discount = ?, status = ?, paid_at = ?,
+                created_at = ?, updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                payable["supplier"],
+                payable["category"],
+                float(payable["amount"]),
+                payable["issueDate"],
+                payable["dueDate"],
+                payable["notes"],
+                float(payable["paidAmount"]),
+                float(payable["fee"]),
+                float(payable["discount"]),
+                payable["status"],
+                payable["paidAt"],
+                payable["createdAt"],
+                payable["updatedAt"],
+                store_id,
+                payable_id,
+            ),
+        )
+
+        current_payables = state.get("payables")
+        payables = current_payables if isinstance(current_payables, list) else []
+        state["payables"] = [item for item in payables if item.get("id") != payable_id]
+        state["payables"].append(payable)
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(state, ensure_ascii=False), updated_at),
+        )
+        record_audit("update", "payable", payable_id, {"payable": payable}, conn=conn)
+    return payable, None
+
+
 def sync_cash_movements_to_state(movements: list[dict], settle_card_amount: float = 0) -> list[dict]:
     state, _ = read_state()
     state["cash"] = [*movements, *state.get("cash", [])]
@@ -4360,27 +4447,11 @@ def update_payable_api(payable_id: str):
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
     init_db()
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, supplier, category, amount, issue_date AS issueDate,
-                   due_date AS dueDate, notes, paid_amount AS paidAmount,
-                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
-                   updated_at AS updatedAt
-            FROM payables
-            WHERE store_id = ? AND id = ?
-            """,
-            ("matriz", payable_id),
-        ).fetchone()
-    if not row:
+    payable, error = persist_payable_update(payable_id, payload)
+    if payable is None and error is None:
         return jsonify({"ok": False, "error": "Conta não encontrada."}), 404
-    payable = normalize_payable_payload(payload, payable_from_row(row))
-    payable["id"] = payable_id
-    error = validate_payable(payable)
     if error:
         return jsonify({"ok": False, "error": error}), 400
-    sync_payable_to_state(payable)
-    record_audit("update", "payable", payable["id"], {"payable": payable})
     return jsonify({"ok": True, "data": payable})
 
 

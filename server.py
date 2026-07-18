@@ -2564,6 +2564,59 @@ def persist_cash_movement(movement: dict, store_id: str = "matriz") -> str:
     return updated_at
 
 
+def persist_cash_closing(closing: dict, store_id: str = "matriz") -> str:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO cash_closings (
+                id, store_id, date, expected_cash, informed_cash, difference, total_balance,
+                cash_in, cash_out, notes, user_id, user_name, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                closing["id"],
+                store_id,
+                closing["date"],
+                float(closing["expectedCash"]),
+                float(closing["informedCash"]),
+                float(closing["difference"]),
+                float(closing["totalBalance"]),
+                float(closing["cashIn"]),
+                float(closing["cashOut"]),
+                closing["notes"],
+                closing["userId"],
+                closing["userName"],
+                closing["createdAt"],
+            ),
+        )
+
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+        if row:
+            try:
+                state = json.loads(row["data"])
+            except json.JSONDecodeError:
+                state = default_state()
+        else:
+            state = default_state()
+        if not isinstance(state, dict):
+            state = default_state()
+        current_closings = state.get("cashClosings")
+        state["cashClosings"] = [closing, *(current_closings if isinstance(current_closings, list) else [])]
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(state, ensure_ascii=False), updated_at),
+        )
+        record_audit("create", "cash_closing", closing["id"], {"closing": closing}, conn=conn)
+    return updated_at
+
+
 def cash_closing_metrics(state: dict, date: str) -> dict:
     until_date = str(date or "")[:10]
     movements_until = [item for item in state.get("cash", []) if str(item.get("createdAt", ""))[:10] <= until_date]
@@ -3999,9 +4052,7 @@ def create_cash_closing_api():
         "userName": user.get("name", ""),
         "createdAt": utc_now(),
     }
-    state["cashClosings"] = [closing, *state.get("cashClosings", [])]
-    write_state(state)
-    record_audit("create", "cash_closing", closing["id"], {"closing": closing})
+    persist_cash_closing(closing)
     return jsonify({"ok": True, "data": closing}), 201
 
 

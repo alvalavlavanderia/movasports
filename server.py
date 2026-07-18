@@ -40,6 +40,63 @@ LOGIN_ATTEMPT_LIMIT = max(3, int(float(os.environ.get("MOVA_LOGIN_ATTEMPTS", "5"
 LOGIN_ATTEMPT_WINDOW_SECONDS = max(60, int(float(os.environ.get("MOVA_LOGIN_WINDOW_SECONDS", "900") or 900)))
 LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}
 AUTH_DATABASE_UNAVAILABLE_MESSAGE = "Serviço temporariamente indisponível."
+# Primeira baseline formal; sua criação pertence à migration controlada futura.
+REQUIRED_SCHEMA_VERSION = 1
+READINESS_READY_VERSIONED = "READY_VERSIONED"
+READINESS_READY_LEGACY = "READY_LEGACY"
+READINESS_DATABASE_UNAVAILABLE = "DATABASE_UNAVAILABLE"
+READINESS_SCHEMA_MISSING = "SCHEMA_MISSING"
+READINESS_SCHEMA_INCOMPLETE = "SCHEMA_INCOMPLETE"
+READINESS_SCHEMA_OUTDATED = "SCHEMA_OUTDATED"
+READINESS_SCHEMA_FUTURE = "SCHEMA_FUTURE"
+READINESS_SCHEMA_INVALID = "SCHEMA_INVALID"
+REQUIRED_SCHEMA_TABLES = frozenset({
+    "stores",
+    "app_state",
+    "users",
+    "audit_logs",
+    "brands",
+    "categories",
+    "suppliers",
+    "customers",
+    "products",
+    "sales",
+    "sale_items",
+    "sale_payments",
+    "cash_movements",
+    "cash_closings",
+    "receivables",
+    "receivable_payments",
+    "sale_returns",
+    "sale_return_items",
+    "payables",
+})
+REQUIRED_SCHEMA_COLUMNS = {
+    "stores": frozenset({"id"}),
+    "app_state": frozenset({"id", "data", "updated_at"}),
+    "users": frozenset({"id", "store_id", "name", "login", "password_hash", "role", "active"}),
+    "audit_logs": frozenset({"id", "store_id"}),
+    "brands": frozenset({"id", "store_id"}),
+    "categories": frozenset({"id", "store_id"}),
+    "suppliers": frozenset({"id", "store_id"}),
+    "customers": frozenset({"id", "store_id", "cpf"}),
+    "products": frozenset({"id", "store_id", "barcode"}),
+    "sales": frozenset({"id", "store_id"}),
+    "sale_items": frozenset({"id", "sale_id"}),
+    "sale_payments": frozenset({"id", "sale_id"}),
+    "cash_movements": frozenset({"id", "store_id"}),
+    "cash_closings": frozenset({"id", "store_id"}),
+    "receivables": frozenset({"id", "store_id"}),
+    "receivable_payments": frozenset({"id", "store_id", "receivable_id"}),
+    "sale_returns": frozenset({"id", "store_id", "sale_id"}),
+    "sale_return_items": frozenset({"id", "return_id"}),
+    "payables": frozenset({"id", "store_id", "discount"}),
+}
+REQUIRED_SCHEMA_INDEXES = {
+    "idx_users_store_login": ("users", ("store_id", "login"), True),
+    "idx_customers_store_cpf": ("customers", ("store_id", "cpf"), True),
+    "idx_products_store_barcode": ("products", ("store_id", "barcode"), True),
+}
 POSTGRES_CAMEL_ALIASES = (
     "cashIn",
     "cashOut",
@@ -150,7 +207,7 @@ def no_cache(response):
 def require_login_for_api():
     if not request.path.startswith("/api/"):
         return None
-    if request.path in {"/api/health", "/api/session", "/api/login", "/api/logout"}:
+    if request.path in {"/api/health", "/api/readiness", "/api/session", "/api/login", "/api/logout"}:
         return None
     if not session.get("user"):
         operation = current_data_import_reset_operation()
@@ -179,7 +236,7 @@ def protect_data_import_reset_before_database_access():
 def validate_active_session_for_api():
     if not request.path.startswith("/api/"):
         return None
-    if request.path in {"/api/health", "/api/session", "/api/login", "/api/logout"}:
+    if request.path in {"/api/health", "/api/readiness", "/api/session", "/api/login", "/api/logout"}:
         return None
     if not session.get("user"):
         return None
@@ -413,6 +470,228 @@ def fetch_auth_user_by_login(login: str):
         """,
         ("matriz", login),
     )
+
+
+def _readiness_result(ready: bool, state: str, detail: str = "") -> dict:
+    return {"ready": ready, "state": state, "detail": detail}
+
+
+def _is_readiness_database_error(error: Exception) -> bool:
+    if isinstance(error, (sqlite3.Error, ImportError)):
+        return True
+    if not USE_POSTGRES:
+        return False
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+    return isinstance(error, psycopg2.Error)
+
+
+def _open_readiness_connection():
+    if USE_POSTGRES:
+        connection = PgConnection(DATABASE_URL)
+        connection.conn.set_session(readonly=True, autocommit=False)
+        return connection
+    database_uri = f"{Path(DB_PATH).resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(
+        database_uri,
+        uri=True,
+        timeout=DB_BUSY_TIMEOUT_MS / 1000,
+    )
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _close_readiness_connection(connection) -> None:
+    if USE_POSTGRES:
+        try:
+            connection.conn.rollback()
+        finally:
+            connection.conn.close()
+        return
+    connection.close()
+
+
+def _normalize_postgresql_index(index_definition: str) -> tuple[bool, tuple[str, ...]]:
+    definition = str(index_definition or "")
+    start = definition.find("(")
+    end = definition.find(")", start + 1)
+    if start < 0 or end < 0:
+        return False, ()
+    columns = tuple(
+        part.strip().strip('"').split()[0].strip('"').lower()
+        for part in definition[start + 1:end].split(",")
+        if part.strip()
+    )
+    return "CREATE UNIQUE INDEX" in definition.upper(), columns
+
+
+def inspect_sqlite_schema(connection) -> dict:
+    table_rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
+    tables = {str(row["name"]) for row in table_rows}
+    columns = {}
+    for table_name in REQUIRED_SCHEMA_TABLES | {"schema_migrations"}:
+        if table_name not in tables:
+            continue
+        rows = connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        columns[table_name] = {str(row["name"]) for row in rows}
+
+    indexes = {}
+    for table_name, _, _ in REQUIRED_SCHEMA_INDEXES.values():
+        if table_name not in tables:
+            continue
+        for row in connection.execute(f'PRAGMA index_list("{table_name}")').fetchall():
+            index_name = str(row["name"])
+            index_columns = connection.execute(
+                f'PRAGMA index_info("{index_name}")'
+            ).fetchall()
+            indexes[index_name] = {
+                "table": table_name,
+                "columns": tuple(str(item["name"]) for item in index_columns),
+                "unique": bool(row["unique"]),
+            }
+
+    versions = None
+    version_column_present = False
+    if "schema_migrations" in tables:
+        version_column_present = "version" in columns.get("schema_migrations", set())
+        if version_column_present:
+            versions = [
+                row["version"]
+                for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+            ]
+    return {
+        "tables": tables,
+        "columns": columns,
+        "indexes": indexes,
+        "versions": versions,
+        "version_column_present": version_column_present,
+    }
+
+
+def inspect_postgresql_schema(connection) -> dict:
+    table_rows = connection.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        """
+    ).fetchall()
+    tables = {str(row["table_name"]) for row in table_rows}
+    column_rows = connection.execute(
+        """
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+        """
+    ).fetchall()
+    columns = {}
+    for row in column_rows:
+        columns.setdefault(str(row["table_name"]), set()).add(str(row["column_name"]))
+
+    index_rows = connection.execute(
+        """
+        SELECT tablename, indexname, indexdef
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+        """
+    ).fetchall()
+    indexes = {}
+    for row in index_rows:
+        unique, index_columns = _normalize_postgresql_index(row["indexdef"])
+        indexes[str(row["indexname"])] = {
+            "table": str(row["tablename"]),
+            "columns": index_columns,
+            "unique": unique,
+        }
+
+    versions = None
+    version_column_present = False
+    if "schema_migrations" in tables:
+        version_column_present = "version" in columns.get("schema_migrations", set())
+        if version_column_present:
+            versions = [
+                row["version"]
+                for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
+            ]
+    return {
+        "tables": tables,
+        "columns": columns,
+        "indexes": indexes,
+        "versions": versions,
+        "version_column_present": version_column_present,
+    }
+
+
+def validate_readiness_schema(metadata: dict) -> dict:
+    tables = metadata.get("tables", set())
+    missing_tables = REQUIRED_SCHEMA_TABLES - tables
+    if missing_tables:
+        return _readiness_result(False, READINESS_SCHEMA_MISSING, "required_table_missing")
+
+    columns = metadata.get("columns", {})
+    for table_name, required_columns in REQUIRED_SCHEMA_COLUMNS.items():
+        if required_columns - columns.get(table_name, set()):
+            return _readiness_result(False, READINESS_SCHEMA_INCOMPLETE, "required_column_missing")
+
+    indexes = metadata.get("indexes", {})
+    for index_name, (table_name, index_columns, unique) in REQUIRED_SCHEMA_INDEXES.items():
+        actual = indexes.get(index_name)
+        if not actual:
+            return _readiness_result(False, READINESS_SCHEMA_INCOMPLETE, "required_index_missing")
+        if (
+            actual.get("table") != table_name
+            or tuple(actual.get("columns", ())) != index_columns
+            or bool(actual.get("unique")) != unique
+        ):
+            return _readiness_result(False, READINESS_SCHEMA_INCOMPLETE, "required_index_invalid")
+
+    if "schema_migrations" not in tables:
+        return _readiness_result(True, READINESS_READY_LEGACY, "legacy_schema_without_version")
+    if not metadata.get("version_column_present"):
+        return _readiness_result(False, READINESS_SCHEMA_INVALID, "version_column_missing")
+    versions = metadata.get("versions")
+    if not versions or any(
+        isinstance(version, bool) or not isinstance(version, int) or version <= 0
+        for version in versions
+    ):
+        return _readiness_result(False, READINESS_SCHEMA_INVALID, "invalid_schema_version")
+    current_version = max(versions)
+    if current_version < REQUIRED_SCHEMA_VERSION:
+        return _readiness_result(False, READINESS_SCHEMA_OUTDATED, "schema_version_outdated")
+    if current_version > REQUIRED_SCHEMA_VERSION:
+        return _readiness_result(False, READINESS_SCHEMA_FUTURE, "schema_version_future")
+    return _readiness_result(True, READINESS_READY_VERSIONED, "schema_version_supported")
+
+
+def check_database_readiness() -> dict:
+    connection = None
+    result = None
+    try:
+        connection = _open_readiness_connection()
+        metadata = (
+            inspect_postgresql_schema(connection)
+            if USE_POSTGRES
+            else inspect_sqlite_schema(connection)
+        )
+        result = validate_readiness_schema(metadata)
+    except Exception as error:
+        state = (
+            READINESS_DATABASE_UNAVAILABLE
+            if _is_readiness_database_error(error)
+            else READINESS_SCHEMA_INVALID
+        )
+        result = _readiness_result(False, state, "readiness_inspection_failed")
+    finally:
+        if connection is not None:
+            try:
+                _close_readiness_connection(connection)
+            except Exception:
+                result = _readiness_result(False, READINESS_DATABASE_UNAVAILABLE, "readiness_close_failed")
+    return result or _readiness_result(False, READINESS_SCHEMA_INVALID, "readiness_result_missing")
 
 
 def ensure_backup_dir() -> None:
@@ -3039,6 +3318,22 @@ def uploaded_product_image(filename: str):
 def health():
     database_name = "PostgreSQL" if USE_POSTGRES else os.path.basename(DB_PATH)
     return jsonify({"ok": True, "message": "Mova Sports ativo.", "database": database_name})
+
+
+@app.get("/api/readiness")
+def readiness():
+    result = check_database_readiness()
+    if result["ready"]:
+        if result["state"] == READINESS_READY_LEGACY:
+            # Compatibilidade temporária até a migration controlada da próxima etapa.
+            app.logger.warning("Readiness aceitou schema legado sem versionamento estrutural.")
+        return jsonify({"ok": True, "status": "ready"})
+    app.logger.error("Readiness indisponivel. state=%s", result["state"])
+    return jsonify({
+        "ok": False,
+        "status": "not_ready",
+        "error": AUTH_DATABASE_UNAVAILABLE_MESSAGE,
+    }), 503
 
 
 @app.get("/api/backups")

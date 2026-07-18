@@ -2480,6 +2480,78 @@ def sync_payable_to_state(payable: dict | None = None, cash: list[dict] | None =
     write_state(state)
 
 
+def persist_payable_creation(payable: dict, store_id: str = "matriz") -> str:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO payables (
+                id, store_id, supplier, category, amount, issue_date, due_date,
+                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                store_id = excluded.store_id,
+                supplier = excluded.supplier,
+                category = excluded.category,
+                amount = excluded.amount,
+                issue_date = excluded.issue_date,
+                due_date = excluded.due_date,
+                notes = excluded.notes,
+                paid_amount = excluded.paid_amount,
+                fee = excluded.fee,
+                discount = excluded.discount,
+                status = excluded.status,
+                paid_at = excluded.paid_at,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                payable["id"],
+                store_id,
+                payable["supplier"],
+                payable["category"],
+                float(payable["amount"]),
+                payable["issueDate"],
+                payable["dueDate"],
+                payable["notes"],
+                float(payable["paidAmount"]),
+                float(payable["fee"]),
+                float(payable["discount"]),
+                payable["status"],
+                payable["paidAt"],
+                payable["createdAt"],
+                payable["updatedAt"],
+            ),
+        )
+
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+        if row:
+            try:
+                state = json.loads(row["data"])
+            except json.JSONDecodeError:
+                state = default_state()
+        else:
+            state = default_state()
+        if not isinstance(state, dict):
+            state = default_state()
+        current_payables = state.get("payables")
+        payables = current_payables if isinstance(current_payables, list) else []
+        state["payables"] = [item for item in payables if item.get("id") != payable["id"]]
+        state["payables"].append(payable)
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            """,
+            (json.dumps(state, ensure_ascii=False), updated_at),
+        )
+        record_audit("create", "payable", payable["id"], {"payable": payable}, conn=conn)
+    return updated_at
+
+
 def sync_cash_movements_to_state(movements: list[dict], settle_card_amount: float = 0) -> list[dict]:
     state, _ = read_state()
     state["cash"] = [*movements, *state.get("cash", [])]
@@ -4276,8 +4348,7 @@ def create_payable_api():
     error = validate_payable(payable)
     if error:
         return jsonify({"ok": False, "error": error}), 400
-    sync_payable_to_state(payable)
-    record_audit("create", "payable", payable["id"], {"payable": payable})
+    persist_payable_creation(payable)
     return jsonify({"ok": True, "data": payable}), 201
 
 

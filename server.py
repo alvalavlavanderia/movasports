@@ -4569,7 +4569,6 @@ def update_payable_api(payable_id: str):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    init_db()
     payable, error = persist_payable_update(payable_id, payload)
     if payable is None and error is None:
         return jsonify({"ok": False, "error": "Conta não encontrada."}), 404

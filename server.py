@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory, session
 from environment_config import load_environment_config
@@ -38,6 +39,7 @@ SESSION_HOURS = max(1, int(float(os.environ.get("MOVA_SESSION_HOURS", "12") or 1
 LOGIN_ATTEMPT_LIMIT = max(3, int(float(os.environ.get("MOVA_LOGIN_ATTEMPTS", "5") or 5)))
 LOGIN_ATTEMPT_WINDOW_SECONDS = max(60, int(float(os.environ.get("MOVA_LOGIN_WINDOW_SECONDS", "900") or 900)))
 LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}
+AUTH_DATABASE_UNAVAILABLE_MESSAGE = "Serviço temporariamente indisponível."
 POSTGRES_CAMEL_ALIASES = (
     "cashIn",
     "cashOut",
@@ -122,6 +124,14 @@ def log_blocked_data_operation(operation: str, reason: str) -> None:
     )
 
 
+class AuthenticationDatabaseUnavailable(RuntimeError):
+    pass
+
+
+def database_unavailable_response():
+    return jsonify({"ok": False, "error": AUTH_DATABASE_UNAVAILABLE_MESSAGE}), 503
+
+
 @app.after_request
 def no_cache(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -173,7 +183,11 @@ def validate_active_session_for_api():
         return None
     if not session.get("user"):
         return None
-    if not refresh_session_user():
+    try:
+        refreshed_user = refresh_session_user()
+    except AuthenticationDatabaseUnavailable:
+        return database_unavailable_response()
+    if not refreshed_user:
         operation = current_data_import_reset_operation()
         if operation:
             log_blocked_data_operation(operation, "invalid_session")
@@ -190,16 +204,7 @@ def refresh_session_user() -> dict | None:
     user = session.get("user")
     if not user:
         return None
-    init_db()
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, name, login, role, active
-            FROM users
-            WHERE store_id = ? AND id = ?
-            """,
-            ("matriz", user.get("id")),
-        ).fetchone()
+    row = fetch_auth_user_by_id(user.get("id"))
     if not row or not row["active"]:
         return None
     public = public_user(row)
@@ -329,6 +334,85 @@ def connect_db():
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
+
+
+def _is_auth_database_error(error: Exception) -> bool:
+    if isinstance(error, (sqlite3.Error, ImportError)):
+        return True
+    if not USE_POSTGRES:
+        return False
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+    return isinstance(error, psycopg2.Error)
+
+
+def _open_auth_read_connection():
+    if USE_POSTGRES:
+        connection = PgConnection(DATABASE_URL)
+        connection.conn.set_session(readonly=True, autocommit=False)
+        return connection
+    database_uri = f"{Path(DB_PATH).resolve().as_uri()}?mode=ro"
+    connection = sqlite3.connect(
+        database_uri,
+        uri=True,
+        timeout=DB_BUSY_TIMEOUT_MS / 1000,
+    )
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _close_auth_read_connection(connection) -> None:
+    if USE_POSTGRES:
+        try:
+            connection.conn.rollback()
+        finally:
+            connection.conn.close()
+        return
+    connection.close()
+
+
+def _query_auth_user(sql: str, params: tuple):
+    connection = None
+    try:
+        connection = _open_auth_read_connection()
+        row = connection.execute(sql, params).fetchone()
+        _close_auth_read_connection(connection)
+        connection = None
+        return row
+    except Exception as error:
+        if connection is not None:
+            try:
+                _close_auth_read_connection(connection)
+            except Exception:
+                pass
+        if _is_auth_database_error(error):
+            app.logger.error("Falha operacional ao consultar autenticacao no banco de dados.")
+            raise AuthenticationDatabaseUnavailable() from error
+        raise
+
+
+def fetch_auth_user_by_id(user_id: str | None):
+    return _query_auth_user(
+        """
+        SELECT id, name, login, role, active
+        FROM users
+        WHERE store_id = ? AND id = ?
+        """,
+        ("matriz", user_id),
+    )
+
+
+def fetch_auth_user_by_login(login: str):
+    return _query_auth_user(
+        """
+        SELECT id, name, login, password_hash, role, active
+        FROM users
+        WHERE store_id = ? AND login = ?
+        """,
+        ("matriz", login),
+    )
 
 
 def ensure_backup_dir() -> None:
@@ -3179,16 +3263,10 @@ def api_login():
         return jsonify({"ok": False, "error": "Informe usuário e senha."}), 400
     if login_blocked(login):
         return jsonify({"ok": False, "error": "Muitas tentativas de login. Aguarde alguns minutos e tente novamente."}), 429
-    init_db()
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, name, login, password_hash, role, active
-            FROM users
-            WHERE store_id = ? AND login = ?
-            """,
-            ("matriz", login),
-        ).fetchone()
+    try:
+        row = fetch_auth_user_by_login(login)
+    except AuthenticationDatabaseUnavailable:
+        return database_unavailable_response()
     if not row or not row["active"] or not password_matches(row["password_hash"], password):
         register_login_failure(login)
         return jsonify({"ok": False, "error": "Usuário ou senha inválidos."}), 401
@@ -3212,7 +3290,10 @@ def api_logout():
 
 @app.get("/api/session")
 def api_session():
-    user = refresh_session_user() if session.get("user") else None
+    try:
+        user = refresh_session_user() if session.get("user") else None
+    except AuthenticationDatabaseUnavailable:
+        return database_unavailable_response()
     if session.get("user") and not user:
         session.clear()
     return jsonify({"ok": True, "user": user, "capabilities": data_import_reset_capabilities(user)})

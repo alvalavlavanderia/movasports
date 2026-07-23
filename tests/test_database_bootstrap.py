@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -19,7 +22,7 @@ from database_bootstrap.runner import (
     run_database_bootstrap,
     validate_bootstrap_credentials,
 )
-from database_bootstrap.validation import EMPTY_APP_STATE
+from database_bootstrap.validation import EMPTY_APP_STATE, _component_status
 from database_migrations.registry import MIGRATIONS
 from database_migrations.runner import run_database_migrations
 
@@ -120,6 +123,76 @@ class ImportIsolationTests(BootstrapSQLiteCase):
         ).upper()
         for ddl in ("CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP TABLE"):
             self.assertNotIn(ddl, sources)
+
+
+class RuntimeIsolationTests(BootstrapSQLiteCase):
+    def setUp(self):
+        super().setUp()
+        self.migrate()
+        self.bootstrap()
+
+    def runtime_probe(self, action):
+        environment = os.environ.copy()
+        environment.pop("DATABASE_URL", None)
+        environment.pop("MOVA_ADMIN_PASSWORD", None)
+        environment.update({
+            "APP_ENV": "development",
+            "MOVA_DB": self.db_path,
+            "BOOTSTRAP_PASSWORD": self.env["BOOTSTRAP_PASSWORD"],
+        })
+        probe = """
+import os
+import sys
+import database_bootstrap.runner as bootstrap_runner
+
+def forbidden_bootstrap(*args, **kwargs):
+    raise AssertionError("runtime attempted explicit bootstrap")
+
+bootstrap_runner.run_database_bootstrap = forbidden_bootstrap
+import server
+
+action = sys.argv[1]
+if action == "health":
+    response = server.app.test_client().get("/api/health")
+    assert response.status_code == 200
+elif action == "readiness":
+    response = server.app.test_client().get("/api/readiness")
+    assert response.status_code == 200
+elif action == "login":
+    response = server.app.test_client().post(
+        "/api/login",
+        json={"login": "admin", "password": os.environ["BOOTSTRAP_PASSWORD"]},
+    )
+    assert response.status_code == 200
+elif action == "normal":
+    server.init_db()
+elif action != "import":
+    raise AssertionError("unknown runtime probe")
+"""
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", probe, action],
+            cwd=Path.cwd(),
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_import_server_does_not_execute_bootstrap(self):
+        self.runtime_probe("import")
+
+    def test_health_does_not_execute_bootstrap(self):
+        self.runtime_probe("health")
+
+    def test_readiness_does_not_execute_bootstrap(self):
+        self.runtime_probe("readiness")
+
+    def test_login_does_not_execute_bootstrap(self):
+        self.runtime_probe("login")
+
+    def test_normal_application_execution_does_not_execute_bootstrap(self):
+        self.runtime_probe("normal")
 
 
 class BootstrapStatusTests(BootstrapSQLiteCase):
@@ -225,6 +298,57 @@ class BootstrapStatusTests(BootstrapSQLiteCase):
         renamed = Path(self.temp.name) / "renamed.db"
         Path(self.db_path).rename(renamed)
         self.assertTrue(renamed.exists())
+
+
+class ExistingAdministratorHashTests(unittest.TestCase):
+    def admin_status(self, password_hash=...):
+        adapter = mock.Mock()
+        adapter.fetch_stores.return_value = [{
+            "id": "matriz",
+            "name": "Matriz",
+            "created_at": "2026-01-01T00:00:00Z",
+        }]
+        adapter.fetch_app_states.return_value = [{
+            "id": 1,
+            "data": json.dumps(EMPTY_APP_STATE),
+            "updated_at": "2026-01-01T00:00:00Z",
+        }]
+        admin = {
+            "id": "admin",
+            "store_id": "matriz",
+            "name": "Administrador",
+            "login": "admin",
+            "role": "admin",
+            "active": True,
+            "updated_at": "2026-01-01T00:00:00Z",
+        }
+        if password_hash is not ...:
+            admin["password_hash"] = password_hash
+        adapter.fetch_users.return_value = [admin]
+        overall, _, _, admin_state, errors = _component_status(adapter)
+        return overall, admin_state, errors
+
+    def assert_invalid_hash(self, value=...):
+        overall, admin_state, errors = self.admin_status(value)
+        self.assertEqual(overall, "ADMIN_PASSWORD_HASH_INVALID")
+        self.assertEqual(admin_state, "ADMIN_PASSWORD_HASH_INVALID")
+        self.assertIn("ADMIN_PASSWORD_HASH_INVALID", errors)
+        self.assertNotEqual(overall, "BOOTSTRAP_COMPLETE")
+
+    def test_existing_admin_without_password_hash_is_inconsistent(self):
+        self.assert_invalid_hash()
+
+    def test_existing_admin_with_null_password_hash_is_inconsistent(self):
+        self.assert_invalid_hash(None)
+
+    def test_existing_admin_with_empty_password_hash_is_inconsistent(self):
+        self.assert_invalid_hash("")
+
+    def test_existing_admin_with_spaces_only_password_hash_is_inconsistent(self):
+        self.assert_invalid_hash("        ")
+
+    def test_existing_admin_with_clearly_invalid_password_hash_is_inconsistent(self):
+        self.assert_invalid_hash("clearly-invalid")
 
 
 class BootstrapAuthorizationTests(BootstrapSQLiteCase):
@@ -339,6 +463,23 @@ class BootstrapCredentialTests(BootstrapSQLiteCase):
         env = {**self.env, "SHORT": "a1-234"}
         with self.assertRaises(BootstrapError):
             self.validate(password_env="SHORT", environ=env)
+
+    def test_password_cannot_contain_only_spaces(self):
+        env = {**self.env, "SPACES": "        "}
+        with self.assertRaises(BootstrapError) as context:
+            self.validate(password_env="SPACES", environ=env)
+        self.assertEqual(context.exception.code, "password_missing")
+
+    def test_password_length_ignores_outer_spaces(self):
+        env = {**self.env, "PADDED_SHORT": "  123456  "}
+        with self.assertRaises(BootstrapError) as context:
+            self.validate(password_env="PADDED_SHORT", environ=env)
+        self.assertEqual(context.exception.code, "password_too_short")
+
+    def test_password_with_outer_spaces_is_preserved(self):
+        password = "  Strong-123  "
+        env = {**self.env, "PADDED": password}
+        self.assertEqual(self.validate(password_env="PADDED", environ=env), password)
 
     def test_password_cannot_match_login(self):
         env = {**self.env, "SAME": "administrator"}
@@ -455,6 +596,29 @@ class BootstrapRunTests(BootstrapSQLiteCase):
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM stores"), 1)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM app_state"), 1)
         self.assertEqual(self.scalar("SELECT COUNT(*) FROM users"), 1)
+
+    def test_valid_bootstrap_remains_idempotent_with_hash_validation(self):
+        first = self.bootstrap()
+        original_hash = self.scalar("SELECT password_hash FROM users WHERE id = 'admin'")
+        second = self.bootstrap()
+        self.assertFalse(first.already_complete)
+        self.assertTrue(second.already_complete)
+        self.assertEqual(
+            self.scalar("SELECT password_hash FROM users WHERE id = 'admin'"),
+            original_hash,
+        )
+
+    def test_password_outer_spaces_are_preserved_in_hash(self):
+        password = "  Strong-123  "
+        environment = {**self.env, "PADDED_PASSWORD": password}
+        result = self.bootstrap(
+            environ=environment,
+            admin_password_env="PADDED_PASSWORD",
+        )
+        stored_hash = self.scalar("SELECT password_hash FROM users WHERE id = 'admin'")
+        self.assertTrue(result.admin_created)
+        self.assertTrue(check_password_hash(stored_hash, password))
+        self.assertFalse(check_password_hash(stored_hash, password.strip()))
 
     def test_partial_store_only_creates_missing_components(self):
         with self.connect() as connection:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 
 from database_migrations.registry import get_registry
@@ -11,6 +12,10 @@ from .models import BootstrapError, BootstrapStatus
 
 STORE_ID = "matriz"
 ADMIN_ID = "admin"
+WERKZEUG_PASSWORD_HASH_PATTERN = re.compile(
+    r"^(?:scrypt:\d+:\d+:\d+|pbkdf2:[A-Za-z0-9_-]+:\d+)"
+    r"\$[A-Za-z0-9]+\$[A-Fa-f0-9]+$"
+)
 
 EMPTY_APP_STATE = {
     "users": [],
@@ -31,6 +36,13 @@ EMPTY_APP_STATE = {
 
 def empty_app_state_json() -> str:
     return json.dumps(EMPTY_APP_STATE, ensure_ascii=False, separators=(",", ":"))
+
+
+def password_hash_is_structurally_valid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    return bool(candidate and WERKZEUG_PASSWORD_HASH_PATTERN.fullmatch(candidate))
 
 
 def _safe_environment(environ: Mapping[str, str]) -> str:
@@ -136,10 +148,16 @@ def _component_status(adapter) -> tuple[str, str, str, str, tuple[str, ...]]:
             admin_status = "ADMIN_STORE_MISMATCH"
         elif not bool(initial.get("active")):
             admin_status = "ADMIN_INACTIVE"
+        elif not password_hash_is_structurally_valid(initial.get("password_hash")):
+            admin_status = "ADMIN_PASSWORD_HASH_INVALID"
         else:
             admin_status = "ADMIN_PRESENT"
     elif len(active_matrix_admins) == 1:
-        admin_status = "ADMIN_PRESENT"
+        admin_status = (
+            "ADMIN_PRESENT"
+            if password_hash_is_structurally_valid(active_matrix_admins[0].get("password_hash"))
+            else "ADMIN_PASSWORD_HASH_INVALID"
+        )
     elif len(active_matrix_admins) > 1:
         admin_status = "MULTIPLE_INITIAL_ADMIN_CANDIDATES"
     elif inactive_matrix_admins:
@@ -157,6 +175,7 @@ def _component_status(adapter) -> tuple[str, str, str, str, tuple[str, ...]]:
         "ADMIN_ID_CONFLICT",
         "ADMIN_STORE_MISMATCH",
         "ADMIN_INACTIVE",
+        "ADMIN_PASSWORD_HASH_INVALID",
         "MULTIPLE_INITIAL_ADMIN_CANDIDATES",
     }
     for value in (store_status, app_status, admin_status):

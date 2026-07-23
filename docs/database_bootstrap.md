@@ -53,7 +53,10 @@ Estados estruturais incluem `DATABASE_MISSING`, `DATABASE_UNAVAILABLE`,
 
 Estados operacionais incluem `BOOTSTRAP_NOT_STARTED`, `BOOTSTRAP_PARTIAL` e
 `BOOTSTRAP_COMPLETE`. Stores, estado ou administradores incompatíveis bloqueiam
-a escrita e exigem revisao manual.
+a escrita e exigem revisao manual. Um administrador existente sem
+`password_hash` estruturalmente reconhecivel recebe
+`ADMIN_PASSWORD_HASH_INVALID`; o bootstrap nao altera nem tenta recuperar essa
+credencial.
 
 ## Execucao explicita
 

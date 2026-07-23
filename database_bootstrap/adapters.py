@@ -28,7 +28,11 @@ class BootstrapSQLiteAdapter(SQLiteAdapter):
 
     def fetch_users(self) -> list[dict]:
         return [dict(row) for row in self.connection.execute(
-            "SELECT id, store_id, name, login, role, active, updated_at FROM users ORDER BY id"
+            """
+            SELECT id, store_id, name, login, password_hash, role, active, updated_at
+            FROM users
+            ORDER BY id
+            """
         ).fetchall()]
 
     def insert_store(self, store_id: str, name: str, created_at: str) -> None:
@@ -84,7 +88,11 @@ class BootstrapPostgreSQLAdapter(PostgreSQLAdapter):
 
     def fetch_users(self) -> list[dict]:
         return self._fetch(
-            "SELECT id, store_id, name, login, role, active, updated_at FROM users ORDER BY id"
+            """
+            SELECT id, store_id, name, login, password_hash, role, active, updated_at
+            FROM users
+            ORDER BY id
+            """
         )
 
     def insert_store(self, store_id: str, name: str, created_at: str) -> None:

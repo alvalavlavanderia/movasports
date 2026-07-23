@@ -105,16 +105,17 @@ def validate_bootstrap_credentials(
             code="password_environment_invalid",
         )
     password = str(environ.get(variable, "") or "")
-    if not password:
+    semantic_password = password.strip()
+    if not semantic_password:
         raise BootstrapError(
             "A variavel de senha do administrador nao esta configurada.",
             code="password_missing",
         )
-    if len(password) < 8:
+    if len(semantic_password) < 8:
         raise BootstrapError("A senha inicial deve ter pelo menos 8 caracteres.", code="password_too_short")
-    if password.lower() in COMMON_PASSWORDS:
+    if semantic_password.lower() in COMMON_PASSWORDS:
         raise BootstrapError("Escolha uma senha inicial mais forte.", code="password_too_common")
-    if password.casefold() == login.casefold():
+    if semantic_password.casefold() == login.casefold():
         raise BootstrapError("A senha inicial nao pode ser igual ao login.", code="password_matches_login")
     return password
 

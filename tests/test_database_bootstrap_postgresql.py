@@ -101,6 +101,7 @@ class FakeBootstrapAdapter:
             "store_id": store_id,
             "name": name,
             "login": login,
+            "password_hash": password_hash,
             "role": "admin",
             "active": True,
             "updated_at": updated_at,

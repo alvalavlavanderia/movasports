@@ -9,7 +9,9 @@ from database_migrations.adapters import (
     POSTGRES_STATEMENT_TIMEOUT,
     PostgreSQLAdapter,
     SchemaValidation,
+    _normalize_check_constraint,
     _normalize_index_predicate,
+    _postgres_custom_index_names,
 )
 from database_migrations.models import AppliedMigration, Migration
 from database_migrations.registry import MIGRATIONS
@@ -70,6 +72,35 @@ class RecordingConnection:
 
 
 class PostgreSQLAdapterTests(unittest.TestCase):
+    def test_postgresql_check_normalizes_numeric_cast(self):
+        self.assertEqual(
+            _normalize_check_constraint("CHECK ((total_cost > (0)::double precision))"),
+            _normalize_check_constraint("total_cost > 0"),
+        )
+
+    def test_postgresql_check_normalizes_in_as_any_array(self):
+        self.assertEqual(
+            _normalize_check_constraint(
+                "CHECK ((theme = ANY (ARRAY['light'::text, 'dark'::text, 'system'::text])))"
+            ),
+            _normalize_check_constraint("theme IN ('light', 'dark', 'system')"),
+        )
+
+    def test_postgresql_check_preserves_semantic_difference(self):
+        self.assertNotEqual(
+            _normalize_check_constraint("quantity > 0"),
+            _normalize_check_constraint("quantity >= 0"),
+        )
+
+    def test_postgresql_constraint_indexes_are_not_custom_indexes(self):
+        self.assertEqual(
+            _postgres_custom_index_names(
+                {"idx_business", "users_login_key", "users_pkey"},
+                {"users_login_key", "users_pkey"},
+            ),
+            {"idx_business"},
+        )
+
     def test_postgresql_index_predicate_normalizes_equivalent_text_cast(self):
         expected = "cpf IS NOT NULL AND cpf <> ''"
         actual = "((cpf IS NOT NULL) AND (cpf <> ''::text))"
@@ -150,6 +181,7 @@ class FakePostgresState:
         self.apply_calls = []
         self.readonly_writes = 0
         self.fail_apply = False
+        self.v17_validation_calls = 0
 
 
 class FakePostgresAdapter:
@@ -232,6 +264,10 @@ class FakePostgresAdapter:
     def validate_v1_schema(self):
         return self.validate_current_schema()
 
+    def validate_v17_schema(self):
+        self.state.v17_validation_calls += 1
+        return self.validate_current_schema()
+
     def business_row_count(self):
         return self.state.business_rows
 
@@ -246,6 +282,27 @@ def factory_for(state):
 
 
 class PostgreSQLRunnerTests(unittest.TestCase):
+    def test_status_uses_v17_snapshot_before_migration_18(self):
+        history = [
+            AppliedMigration(
+                migration.version,
+                migration.description,
+                "2026-07-18T12:00:00Z",
+                migration.checksum,
+                1,
+            )
+            for migration in MIGRATIONS[:17]
+        ]
+        state = FakePostgresState(schema=True, history=history)
+        result = get_migration_status(
+            environ=AUTHORIZED_ENV,
+            adapter_factory=factory_for(state),
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(result["pending"], [18])
+        self.assertEqual(state.v17_validation_calls, 1)
+
     def test_status_is_readonly_and_does_not_create_history(self):
         state = FakePostgresState()
         result = get_migration_status(environ=AUTHORIZED_ENV, adapter_factory=factory_for(state))

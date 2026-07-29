@@ -220,6 +220,8 @@ def _status_from_adapter(adapter, registry: tuple[Migration, ...]) -> dict:
             validation = adapter.validate_v5_schema()
         elif pending and current_version == 6:
             validation = adapter.validate_v6_schema()
+        elif pending and current_version == 17:
+            validation = adapter.validate_v17_schema()
         else:
             validation = adapter.validate_current_schema()
         if not validation.compatible:

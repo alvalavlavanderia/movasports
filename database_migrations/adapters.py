@@ -18,6 +18,8 @@ from .schema import (
     V005_TABLES,
     V006_INDEXES,
     V006_TABLES,
+    V017_INDEXES,
+    V017_TABLES,
 )
 
 
@@ -60,6 +62,26 @@ def _normalize_index_predicate(value: object) -> str:
     normalized = _compact_sql(value)
     normalized = re.sub(r"::(?:text|charactervarying)", "", normalized)
     return normalized.replace("(", "").replace(")", "")
+
+
+def _normalize_check_constraint(value: object) -> str:
+    normalized = _compact_sql(value)
+    normalized = re.sub(
+        r"::(?:text|charactervarying|doubleprecision|real|numeric|integer|bigint|boolean)",
+        "",
+        normalized,
+    )
+    normalized = normalized.removeprefix("check")
+    normalized = normalized.replace("(", "").replace(")", "")
+    normalized = normalized.replace("=anyarray[", "in").replace("]", "")
+    return normalized
+
+
+def _postgres_custom_index_names(
+    index_names: set[str],
+    constraint_index_names: set[str],
+) -> set[str]:
+    return set(index_names) - set(constraint_index_names)
 
 
 def _normalize_default(value: object) -> str | None:
@@ -252,6 +274,9 @@ class SQLiteAdapter:
 
     def validate_v6_schema(self) -> SchemaValidation:
         return self._validate_schema(V006_TABLES, V006_INDEXES)
+
+    def validate_v17_schema(self) -> SchemaValidation:
+        return self._validate_schema(V017_TABLES, V017_INDEXES)
 
     def business_row_count(self) -> int:
         total = 0
@@ -469,13 +494,13 @@ class PostgreSQLAdapter:
             cursor.close()
         checks_by_table: dict[str, set[str]] = {}
         for row in check_rows:
-            checks_by_table.setdefault(str(row["table_name"]), set()).add(_compact_sql(row["definition"]))
+            checks_by_table.setdefault(str(row["table_name"]), set()).add(
+                _normalize_check_constraint(row["definition"])
+            )
         for table in tables:
             actual_checks = checks_by_table.get(table.name, set())
             for check in table.checks:
-                expected_check = f"check(({_compact_sql(check)}))"
-                alternate_check = f"check({_compact_sql(check)})"
-                if expected_check not in actual_checks and alternate_check not in actual_checks:
+                if _normalize_check_constraint(check) not in actual_checks:
                     errors.append(f"Check constraint ausente em {table.name}")
 
         cursor = self._execute(
@@ -485,7 +510,24 @@ class PostgreSQLAdapter:
             index_rows = {str(row["indexname"]): row for row in self._rows(cursor)}
         finally:
             cursor.close()
-        actual_custom = {name for name in index_rows if not name.endswith("_pkey")}
+        cursor = self._execute(
+            """
+            SELECT index_class.relname AS index_name
+            FROM pg_constraint constraint_row
+            JOIN pg_class index_class ON index_class.oid = constraint_row.conindid
+            JOIN pg_namespace namespace_row ON namespace_row.oid = index_class.relnamespace
+            WHERE namespace_row.nspname = 'public'
+              AND constraint_row.conindid <> 0
+            """
+        )
+        try:
+            constraint_indexes = {
+                str(row["index_name"])
+                for row in self._rows(cursor)
+            }
+        finally:
+            cursor.close()
+        actual_custom = _postgres_custom_index_names(set(index_rows), constraint_indexes)
         expected_names = {index.name for index in indexes}
         if actual_custom != expected_names:
             errors.append("Conjunto de indices divergente")
@@ -519,6 +561,9 @@ class PostgreSQLAdapter:
 
     def validate_v6_schema(self) -> SchemaValidation:
         return self._validate_schema(V006_TABLES, V006_INDEXES)
+
+    def validate_v17_schema(self) -> SchemaValidation:
+        return self._validate_schema(V017_TABLES, V017_INDEXES)
 
     def business_row_count(self) -> int:
         total = 0

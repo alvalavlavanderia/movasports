@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+from ..models import Migration
+
+
+TABLE_STATEMENTS = (
+    """
+    CREATE TABLE inventory_sequences (
+        store_id TEXT PRIMARY KEY,
+        next_number INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY (store_id) REFERENCES stores(id),
+        CHECK (next_number > 0)
+    )
+    """,
+    """
+    CREATE TABLE inventories (
+        id TEXT PRIMARY KEY,
+        store_id TEXT NOT NULL,
+        inventory_number INTEGER NOT NULL,
+        inventory_type TEXT NOT NULL,
+        scope_json TEXT NOT NULL,
+        scope_label TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'in_progress',
+        product_count INTEGER NOT NULL,
+        divergence_count INTEGER NOT NULL DEFAULT 0,
+        positive_item_count INTEGER NOT NULL DEFAULT 0,
+        negative_item_count INTEGER NOT NULL DEFAULT 0,
+        positive_quantity INTEGER NOT NULL DEFAULT 0,
+        negative_quantity INTEGER NOT NULL DEFAULT 0,
+        positive_impact REAL NOT NULL DEFAULT 0,
+        negative_impact REAL NOT NULL DEFAULT 0,
+        general_notes TEXT,
+        cancellation_reason TEXT,
+        idempotency_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        response_json TEXT NOT NULL,
+        finalization_key TEXT,
+        finalization_response_json TEXT,
+        started_by_id TEXT,
+        started_by_name TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finalized_by_id TEXT,
+        finalized_by_name TEXT,
+        finalized_at TEXT,
+        cancelled_by_id TEXT,
+        cancelled_by_name TEXT,
+        cancelled_at TEXT,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (store_id) REFERENCES stores(id),
+        CHECK (inventory_number > 0),
+        CHECK (inventory_type IN ('general', 'partial')),
+        CHECK (status IN ('in_progress', 'finalized', 'cancelled')),
+        CHECK (product_count > 0),
+        CHECK (divergence_count >= 0),
+        CHECK (positive_item_count >= 0),
+        CHECK (negative_item_count >= 0),
+        CHECK (positive_quantity >= 0),
+        CHECK (negative_quantity >= 0),
+        CHECK (positive_impact >= 0),
+        CHECK (negative_impact >= 0),
+        UNIQUE (store_id, inventory_number),
+        UNIQUE (store_id, idempotency_key)
+    )
+    """,
+    """
+    CREATE TABLE inventory_items (
+        id TEXT PRIMARY KEY,
+        inventory_id TEXT NOT NULL,
+        store_id TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        barcode TEXT NOT NULL,
+        product_name TEXT NOT NULL,
+        brand_name TEXT NOT NULL,
+        category_name TEXT NOT NULL,
+        gender TEXT NOT NULL,
+        color TEXT NOT NULL,
+        size TEXT NOT NULL,
+        initial_real INTEGER NOT NULL,
+        initial_reserved INTEGER NOT NULL,
+        initial_available INTEGER NOT NULL,
+        initial_expected INTEGER NOT NULL,
+        counted_quantity INTEGER,
+        count_version INTEGER NOT NULL DEFAULT 0,
+        counted_by_id TEXT,
+        counted_by_name TEXT,
+        counted_at TEXT,
+        final_real INTEGER,
+        final_reserved INTEGER,
+        final_expected INTEGER,
+        divergence INTEGER,
+        adjustment_type TEXT,
+        adjustment_quantity INTEGER NOT NULL DEFAULT 0,
+        cost_reference REAL,
+        impact_value REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (inventory_id) REFERENCES inventories(id),
+        FOREIGN KEY (store_id) REFERENCES stores(id),
+        CHECK (initial_real >= 0),
+        CHECK (initial_reserved >= 0),
+        CHECK (initial_available >= 0),
+        CHECK (initial_expected >= 0),
+        CHECK (initial_available = initial_real - initial_reserved),
+        CHECK (initial_expected = initial_available),
+        CHECK (counted_quantity IS NULL OR counted_quantity >= 0),
+        CHECK (count_version >= 0),
+        CHECK (final_real IS NULL OR final_real >= 0),
+        CHECK (final_reserved IS NULL OR final_reserved >= 0),
+        CHECK (final_expected IS NULL OR final_expected >= 0),
+        CHECK (adjustment_type IS NULL OR adjustment_type IN ('in', 'out', 'none')),
+        CHECK (adjustment_quantity >= 0),
+        CHECK (cost_reference IS NULL OR cost_reference >= 0),
+        CHECK (impact_value >= 0),
+        UNIQUE (inventory_id, product_id)
+    )
+    """,
+    """
+    CREATE TABLE inventory_count_events (
+        id TEXT PRIMARY KEY,
+        inventory_id TEXT NOT NULL,
+        inventory_item_id TEXT NOT NULL,
+        store_id TEXT NOT NULL,
+        previous_quantity INTEGER,
+        counted_quantity INTEGER NOT NULL,
+        count_version INTEGER NOT NULL,
+        user_id TEXT,
+        user_name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (inventory_id) REFERENCES inventories(id),
+        FOREIGN KEY (inventory_item_id) REFERENCES inventory_items(id),
+        FOREIGN KEY (store_id) REFERENCES stores(id),
+        CHECK (previous_quantity IS NULL OR previous_quantity >= 0),
+        CHECK (counted_quantity >= 0),
+        CHECK (count_version > 0)
+    )
+    """,
+)
+
+INDEX_STATEMENTS = (
+    "CREATE INDEX idx_inventories_store_status_started ON inventories(store_id, status, started_at)",
+    "CREATE INDEX idx_inventories_store_type_started ON inventories(store_id, inventory_type, started_at)",
+    "CREATE INDEX idx_inventory_items_inventory ON inventory_items(inventory_id, product_name)",
+    "CREATE INDEX idx_inventory_items_product ON inventory_items(store_id, product_id, inventory_id)",
+    "CREATE INDEX idx_inventory_items_barcode ON inventory_items(inventory_id, barcode)",
+    "CREATE INDEX idx_inventory_count_events_item ON inventory_count_events(inventory_item_id, count_version)",
+    "CREATE INDEX idx_inventory_count_events_inventory ON inventory_count_events(inventory_id, created_at)",
+)
+
+
+MIGRATION_007 = Migration(
+    version=7,
+    description="Add physical inventory count workflow",
+    sqlite_statements=(*TABLE_STATEMENTS, *INDEX_STATEMENTS),
+    postgresql_statements=(*TABLE_STATEMENTS, *INDEX_STATEMENTS),
+    code_id="mova-sports-physical-inventory-workflow-v7",
+)

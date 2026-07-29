@@ -182,7 +182,7 @@ def _status_from_adapter(adapter, registry: tuple[Migration, ...]) -> dict:
         }
 
     if not adapter.history_exists():
-        validation = adapter.validate_current_schema()
+        validation = adapter.validate_v1_schema()
         return {
             "ok": validation.compatible,
             "state": "legacy_compatible" if validation.compatible else "legacy_incompatible",
@@ -211,7 +211,17 @@ def _status_from_adapter(adapter, registry: tuple[Migration, ...]) -> dict:
     applied_versions = [int(item.version) for item in history]
     pending = [item.version for item in registry if item.version not in applied_versions]
     if history:
-        validation = adapter.validate_current_schema()
+        current_version = max(applied_versions)
+        if pending and current_version == 1:
+            validation = adapter.validate_v1_schema()
+        elif pending and current_version == 2:
+            validation = adapter.validate_v2_schema()
+        elif pending and current_version == 5:
+            validation = adapter.validate_v5_schema()
+        elif pending and current_version == 6:
+            validation = adapter.validate_v6_schema()
+        else:
+            validation = adapter.validate_current_schema()
         if not validation.compatible:
             return {
                 "ok": False,
@@ -461,7 +471,7 @@ def baseline_database(
         )
         adapter.begin_write()
         adapter.acquire_migration_lock()
-        validation = adapter.validate_current_schema()
+        validation = adapter.validate_v1_schema()
         if not validation.compatible:
             raise MigrationError(
                 validation.errors[0] if validation.errors else "Schema legado incompativel.",

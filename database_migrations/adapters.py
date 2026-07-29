@@ -7,7 +7,18 @@ from pathlib import Path
 from typing import Callable
 
 from .models import AppliedMigration, Migration
-from .schema import CURRENT_INDEXES, CURRENT_TABLES
+from .schema import (
+    CURRENT_INDEXES,
+    CURRENT_TABLES,
+    V001_INDEXES,
+    V001_TABLES,
+    V002_INDEXES,
+    V002_TABLES,
+    V005_INDEXES,
+    V005_TABLES,
+    V006_INDEXES,
+    V006_TABLES,
+)
 
 
 POSTGRES_ADVISORY_LOCK_KEY = 556_079_114_083_002_501
@@ -131,9 +142,9 @@ class SQLiteAdapter:
             ),
         )
 
-    def validate_current_schema(self) -> SchemaValidation:
+    def _validate_schema(self, tables, indexes) -> SchemaValidation:
         errors: list[str] = []
-        expected_tables = {table.name for table in CURRENT_TABLES}
+        expected_tables = {table.name for table in tables}
         actual_tables = self.table_names() - {"schema_migrations"}
         if actual_tables != expected_tables:
             missing = sorted(expected_tables - actual_tables)
@@ -143,7 +154,7 @@ class SQLiteAdapter:
             if unexpected:
                 errors.append(f"Tabelas inesperadas: {', '.join(unexpected)}")
 
-        for table in CURRENT_TABLES:
+        for table in tables:
             if table.name not in actual_tables:
                 continue
             column_rows = self.connection.execute(f'PRAGMA table_info("{table.name}")').fetchall()
@@ -184,9 +195,9 @@ class SQLiteAdapter:
                 if f"check({_compact_sql(check)})" not in table_sql:
                     errors.append(f"Check constraint ausente em {table.name}")
 
-        expected_indexes = {index.name: index for index in CURRENT_INDEXES}
+        expected_indexes = {index.name: index for index in indexes}
         actual_custom_indexes: set[str] = set()
-        for table in CURRENT_TABLES:
+        for table in tables:
             if table.name not in actual_tables:
                 continue
             index_rows = self.connection.execute(f'PRAGMA index_list("{table.name}")').fetchall()
@@ -220,6 +231,21 @@ class SQLiteAdapter:
             if unexpected:
                 errors.append(f"Indices inesperados: {', '.join(unexpected)}")
         return SchemaValidation(not errors, tuple(errors))
+
+    def validate_current_schema(self) -> SchemaValidation:
+        return self._validate_schema(CURRENT_TABLES, CURRENT_INDEXES)
+
+    def validate_v1_schema(self) -> SchemaValidation:
+        return self._validate_schema(V001_TABLES, V001_INDEXES)
+
+    def validate_v2_schema(self) -> SchemaValidation:
+        return self._validate_schema(V002_TABLES, V002_INDEXES)
+
+    def validate_v5_schema(self) -> SchemaValidation:
+        return self._validate_schema(V005_TABLES, V005_INDEXES)
+
+    def validate_v6_schema(self) -> SchemaValidation:
+        return self._validate_schema(V006_TABLES, V006_INDEXES)
 
     def business_row_count(self) -> int:
         total = 0
@@ -329,9 +355,9 @@ class PostgreSQLAdapter:
         )
         cursor.close()
 
-    def validate_current_schema(self) -> SchemaValidation:
+    def _validate_schema(self, tables, indexes) -> SchemaValidation:
         errors: list[str] = []
-        expected_tables = {table.name for table in CURRENT_TABLES}
+        expected_tables = {table.name for table in tables}
         actual_tables = self.table_names() - {"schema_migrations"}
         if actual_tables != expected_tables:
             missing = sorted(expected_tables - actual_tables)
@@ -372,7 +398,7 @@ class PostgreSQLAdapter:
         finally:
             cursor.close()
 
-        for table in CURRENT_TABLES:
+        for table in tables:
             actual_columns = by_table.get(table.name, {})
             if set(actual_columns) != {column.name for column in table.columns}:
                 errors.append(f"Colunas divergentes em {table.name}")
@@ -417,7 +443,7 @@ class PostgreSQLAdapter:
         }
         expected_fks = {
             (table.name, fk.column, fk.target_table, fk.target_column, fk.on_delete.upper())
-            for table in CURRENT_TABLES for fk in table.foreign_keys
+            for table in tables for fk in table.foreign_keys
         }
         if actual_fks != expected_fks:
             errors.append("Foreign keys divergentes")
@@ -438,7 +464,7 @@ class PostgreSQLAdapter:
         checks_by_table: dict[str, set[str]] = {}
         for row in check_rows:
             checks_by_table.setdefault(str(row["table_name"]), set()).add(_compact_sql(row["definition"]))
-        for table in CURRENT_TABLES:
+        for table in tables:
             actual_checks = checks_by_table.get(table.name, set())
             for check in table.checks:
                 expected_check = f"check(({_compact_sql(check)}))"
@@ -454,10 +480,10 @@ class PostgreSQLAdapter:
         finally:
             cursor.close()
         actual_custom = {name for name in index_rows if not name.endswith("_pkey")}
-        expected_names = {index.name for index in CURRENT_INDEXES}
+        expected_names = {index.name for index in indexes}
         if actual_custom != expected_names:
             errors.append("Conjunto de indices divergente")
-        for index in CURRENT_INDEXES:
+        for index in indexes:
             row = index_rows.get(index.name)
             if not row:
                 continue
@@ -470,6 +496,21 @@ class PostgreSQLAdapter:
             if index.predicate and _compact_sql(index.predicate) not in definition:
                 errors.append(f"Predicado divergente: {index.name}")
         return SchemaValidation(not errors, tuple(errors))
+
+    def validate_current_schema(self) -> SchemaValidation:
+        return self._validate_schema(CURRENT_TABLES, CURRENT_INDEXES)
+
+    def validate_v1_schema(self) -> SchemaValidation:
+        return self._validate_schema(V001_TABLES, V001_INDEXES)
+
+    def validate_v2_schema(self) -> SchemaValidation:
+        return self._validate_schema(V002_TABLES, V002_INDEXES)
+
+    def validate_v5_schema(self) -> SchemaValidation:
+        return self._validate_schema(V005_TABLES, V005_INDEXES)
+
+    def validate_v6_schema(self) -> SchemaValidation:
+        return self._validate_schema(V006_TABLES, V006_INDEXES)
 
     def business_row_count(self) -> int:
         total = 0

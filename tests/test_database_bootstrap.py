@@ -225,20 +225,26 @@ class BootstrapStatusTests(BootstrapSQLiteCase):
     def test_future_version_is_reported(self):
         self.migrate()
         with self.connect() as connection:
-            connection.execute("UPDATE schema_migrations SET version = 2")
+            migration = MIGRATIONS[-1]
+            connection.execute(
+                "INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)",
+                (
+                    migration.version + 1,
+                    "Future",
+                    "2026-01-01T00:00:00Z",
+                    "0" * 64,
+                    0,
+                ),
+            )
         status = get_bootstrap_status(environ=self.env, sqlite_path=self.db_path)
         self.assertEqual(status.state, "SCHEMA_FUTURE")
 
     def test_version_gap_is_reported(self):
         self.migrate()
-        migration = MIGRATIONS[0]
         with self.connect() as connection:
-            connection.execute(
-                "INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)",
-                (3, migration.description, "2026-01-01T00:00:00Z", migration.checksum, 0),
-            )
+            connection.execute("DELETE FROM schema_migrations WHERE version = 2")
         status = get_bootstrap_status(environ=self.env, sqlite_path=self.db_path)
-        self.assertIn(status.state, {"SCHEMA_FUTURE", "MIGRATION_HISTORY_INVALID"})
+        self.assertEqual(status.state, "MIGRATION_HISTORY_INVALID")
 
     def test_invalid_schema_is_reported(self):
         self.migrate()
@@ -501,6 +507,7 @@ class BootstrapRunTests(BootstrapSQLiteCase):
         self.assertTrue(result.app_state_created)
         self.assertTrue(result.admin_created)
         self.assertFalse(result.already_complete)
+        self.assertEqual(self.scalar("SELECT COUNT(*) FROM customers WHERE is_default = 1"), 1)
 
     def test_store_contract_is_preserved(self):
         self.bootstrap(store_name="Matriz Principal")
@@ -547,7 +554,14 @@ class BootstrapRunTests(BootstrapSQLiteCase):
 
     def test_no_demo_or_business_seed_is_created(self):
         self.bootstrap()
-        allowed = {"stores", "app_state", "users", "schema_migrations"}
+        allowed = {
+            "stores",
+            "app_state",
+            "users",
+            "customers",
+            "expense_categories",
+            "schema_migrations",
+        }
         with self.connect() as connection:
             tables = [
                 row[0]
@@ -560,6 +574,26 @@ class BootstrapRunTests(BootstrapSQLiteCase):
                 for table in tables
             }
         self.assertFalse({table: count for table, count in counts.items() if table not in allowed and count})
+        self.assertEqual(counts["customers"], 1)
+        self.assertEqual(counts["expense_categories"], 15)
+
+    def test_default_customer_is_protected_business_identity(self):
+        self.bootstrap()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, store_id, code, name, cpf, credit_limit, status, is_default
+                FROM customers
+                """
+            ).fetchone()
+        self.assertEqual(row["id"], "matriz:customer:default")
+        self.assertEqual(row["store_id"], "matriz")
+        self.assertEqual(row["code"], "PADRAO")
+        self.assertEqual(row["name"], "Cliente padrao")
+        self.assertEqual(row["cpf"], "")
+        self.assertEqual(row["credit_limit"], 0)
+        self.assertEqual(row["status"], "active")
+        self.assertEqual(row["is_default"], 1)
 
     def test_migration_history_is_not_changed(self):
         before = self.scalar("SELECT COUNT(*) FROM schema_migrations")
@@ -667,7 +701,11 @@ class BootstrapRunTests(BootstrapSQLiteCase):
                 ("matriz", "Matriz", "2026-01-01T00:00:00Z"),
             )
             connection.execute(
-                "INSERT INTO users VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO users (
+                    id, store_id, name, login, password_hash, role, active, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
                 ("operator", "matriz", "Operador", "admin", "hash", "operator", 1, "2026-01-01T00:00:00Z"),
             )
         with self.assertRaises(BootstrapError) as context:
@@ -777,9 +815,21 @@ class BootstrapRunTests(BootstrapSQLiteCase):
         self.bootstrap()
         import server
 
+        original_connect = server.connect_db
+
+        @contextmanager
+        def closed_connect():
+            connection = original_connect()
+            try:
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
+
         with (
             mock.patch.object(server, "DB_PATH", self.db_path),
             mock.patch.object(server, "USE_POSTGRES", False),
+            mock.patch.object(server, "connect_db", closed_connect),
         ):
             response = server.app.test_client().post(
                 "/api/login", json={"login": "admin", "password": "Wrong-123"}

@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import math
 import os
+import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+import unicodedata
+from calendar import monthrange
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from flask import Flask, jsonify, request, send_from_directory, session
+from flask import Flask, jsonify, request, send_file, send_from_directory, session
+from barcode import Code128
+from barcode.writer import SVGWriter
 from environment_config import load_environment_config
+from report_exports import build_report_pdf, build_report_xlsx
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -19,6 +30,7 @@ DB_PATH = os.environ.get("MOVA_DB", os.path.join(APP_DIR, "loja.db"))
 BACKUP_DIR = os.environ.get("MOVA_BACKUP_DIR", os.path.join(APP_DIR, "backups"))
 UPLOAD_DIR = os.environ.get("MOVA_UPLOAD_DIR", os.path.join(APP_DIR, "uploads"))
 PRODUCT_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "products")
+STORE_UPLOAD_DIR = os.path.join(UPLOAD_DIR, "store")
 ALLOWED_PRODUCT_IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 MAX_PRODUCT_IMAGE_BYTES = 5 * 1024 * 1024
 CLOUDINARY_URL = os.environ.get("CLOUDINARY_URL", "").strip()
@@ -39,9 +51,30 @@ SESSION_HOURS = max(1, int(float(os.environ.get("MOVA_SESSION_HOURS", "12") or 1
 LOGIN_ATTEMPT_LIMIT = max(3, int(float(os.environ.get("MOVA_LOGIN_ATTEMPTS", "5") or 5)))
 LOGIN_ATTEMPT_WINDOW_SECONDS = max(60, int(float(os.environ.get("MOVA_LOGIN_WINDOW_SECONDS", "900") or 900)))
 LOGIN_ATTEMPTS: dict[str, list[datetime]] = {}
+STORE_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+CATALOG_STATUSES = frozenset({"active", "deactivated"})
+SUPPLIER_STATUSES = frozenset({"active", "deactivated"})
+CONTROLLED_GENDERS = frozenset({"Masculino", "Feminino", "Unissex", "Infantil"})
+DEFAULT_EXPENSE_CATEGORY_NAMES = (
+    "Mercadorias",
+    "Aluguel",
+    "Energia",
+    "Água",
+    "Internet",
+    "Impostos",
+    "Salários",
+    "Serviços",
+    "Gasolina",
+    "Lanches",
+    "Estacionamento",
+    "Material de limpeza",
+    "Motoboy",
+    "Acessórios",
+    "Outros",
+)
 AUTH_DATABASE_UNAVAILABLE_MESSAGE = "Serviço temporariamente indisponível."
 # Primeira baseline formal; sua criação pertence à migration controlada futura.
-REQUIRED_SCHEMA_VERSION = 1
+REQUIRED_SCHEMA_VERSION = 18
 READINESS_READY_VERSIONED = "READY_VERSIONED"
 READINESS_READY_LEGACY = "READY_LEGACY"
 READINESS_DATABASE_UNAVAILABLE = "DATABASE_UNAVAILABLE"
@@ -67,35 +100,839 @@ REQUIRED_SCHEMA_TABLES = frozenset({
     "cash_closings",
     "receivables",
     "receivable_payments",
+    "receivable_renegotiations",
     "sale_returns",
     "sale_return_items",
     "payables",
+    "customer_status_history",
+    "customer_credit_limit_history",
+    "sizes",
+    "colors",
+    "expense_categories",
+    "supplier_status_history",
+    "stock_entry_sequences",
+    "stock_entries",
+    "stock_entry_items",
+    "stock_movements",
+    "stock_entry_payables",
+    "stock_entry_cancellations",
+    "purchase_stock_movements",
+    "supplier_return_sequences",
+    "supplier_returns",
+    "supplier_return_items",
+    "supplier_credits",
+    "supplier_return_allocations",
+    "supplier_credit_usages",
+    "supplier_credit_allocations",
+    "inventory_movements",
+    "inventory_sequences",
+    "inventories",
+    "inventory_items",
+    "inventory_count_events",
+    "card_modalities",
+    "card_modality_history",
+    "sale_sequences",
+    "conditional_sequences",
+    "conditionals",
+    "conditional_items",
+    "conditional_returns",
+    "conditional_return_items",
+    "conditional_sale_links",
+    "sale_return_sequences",
+    "sale_return_allocations",
+    "sale_return_receivable_reductions",
+    "exchange_sequences",
+    "exchanges",
+    "exchange_return_items",
+    "exchange_new_items",
+    "exchange_payments",
+    "warranty_sequences",
+    "warranties",
+    "warranty_photos",
+    "warranty_events",
+    "payable_payments",
+    "payable_events",
+    "bank_receipts",
+    "card_reconciliations",
+    "card_reconciliation_items",
+    "sale_cancellations",
+    "generated_documents",
+    "alert_user_states",
+    "store_settings",
+    "user_preferences",
 })
 REQUIRED_SCHEMA_COLUMNS = {
     "stores": frozenset({"id"}),
     "app_state": frozenset({"id", "data", "updated_at"}),
-    "users": frozenset({"id", "store_id", "name", "login", "password_hash", "role", "active"}),
+    "users": frozenset({
+        "id",
+        "store_id",
+        "name",
+        "login",
+        "password_hash",
+        "role",
+        "active",
+        "failed_login_attempts",
+        "blocked_at",
+        "last_login_at",
+    }),
     "audit_logs": frozenset({"id", "store_id"}),
-    "brands": frozenset({"id", "store_id"}),
-    "categories": frozenset({"id", "store_id"}),
-    "suppliers": frozenset({"id", "store_id"}),
-    "customers": frozenset({"id", "store_id", "cpf"}),
-    "products": frozenset({"id", "store_id", "barcode"}),
-    "sales": frozenset({"id", "store_id"}),
-    "sale_items": frozenset({"id", "sale_id"}),
-    "sale_payments": frozenset({"id", "sale_id"}),
-    "cash_movements": frozenset({"id", "store_id"}),
+    "brands": frozenset({"id", "store_id", "normalized_name", "status", "created_at"}),
+    "categories": frozenset({"id", "store_id", "normalized_name", "status", "created_at"}),
+    "suppliers": frozenset({
+        "id",
+        "store_id",
+        "document_normalized",
+        "trade_name",
+        "status",
+        "created_at",
+    }),
+    "customers": frozenset({
+        "id",
+        "store_id",
+        "cpf",
+        "address_number",
+        "state",
+        "notes",
+        "is_default",
+        "created_at",
+    }),
+    "products": frozenset({
+        "id",
+        "store_id",
+        "barcode",
+        "barcode_normalized",
+        "brand_id",
+        "category_id",
+        "size_id",
+        "color_id",
+        "supplier_id",
+        "created_at",
+        "stock_entered_at",
+    }),
+    "stock_entry_sequences": frozenset({"store_id", "next_number"}),
+    "stock_entries": frozenset({
+        "id",
+        "store_id",
+        "entry_number",
+        "supplier_id",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "created_at",
+    }),
+    "stock_entry_items": frozenset({
+        "id",
+        "entry_id",
+        "product_id",
+        "quantity",
+        "unit_cost",
+        "stock_before",
+        "stock_after",
+    }),
+    "stock_movements": frozenset({
+        "id",
+        "store_id",
+        "product_id",
+        "movement_type",
+        "quantity",
+        "reference_id",
+        "created_at",
+    }),
+    "stock_entry_payables": frozenset({
+        "id",
+        "store_id",
+        "entry_id",
+        "payable_id",
+        "created_at",
+    }),
+    "stock_entry_cancellations": frozenset({
+        "id",
+        "store_id",
+        "entry_id",
+        "reason",
+        "created_at",
+    }),
+    "purchase_stock_movements": frozenset({
+        "id",
+        "store_id",
+        "product_id",
+        "movement_type",
+        "direction",
+        "quantity",
+        "reference_type",
+        "reference_id",
+        "created_at",
+    }),
+    "supplier_returns": frozenset({
+        "id",
+        "store_id",
+        "return_number",
+        "entry_id",
+        "supplier_id",
+        "total_value",
+        "pending_value",
+        "status",
+        "financial_status",
+        "created_at",
+    }),
+    "supplier_return_items": frozenset({
+        "id",
+        "return_id",
+        "entry_item_id",
+        "product_id",
+        "quantity",
+        "unit_cost",
+        "total_cost",
+    }),
+    "supplier_credits": frozenset({
+        "id",
+        "store_id",
+        "supplier_id",
+        "return_id",
+        "original_amount",
+        "used_amount",
+        "status",
+        "created_at",
+    }),
+    "supplier_return_allocations": frozenset({
+        "id",
+        "store_id",
+        "return_id",
+        "allocation_type",
+        "amount",
+        "status",
+    }),
+    "supplier_credit_usages": frozenset({
+        "id",
+        "store_id",
+        "supplier_id",
+        "payable_id",
+        "amount",
+        "status",
+        "created_at",
+    }),
+    "supplier_credit_allocations": frozenset({
+        "id",
+        "usage_id",
+        "credit_id",
+        "amount",
+        "status",
+    }),
+    "inventory_movements": frozenset({
+        "id",
+        "store_id",
+        "product_id",
+        "movement_type",
+        "real_before",
+        "real_after",
+        "reserved_before",
+        "reserved_after",
+        "reference_type",
+        "reference_id",
+        "source_key",
+        "created_at",
+    }),
+    "inventory_sequences": frozenset({"store_id", "next_number"}),
+    "inventories": frozenset({
+        "id",
+        "store_id",
+        "inventory_number",
+        "inventory_type",
+        "scope_json",
+        "status",
+        "product_count",
+        "idempotency_key",
+        "started_at",
+        "updated_at",
+    }),
+    "inventory_items": frozenset({
+        "id",
+        "inventory_id",
+        "store_id",
+        "product_id",
+        "initial_real",
+        "initial_reserved",
+        "initial_expected",
+        "counted_quantity",
+        "count_version",
+        "divergence",
+    }),
+    "inventory_count_events": frozenset({
+        "id",
+        "inventory_id",
+        "inventory_item_id",
+        "store_id",
+        "counted_quantity",
+        "count_version",
+        "created_at",
+    }),
+    "card_modalities": frozenset({
+        "id",
+        "store_id",
+        "card_modality_id",
+        "method",
+        "installments",
+        "status",
+        "tax_percent",
+        "receivable_days",
+        "valid_from",
+        "valid_until",
+    }),
+    "card_modality_history": frozenset({
+        "id",
+        "store_id",
+        "card_modality_id",
+        "method",
+        "installments",
+        "tax_percent",
+        "receivable_days",
+        "valid_from",
+    }),
+    "conditional_sequences": frozenset({"store_id", "next_number"}),
+    "conditionals": frozenset({
+        "id",
+        "store_id",
+        "conditional_number",
+        "customer_id",
+        "status",
+        "checked_out_at",
+        "expected_return_date",
+        "idempotency_key",
+        "created_at",
+        "updated_at",
+    }),
+    "conditional_items": frozenset({
+        "id",
+        "conditional_id",
+        "product_id",
+        "original_quantity",
+        "returned_quantity",
+        "sold_quantity",
+        "pending_sale_quantity",
+        "reference_unit_price",
+    }),
+    "conditional_returns": frozenset({
+        "id",
+        "store_id",
+        "conditional_id",
+        "status",
+        "idempotency_key",
+        "created_at",
+    }),
+    "conditional_return_items": frozenset({
+        "id",
+        "return_id",
+        "conditional_item_id",
+        "product_id",
+        "returned_quantity",
+        "purchase_quantity",
+        "status",
+    }),
+    "conditional_sale_links": frozenset({
+        "id",
+        "store_id",
+        "conditional_id",
+        "return_id",
+        "sale_id",
+        "created_at",
+    }),
+    "sale_sequences": frozenset({"store_id", "next_number"}),
+    "sales": frozenset({
+        "id",
+        "store_id",
+        "sale_number",
+        "addition",
+        "change_amount",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "exchange_id",
+        "warranty_id",
+    }),
+    "sale_items": frozenset({
+        "id",
+        "sale_id",
+        "original_unit_price",
+        "practiced_unit_price",
+        "unit_discount",
+        "unit_addition",
+        "final_unit_price",
+        "net_total",
+        "stock_before",
+        "stock_after",
+        "exchange_item_id",
+    }),
+    "sale_payments": frozenset({
+        "id",
+        "sale_id",
+        "tendered_amount",
+        "change_amount",
+        "card_modality_id",
+        "gross_amount",
+        "fee_amount",
+        "net_amount",
+    }),
+    "cash_movements": frozenset({
+        "id",
+        "store_id",
+        "expense_category_id",
+        "origin_type",
+        "origin_id",
+        "user_id",
+        "user_name",
+        "resulting_balance",
+        "reversal_of_id",
+        "reversed_at",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+    }),
     "cash_closings": frozenset({"id", "store_id"}),
-    "receivables": frozenset({"id", "store_id"}),
-    "receivable_payments": frozenset({"id", "store_id", "receivable_id"}),
-    "sale_returns": frozenset({"id", "store_id", "sale_id"}),
-    "sale_return_items": frozenset({"id", "return_id"}),
-    "payables": frozenset({"id", "store_id", "discount"}),
+    "receivables": frozenset({
+        "id",
+        "store_id",
+        "sale_payment_id",
+        "gross_amount",
+        "fee_amount",
+        "net_amount",
+        "original_due_date",
+        "open_amount",
+        "discount_total",
+        "interest_total",
+        "fine_total",
+        "addition_total",
+        "version",
+        "return_reduction_total",
+        "difference_amount",
+    }),
+    "receivable_payments": frozenset({
+        "id",
+        "store_id",
+        "receivable_id",
+        "principal_amount",
+        "settled_amount",
+        "interest_amount",
+        "fine_amount",
+        "addition_amount",
+        "discount_amount",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "user_id",
+        "user_name",
+        "card_modality_id",
+        "gross_amount",
+        "fee_amount",
+        "net_amount",
+        "reconciliation_id",
+        "status",
+        "reversed_at",
+        "reversal_reason",
+    }),
+    "receivable_renegotiations": frozenset({
+        "id",
+        "store_id",
+        "receivable_id",
+        "previous_due_date",
+        "new_due_date",
+        "previous_open_amount",
+        "new_open_amount",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "created_at",
+    }),
+    "sale_returns": frozenset({
+        "id", "store_id", "sale_id", "return_number", "status", "origin",
+        "gross_total", "discount_total", "net_total", "cost_total",
+        "idempotency_key", "request_hash", "response_json",
+    }),
+    "sale_return_items": frozenset({
+        "id", "return_id", "sale_item_id", "quantity", "net_total",
+        "cost_total", "physical_condition", "restocked",
+    }),
+    "sale_return_sequences": frozenset({"store_id", "next_number"}),
+    "sale_return_allocations": frozenset({
+        "id", "store_id", "return_id", "method", "gross_amount",
+        "pending_reduction", "refunded_amount", "status",
+    }),
+    "sale_return_receivable_reductions": frozenset({
+        "id", "store_id", "return_id", "sale_payment_id", "receivable_id",
+        "amount", "open_amount_before", "open_amount_after",
+        "status_before", "status_after", "created_at",
+    }),
+    "exchange_sequences": frozenset({"store_id", "next_number"}),
+    "exchanges": frozenset({
+        "id", "store_id", "exchange_number", "sale_id", "status",
+        "credit_total", "new_items_total", "difference_amount",
+        "difference_direction", "idempotency_key", "created_at",
+    }),
+    "exchange_return_items": frozenset({
+        "id", "exchange_id", "sale_item_id", "product_id", "quantity",
+        "credit_total", "physical_condition", "restocked",
+    }),
+    "exchange_new_items": frozenset({
+        "id", "exchange_id", "product_id", "quantity", "net_total",
+        "stock_before", "stock_after",
+    }),
+    "exchange_payments": frozenset({
+        "id", "exchange_id", "method", "amount", "direction",
+    }),
+    "warranty_sequences": frozenset({"store_id", "next_number"}),
+    "warranties": frozenset({
+        "id", "store_id", "warranty_number", "sale_id", "sale_item_id",
+        "product_id", "quantity", "defect_category", "defect_description",
+        "physical_location", "status", "idempotency_key", "created_at",
+    }),
+    "warranty_photos": frozenset({"id", "warranty_id", "url", "created_at"}),
+    "warranty_events": frozenset({
+        "id", "warranty_id", "store_id", "event_type", "created_at",
+    }),
+    "payables": frozenset({
+        "id",
+        "store_id",
+        "discount",
+        "supplier_id",
+        "expense_category_id",
+        "open_amount",
+        "interest",
+        "fine",
+        "recurring",
+        "recurring_day",
+        "recurring_series_id",
+        "recurrence_month",
+        "generated_from_id",
+        "version",
+        "cancelled_at",
+        "cancellation_reason",
+        "cancelled_by_id",
+        "cancelled_by_name",
+    }),
+    "payable_payments": frozenset({
+        "id",
+        "store_id",
+        "payable_id",
+        "cash_movement_id",
+        "amount",
+        "interest_amount",
+        "fine_amount",
+        "discount_amount",
+        "method",
+        "status",
+        "reversal_idempotency_key",
+        "reversal_request_hash",
+        "reversal_response_json",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "created_at",
+    }),
+    "payable_events": frozenset({
+        "id",
+        "store_id",
+        "payable_id",
+        "event_type",
+        "details_json",
+        "created_at",
+    }),
+    "bank_receipts": frozenset({
+        "id",
+        "store_id",
+        "credit_amount",
+        "debit_amount",
+        "total_amount",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "created_at",
+    }),
+    "card_reconciliations": frozenset({
+        "id",
+        "store_id",
+        "receipt_date",
+        "total_received",
+        "item_count",
+        "status",
+        "cash_movement_id",
+        "reversal_cash_movement_id",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "reversal_idempotency_key",
+        "reversal_request_hash",
+        "reversal_response_json",
+        "created_at",
+    }),
+    "card_reconciliation_items": frozenset({
+        "id",
+        "store_id",
+        "reconciliation_id",
+        "receivable_id",
+        "payment_id",
+        "expected_balance_before",
+        "allocated_amount",
+        "difference_after",
+        "difference_before",
+        "received_before",
+        "received_after",
+        "open_amount_before",
+        "open_amount_after",
+        "status_before",
+        "status_after",
+        "version_before",
+        "version_after",
+        "paid_at_before",
+        "last_payment_at_before",
+        "created_at",
+    }),
+    "sale_cancellations": frozenset({
+        "id",
+        "store_id",
+        "sale_id",
+        "return_id",
+        "reason",
+        "reconciliation_required",
+        "idempotency_key",
+        "request_hash",
+        "response_json",
+        "created_at",
+    }),
+    "generated_documents": frozenset({
+        "id",
+        "store_id",
+        "document_type",
+        "source_type",
+        "source_id",
+        "operation_number",
+        "format",
+        "template_version",
+        "copy_number",
+        "filename",
+        "snapshot_json",
+        "generated_by_id",
+        "generated_by_name",
+        "idempotency_key",
+        "request_hash",
+        "generated_at",
+    }),
+    "alert_user_states": frozenset({
+        "id",
+        "store_id",
+        "user_id",
+        "alert_id",
+        "read_at",
+        "pinned_at",
+        "created_at",
+        "updated_at",
+    }),
+    "store_settings": frozenset({
+        "store_id",
+        "legal_name",
+        "trade_name",
+        "document",
+        "document_type",
+        "phone",
+        "whatsapp",
+        "email",
+        "zip",
+        "address",
+        "address_number",
+        "complement",
+        "district",
+        "city",
+        "state",
+        "logo_url",
+        "print_show_document",
+        "print_show_phone",
+        "print_show_whatsapp",
+        "print_show_address",
+        "print_show_email",
+        "receipt_footer",
+        "pix_key",
+        "pix_key_type",
+        "pix_recipient_name",
+        "pix_recipient_document",
+        "pix_bank",
+        "pix_enabled",
+        "debit_enabled",
+        "credit_enabled",
+        "store_credit_enabled",
+        "version",
+        "updated_at",
+    }),
+    "user_preferences": frozenset({
+        "id",
+        "store_id",
+        "user_id",
+        "theme",
+        "version",
+        "created_at",
+        "updated_at",
+    }),
+    "customer_status_history": frozenset({
+        "id",
+        "store_id",
+        "customer_id",
+        "previous_status",
+        "new_status",
+        "created_at",
+    }),
+    "customer_credit_limit_history": frozenset({
+        "id",
+        "store_id",
+        "customer_id",
+        "previous_limit",
+        "new_limit",
+        "created_at",
+    }),
+    "sizes": frozenset({"id", "store_id", "normalized_name", "status", "created_at"}),
+    "colors": frozenset({"id", "store_id", "normalized_name", "status", "created_at"}),
+    "expense_categories": frozenset({
+        "id",
+        "store_id",
+        "normalized_name",
+        "status",
+        "created_at",
+    }),
+    "supplier_status_history": frozenset({
+        "id",
+        "store_id",
+        "supplier_id",
+        "previous_status",
+        "new_status",
+        "created_at",
+    }),
 }
 REQUIRED_SCHEMA_INDEXES = {
     "idx_users_store_login": ("users", ("store_id", "login"), True),
     "idx_customers_store_cpf": ("customers", ("store_id", "cpf"), True),
     "idx_products_store_barcode": ("products", ("store_id", "barcode"), True),
+    "idx_products_store_barcode_normalized": (
+        "products",
+        ("store_id", "barcode_normalized"),
+        True,
+    ),
+    "idx_suppliers_store_document": (
+        "suppliers",
+        ("store_id", "document_normalized"),
+        True,
+    ),
+    "idx_card_modalities_store_stable_id": (
+        "card_modalities",
+        ("store_id", "card_modality_id"),
+        True,
+    ),
+    "idx_sales_store_number": (
+        "sales",
+        ("store_id", "sale_number"),
+        True,
+    ),
+    "idx_sales_store_idempotency": (
+        "sales",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_receivable_payments_store_idempotency": (
+        "receivable_payments",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_receivable_renegotiations_store_idempotency": (
+        "receivable_renegotiations",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_sale_returns_store_idempotency": (
+        "sale_returns",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_sale_return_reductions_return": (
+        "sale_return_receivable_reductions",
+        ("store_id", "return_id"),
+        False,
+    ),
+    "idx_exchanges_store_idempotency": (
+        "exchanges",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_warranties_store_idempotency": (
+        "warranties",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_cash_store_idempotency": (
+        "cash_movements",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_cash_reversal_once": (
+        "cash_movements",
+        ("reversal_of_id",),
+        True,
+    ),
+    "idx_payable_payments_store_key": (
+        "payable_payments",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_payable_payment_reversal_key": (
+        "payable_payments",
+        ("store_id", "reversal_idempotency_key"),
+        True,
+    ),
+    "idx_bank_receipts_store_key": (
+        "bank_receipts",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_card_reconciliations_store_key": (
+        "card_reconciliations",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_alert_user_states_identity": (
+        "alert_user_states",
+        ("store_id", "user_id", "alert_id"),
+        True,
+    ),
+    "idx_user_preferences_identity": (
+        "user_preferences",
+        ("store_id", "user_id"),
+        True,
+    ),
+    "idx_store_settings_updated": (
+        "store_settings",
+        ("updated_at",),
+        False,
+    ),
+    "idx_card_reconciliation_items_receivable": (
+        "card_reconciliation_items",
+        ("store_id", "receivable_id", "created_at"),
+        False,
+    ),
+    "idx_sale_cancellations_store_key": (
+        "sale_cancellations",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_sale_cancellations_sale": (
+        "sale_cancellations",
+        ("sale_id",),
+        True,
+    ),
+    "idx_generated_documents_store_key": (
+        "generated_documents",
+        ("store_id", "idempotency_key"),
+        True,
+    ),
+    "idx_generated_documents_source": (
+        "generated_documents",
+        ("store_id", "source_type", "source_id", "document_type", "generated_at"),
+        False,
+    ),
 }
 POSTGRES_CAMEL_ALIASES = (
     "cashIn",
@@ -118,6 +955,25 @@ POSTGRES_CAMEL_ALIASES = (
     "refId",
     "returnId",
     "saleId",
+    "supplierId",
+    "expenseCategoryId",
+    "brandId",
+    "cardModalityId",
+    "categoryId",
+    "sizeId",
+    "colorId",
+    "entryId",
+    "entryNumber",
+    "idempotencyKey",
+    "movementType",
+    "referenceId",
+    "referenceType",
+    "requestHash",
+    "responseJson",
+    "stockBefore",
+    "stockAfter",
+    "stockEnteredAt",
+    "totalQuantity",
     "totalBalance",
     "unitCost",
     "unitPrice",
@@ -207,7 +1063,14 @@ def no_cache(response):
 def require_login_for_api():
     if not request.path.startswith("/api/"):
         return None
-    if request.path in {"/api/health", "/api/readiness", "/api/session", "/api/login", "/api/logout"}:
+    if request.path in {
+        "/api/health",
+        "/api/readiness",
+        "/api/session",
+        "/api/login",
+        "/api/logout",
+        "/api/store/operational-settings",
+    }:
         return None
     if not session.get("user"):
         operation = current_data_import_reset_operation()
@@ -236,7 +1099,14 @@ def protect_data_import_reset_before_database_access():
 def validate_active_session_for_api():
     if not request.path.startswith("/api/"):
         return None
-    if request.path in {"/api/health", "/api/readiness", "/api/session", "/api/login", "/api/logout"}:
+    if request.path in {
+        "/api/health",
+        "/api/readiness",
+        "/api/session",
+        "/api/login",
+        "/api/logout",
+        "/api/store/operational-settings",
+    }:
         return None
     if not session.get("user"):
         return None
@@ -453,7 +1323,7 @@ def _query_auth_user(sql: str, params: tuple):
 def fetch_auth_user_by_id(user_id: str | None):
     return _query_auth_user(
         """
-        SELECT id, name, login, role, active
+        SELECT id, name, login, role, active, failed_login_attempts, blocked_at, last_login_at
         FROM users
         WHERE store_id = ? AND id = ?
         """,
@@ -464,7 +1334,8 @@ def fetch_auth_user_by_id(user_id: str | None):
 def fetch_auth_user_by_login(login: str):
     return _query_auth_user(
         """
-        SELECT id, name, login, password_hash, role, active
+        SELECT id, name, login, password_hash, role, active,
+               failed_login_attempts, blocked_at, last_login_at
         FROM users
         WHERE store_id = ? AND login = ?
         """,
@@ -846,6 +1717,7 @@ def ensure_startup_backup() -> None:
 
 def ensure_upload_dirs() -> None:
     os.makedirs(PRODUCT_UPLOAD_DIR, exist_ok=True)
+    os.makedirs(STORE_UPLOAD_DIR, exist_ok=True)
 
 
 def allowed_product_image(filename: str) -> bool:
@@ -853,11 +1725,37 @@ def allowed_product_image(filename: str) -> bool:
     return extension in ALLOWED_PRODUCT_IMAGE_EXTENSIONS
 
 
+def image_content_matches_extension(file_storage) -> bool:
+    extension = (
+        file_storage.filename.rsplit(".", 1)[-1].lower()
+        if "." in file_storage.filename
+        else ""
+    )
+    file_storage.stream.seek(0)
+    header = file_storage.stream.read(16)
+    file_storage.stream.seek(0)
+    if extension in {"jpg", "jpeg"}:
+        return header.startswith(b"\xff\xd8\xff")
+    if extension == "png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    if extension == "webp":
+        return (
+            len(header) >= 12
+            and header[:4] == b"RIFF"
+            and header[8:12] == b"WEBP"
+        )
+    return False
+
+
 def save_product_image(file_storage) -> dict:
     if not file_storage or not file_storage.filename:
         raise ValueError("Envie uma imagem.")
     if not allowed_product_image(file_storage.filename):
         raise ValueError("Formato inválido. Use JPG, PNG ou WEBP.")
+    if not image_content_matches_extension(file_storage):
+        raise ValueError(
+            "O conteudo do arquivo nao corresponde a uma imagem valida."
+        )
     file_storage.stream.seek(0, os.SEEK_END)
     size = file_storage.stream.tell()
     file_storage.stream.seek(0)
@@ -902,6 +1800,62 @@ def save_product_image(file_storage) -> dict:
     return {"url": f"/uploads/products/{filename}", "filename": filename, "size": os.path.getsize(path), "storage": "local"}
 
 
+def save_store_logo(file_storage) -> dict:
+    if not file_storage or not file_storage.filename:
+        raise ValueError("Envie uma imagem.")
+    if not allowed_product_image(file_storage.filename):
+        raise ValueError("Formato invalido. Use JPG, PNG ou WEBP.")
+    if not image_content_matches_extension(file_storage):
+        raise ValueError("O conteudo do arquivo nao corresponde a uma imagem valida.")
+    file_storage.stream.seek(0, os.SEEK_END)
+    size = file_storage.stream.tell()
+    file_storage.stream.seek(0)
+    if size > MAX_PRODUCT_IMAGE_BYTES:
+        raise ValueError("Imagem maior que 5MB.")
+    extension = file_storage.filename.rsplit(".", 1)[-1].lower()
+    base_name = secure_filename(file_storage.filename.rsplit(".", 1)[0]) or "loja"
+    if USE_CLOUDINARY:
+        try:
+            import cloudinary
+            import cloudinary.uploader
+        except ImportError as exc:
+            raise ValueError("Cloudinary nao instalado. Verifique requirements.txt e refaca o deploy.") from exc
+        config = {"secure": True}
+        if VALID_CLOUDINARY_URL:
+            os.environ["CLOUDINARY_URL"] = CLOUDINARY_URL
+        elif CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
+            config.update({
+                "cloud_name": CLOUDINARY_CLOUD_NAME,
+                "api_key": CLOUDINARY_API_KEY,
+                "api_secret": CLOUDINARY_API_SECRET,
+            })
+        cloudinary.config(**config)
+        folder = CLOUDINARY_FOLDER.rsplit("/", 1)[0] + "/store"
+        result = cloudinary.uploader.upload(
+            file_storage.stream,
+            folder=folder,
+            public_id=f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}-{base_name}",
+            resource_type="image",
+            overwrite=False,
+        )
+        return {
+            "url": result.get("secure_url") or result.get("url", ""),
+            "filename": result.get("public_id", base_name),
+            "size": size,
+            "storage": "cloudinary",
+        }
+    ensure_upload_dirs()
+    filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{os.urandom(4).hex()}-{base_name}.{extension}"
+    path = os.path.join(STORE_UPLOAD_DIR, filename)
+    file_storage.save(path)
+    return {
+        "url": f"/uploads/store/{filename}",
+        "filename": filename,
+        "size": os.path.getsize(path),
+        "storage": "local",
+    }
+
+
 def initial_admin_password() -> str:
     return os.environ.get("MOVA_ADMIN_PASSWORD", "").strip()
 
@@ -920,16 +1874,27 @@ def default_state() -> dict:
     return {
         "users": [initial_admin_user()],
         "products": [],
+        "stockEntries": [],
+        "stockMovements": [],
+        "inventoryMovements": [],
+        "inventories": [],
+        "supplierReturns": [],
+        "supplierCredits": [],
         "customers": [],
         "suppliers": [],
         "brands": [],
         "categories": [],
+        "sizes": [],
+        "colors": [],
+        "expenseCategories": [],
         "sales": [],
         "receivables": [],
         "payables": [],
         "cash": [],
         "cashClosings": [],
         "returns": [],
+        "exchanges": [],
+        "warranties": [],
         "conditionals": [],
     }
 
@@ -967,6 +1932,30 @@ def password_matches(stored_hash: str | None, candidate: str) -> bool:
     except (TypeError, ValueError):
         app.logger.warning("Autenticacao bloqueada: usuario sem password_hash valido.")
         return False
+
+
+def seed_default_expense_categories(conn, store_id: str = "matriz") -> None:
+    now = utc_now()
+    for name in DEFAULT_EXPENSE_CATEGORY_NAMES:
+        normalized = normalized_search_text(name)
+        slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")
+        conn.execute(
+            """
+            INSERT INTO expense_categories (
+                id, store_id, name, normalized_name, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'active', ?, ?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                f"{store_id}:expense-category:{slug}",
+                store_id,
+                name,
+                normalized,
+                now,
+                now,
+            ),
+        )
 
 
 @app.errorhandler(LegacyUsersWithoutHashesError)
@@ -1026,6 +2015,82 @@ def init_db() -> None:
             """
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_store_login ON users(store_id, login)")
+        if USE_POSTGRES:
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0")
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS blocked_at TEXT")
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TEXT")
+        else:
+            user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "failed_login_attempts" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0")
+            if "blocked_at" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN blocked_at TEXT")
+            if "last_login_at" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS store_settings (
+                store_id TEXT PRIMARY KEY,
+                legal_name TEXT,
+                trade_name TEXT,
+                document TEXT,
+                document_type TEXT,
+                phone TEXT,
+                whatsapp TEXT,
+                email TEXT,
+                zip TEXT,
+                address TEXT,
+                address_number TEXT,
+                complement TEXT,
+                district TEXT,
+                city TEXT,
+                state TEXT,
+                logo_url TEXT,
+                print_show_document INTEGER NOT NULL DEFAULT 1,
+                print_show_phone INTEGER NOT NULL DEFAULT 1,
+                print_show_whatsapp INTEGER NOT NULL DEFAULT 1,
+                print_show_address INTEGER NOT NULL DEFAULT 1,
+                print_show_email INTEGER NOT NULL DEFAULT 1,
+                receipt_footer TEXT,
+                pix_key TEXT,
+                pix_key_type TEXT,
+                pix_recipient_name TEXT,
+                pix_recipient_document TEXT,
+                pix_bank TEXT,
+                pix_enabled INTEGER NOT NULL DEFAULT 1,
+                debit_enabled INTEGER NOT NULL DEFAULT 1,
+                credit_enabled INTEGER NOT NULL DEFAULT 1,
+                store_credit_enabled INTEGER NOT NULL DEFAULT 1,
+                version INTEGER NOT NULL DEFAULT 1,
+                updated_by_id TEXT,
+                updated_by_name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_store_settings_updated ON store_settings(updated_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                theme TEXT NOT NULL DEFAULT 'system',
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                CHECK (theme IN ('light', 'dark', 'system'))
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_preferences_identity "
+            "ON user_preferences(store_id, user_id)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1068,6 +2133,9 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 store_id TEXT NOT NULL,
                 name TEXT NOT NULL,
+                normalized_name TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (store_id) REFERENCES stores(id)
             )
@@ -1075,11 +2143,19 @@ def init_db() -> None:
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_brands_store_name ON brands(store_id, name)")
         conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_brands_store_normalized_name "
+            "ON brands(store_id, normalized_name) "
+            "WHERE normalized_name IS NOT NULL AND normalized_name <> ''"
+        )
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS categories (
                 id TEXT PRIMARY KEY,
                 store_id TEXT NOT NULL,
                 name TEXT NOT NULL,
+                normalized_name TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (store_id) REFERENCES stores(id)
             )
@@ -1087,17 +2163,92 @@ def init_db() -> None:
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_store_name ON categories(store_id, name)")
         conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_store_normalized_name "
+            "ON categories(store_id, normalized_name) "
+            "WHERE normalized_name IS NOT NULL AND normalized_name <> ''"
+        )
+        conn.execute(
             """
             CREATE TABLE IF NOT EXISTS suppliers (
                 id TEXT PRIMARY KEY,
                 store_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 cnpj TEXT,
+                trade_name TEXT,
+                document_normalized TEXT,
                 phone TEXT,
+                whatsapp TEXT,
                 email TEXT,
+                zip TEXT,
                 address TEXT,
+                address_number TEXT,
+                district TEXT,
+                city TEXT,
+                state TEXT,
+                notes TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sizes (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                normalized_name TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS colors (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                normalized_name TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS expense_categories (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                normalized_name TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_status_history (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                supplier_id TEXT NOT NULL,
+                previous_status TEXT NOT NULL,
+                new_status TEXT NOT NULL,
+                reason TEXT,
+                user_id TEXT,
+                user_name TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
             )
             """
         )
@@ -1138,12 +2289,18 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 store_id TEXT NOT NULL,
                 barcode TEXT,
+                barcode_normalized TEXT,
                 name TEXT NOT NULL,
                 size TEXT,
                 color TEXT,
                 gender TEXT,
                 category_name TEXT,
                 brand_name TEXT,
+                brand_id TEXT,
+                category_id TEXT,
+                size_id TEXT,
+                color_id TEXT,
+                supplier_id TEXT,
                 stock INTEGER NOT NULL DEFAULT 0,
                 min_stock INTEGER NOT NULL DEFAULT 0,
                 description TEXT,
@@ -1151,6 +2308,8 @@ def init_db() -> None:
                 cost REAL NOT NULL DEFAULT 0,
                 price REAL NOT NULL DEFAULT 0,
                 photo TEXT,
+                created_at TEXT,
+                stock_entered_at TEXT,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (store_id) REFERENCES stores(id)
             )
@@ -1163,6 +2322,332 @@ def init_db() -> None:
             WHERE barcode IS NOT NULL AND barcode <> ''
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_entry_sequences (
+                store_id TEXT PRIMARY KEY,
+                next_number INTEGER NOT NULL DEFAULT 1 CHECK (next_number > 0),
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_entries (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                entry_number INTEGER NOT NULL CHECK (entry_number > 0),
+                supplier_id TEXT NOT NULL,
+                supplier_name TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'confirmed' CHECK (status = 'confirmed'),
+                total_quantity INTEGER NOT NULL CHECK (total_quantity > 0),
+                total_cost REAL NOT NULL CHECK (total_cost > 0),
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                user_id TEXT,
+                user_name TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_entry_items (
+                id TEXT PRIMARY KEY,
+                entry_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                barcode TEXT NOT NULL,
+                product_name TEXT NOT NULL,
+                brand_id TEXT,
+                brand_name TEXT,
+                category_id TEXT,
+                category_name TEXT,
+                size_id TEXT,
+                size_name TEXT,
+                color_id TEXT,
+                color_name TEXT,
+                supplier_id TEXT NOT NULL,
+                supplier_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                unit_cost REAL NOT NULL CHECK (unit_cost > 0),
+                total_cost REAL NOT NULL CHECK (total_cost > 0),
+                sale_price REAL NOT NULL CHECK (sale_price >= 0),
+                stock_before INTEGER NOT NULL CHECK (stock_before >= 0),
+                stock_after INTEGER NOT NULL,
+                FOREIGN KEY (entry_id) REFERENCES stock_entries(id) ON DELETE CASCADE,
+                FOREIGN KEY (product_id) REFERENCES products(id),
+                FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+                CHECK (stock_after = stock_before + quantity)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_movements (
+                id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                movement_type TEXT NOT NULL CHECK (movement_type = 'entry'),
+                direction TEXT NOT NULL CHECK (direction = 'in'),
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                balance_before INTEGER NOT NULL CHECK (balance_before >= 0),
+                balance_after INTEGER NOT NULL,
+                reference_type TEXT NOT NULL,
+                reference_id TEXT NOT NULL,
+                user_id TEXT,
+                user_name TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (product_id) REFERENCES products(id),
+                CHECK (balance_after = balance_before + quantity)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_entries_store_number "
+            "ON stock_entries(store_id, entry_number)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_products_store_barcode_normalized "
+            "ON products(store_id, barcode_normalized) "
+            "WHERE barcode_normalized IS NOT NULL AND barcode_normalized <> ''"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_entries_store_idempotency "
+            "ON stock_entries(store_id, idempotency_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_entries_store_created "
+            "ON stock_entries(store_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_entries_supplier "
+            "ON stock_entries(store_id, supplier_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_entry_items_entry "
+            "ON stock_entry_items(entry_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_entry_items_product "
+            "ON stock_entry_items(product_id, entry_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_movements_product_created "
+            "ON stock_movements(store_id, product_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_stock_movements_reference "
+            "ON stock_movements(reference_type, reference_id)"
+        )
+        # Purchase flow foreign keys need these legacy tables to exist first on PostgreSQL.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cash_movements (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL, direction TEXT NOT NULL,
+                type TEXT, description TEXT, method TEXT,
+                amount REAL NOT NULL DEFAULT 0, ref_id TEXT,
+                expense_category_id TEXT, created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payables (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL, supplier TEXT,
+                category TEXT NOT NULL, amount REAL NOT NULL DEFAULT 0,
+                issue_date TEXT, due_date TEXT NOT NULL, notes TEXT,
+                paid_amount REAL NOT NULL DEFAULT 0, fee REAL NOT NULL DEFAULT 0,
+                discount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending', paid_at TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                supplier_id TEXT, expense_category_id TEXT,
+                FOREIGN KEY (store_id) REFERENCES stores(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_entry_payables (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL, entry_id TEXT NOT NULL,
+                payable_id TEXT NOT NULL, created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (entry_id) REFERENCES stock_entries(id),
+                FOREIGN KEY (payable_id) REFERENCES payables(id),
+                UNIQUE (entry_id, payable_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_entry_cancellations (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL, entry_id TEXT NOT NULL,
+                reason TEXT NOT NULL, notes TEXT, idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL, response_json TEXT NOT NULL,
+                user_id TEXT, user_name TEXT, created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (entry_id) REFERENCES stock_entries(id),
+                UNIQUE (entry_id), UNIQUE (store_id, idempotency_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS purchase_stock_movements (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL, product_id TEXT NOT NULL,
+                movement_type TEXT NOT NULL, direction TEXT NOT NULL,
+                quantity INTEGER NOT NULL, balance_before INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL, reference_type TEXT NOT NULL,
+                reference_id TEXT NOT NULL, user_id TEXT, user_name TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (product_id) REFERENCES products(id),
+                CHECK (movement_type IN ('entry_cancellation', 'supplier_return', 'supplier_return_cancellation')),
+                CHECK (direction IN ('in', 'out')), CHECK (quantity > 0),
+                CHECK (balance_before >= 0), CHECK (balance_after >= 0)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_return_sequences (
+                store_id TEXT PRIMARY KEY, next_number INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (store_id) REFERENCES stores(id), CHECK (next_number > 0)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_returns (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL,
+                return_number INTEGER NOT NULL, entry_id TEXT NOT NULL,
+                supplier_id TEXT NOT NULL, supplier_name TEXT NOT NULL,
+                reason TEXT NOT NULL, notes TEXT, total_quantity INTEGER NOT NULL,
+                total_value REAL NOT NULL, pending_value REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'confirmed',
+                financial_status TEXT NOT NULL DEFAULT 'pending',
+                idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+                response_json TEXT NOT NULL, user_id TEXT, user_name TEXT,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (entry_id) REFERENCES stock_entries(id),
+                FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+                CHECK (return_number > 0), CHECK (total_quantity > 0),
+                CHECK (total_value > 0), CHECK (pending_value >= 0),
+                CHECK (status IN ('confirmed', 'cancelled')),
+                CHECK (financial_status IN ('pending', 'partial', 'settled'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_return_items (
+                id TEXT PRIMARY KEY, return_id TEXT NOT NULL,
+                entry_item_id TEXT NOT NULL, product_id TEXT NOT NULL,
+                product_name TEXT NOT NULL, barcode TEXT NOT NULL,
+                quantity INTEGER NOT NULL, unit_cost REAL NOT NULL,
+                total_cost REAL NOT NULL, stock_before INTEGER NOT NULL,
+                stock_after INTEGER NOT NULL,
+                FOREIGN KEY (return_id) REFERENCES supplier_returns(id),
+                FOREIGN KEY (entry_item_id) REFERENCES stock_entry_items(id),
+                FOREIGN KEY (product_id) REFERENCES products(id),
+                CHECK (quantity > 0), CHECK (unit_cost > 0),
+                CHECK (total_cost > 0), CHECK (stock_before >= 0),
+                CHECK (stock_after >= 0)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_credits (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL,
+                supplier_id TEXT NOT NULL, supplier_name TEXT NOT NULL,
+                return_id TEXT NOT NULL, original_amount REAL NOT NULL,
+                used_amount REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'available',
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+                FOREIGN KEY (return_id) REFERENCES supplier_returns(id),
+                CHECK (original_amount > 0), CHECK (used_amount >= 0),
+                CHECK (used_amount <= original_amount),
+                CHECK (status IN ('available', 'partially_used', 'used', 'reversed'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_return_allocations (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL,
+                return_id TEXT NOT NULL, allocation_type TEXT NOT NULL,
+                payable_id TEXT, credit_id TEXT, cash_movement_id TEXT,
+                amount REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (return_id) REFERENCES supplier_returns(id),
+                FOREIGN KEY (payable_id) REFERENCES payables(id),
+                FOREIGN KEY (credit_id) REFERENCES supplier_credits(id),
+                FOREIGN KEY (cash_movement_id) REFERENCES cash_movements(id),
+                CHECK (allocation_type IN ('payable_abatement', 'supplier_credit', 'cash_refund', 'pix_refund')),
+                CHECK (amount > 0), CHECK (status IN ('active', 'reversed'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_credit_usages (
+                id TEXT PRIMARY KEY, store_id TEXT NOT NULL,
+                supplier_id TEXT NOT NULL, payable_id TEXT NOT NULL,
+                amount REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                idempotency_key TEXT NOT NULL, request_hash TEXT NOT NULL,
+                response_json TEXT NOT NULL, user_id TEXT, user_name TEXT,
+                created_at TEXT NOT NULL, reversed_at TEXT,
+                FOREIGN KEY (store_id) REFERENCES stores(id),
+                FOREIGN KEY (supplier_id) REFERENCES suppliers(id),
+                FOREIGN KEY (payable_id) REFERENCES payables(id),
+                CHECK (amount > 0), CHECK (status IN ('active', 'reversed')),
+                UNIQUE (store_id, idempotency_key)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supplier_credit_allocations (
+                id TEXT PRIMARY KEY, usage_id TEXT NOT NULL, credit_id TEXT NOT NULL,
+                amount REAL NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (usage_id) REFERENCES supplier_credit_usages(id),
+                FOREIGN KEY (credit_id) REFERENCES supplier_credits(id),
+                CHECK (amount > 0), CHECK (status IN ('active', 'reversed'))
+            )
+            """
+        )
+        purchase_indexes = (
+            "CREATE INDEX IF NOT EXISTS idx_stock_entry_payables_entry ON stock_entry_payables(store_id, entry_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_entry_payables_payable ON stock_entry_payables(payable_id)",
+            "CREATE INDEX IF NOT EXISTS idx_purchase_stock_movements_reference ON purchase_stock_movements(reference_type, reference_id)",
+            "CREATE INDEX IF NOT EXISTS idx_purchase_stock_movements_product ON purchase_stock_movements(store_id, product_id, created_at)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_returns_store_number ON supplier_returns(store_id, return_number)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_supplier_returns_store_idempotency ON supplier_returns(store_id, idempotency_key)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_returns_entry ON supplier_returns(store_id, entry_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_returns_supplier ON supplier_returns(store_id, supplier_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_return_items_return ON supplier_return_items(return_id)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_return_items_entry_item ON supplier_return_items(entry_item_id)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_credits_supplier ON supplier_credits(store_id, supplier_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_credits_return ON supplier_credits(return_id)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_return_allocations_return ON supplier_return_allocations(return_id)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_return_allocations_payable ON supplier_return_allocations(payable_id)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_credit_usages_payable ON supplier_credit_usages(store_id, payable_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_credit_allocations_usage ON supplier_credit_allocations(usage_id)",
+            "CREATE INDEX IF NOT EXISTS idx_supplier_credit_allocations_credit ON supplier_credit_allocations(credit_id)",
+        )
+        for statement in purchase_indexes:
+            conn.execute(statement)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sales (
@@ -1229,6 +2714,7 @@ def init_db() -> None:
                 method TEXT,
                 amount REAL NOT NULL DEFAULT 0,
                 ref_id TEXT,
+                expense_category_id TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (store_id) REFERENCES stores(id)
             )
@@ -1237,6 +2723,10 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cash_store_created ON cash_movements(store_id, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cash_method ON cash_movements(method)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cash_ref ON cash_movements(ref_id)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cash_expense_category_id "
+            "ON cash_movements(store_id, expense_category_id)"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cash_closings (
@@ -1354,6 +2844,8 @@ def init_db() -> None:
                 paid_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                supplier_id TEXT,
+                expense_category_id TEXT,
                 FOREIGN KEY (store_id) REFERENCES stores(id)
             )
             """
@@ -1367,6 +2859,26 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_store_due ON payables(store_id, due_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_status ON payables(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_supplier ON payables(supplier)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_suppliers_store_status ON suppliers(store_id, status)")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_suppliers_store_document "
+            "ON suppliers(store_id, document_normalized) "
+            "WHERE document_normalized IS NOT NULL AND document_normalized <> ''"
+        )
+        for table_name in ("sizes", "colors", "expense_categories"):
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table_name}_store_normalized_name "
+                f"ON {table_name}(store_id, normalized_name) "
+                "WHERE normalized_name IS NOT NULL AND normalized_name <> ''"
+            )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_supplier_status_history_supplier ON supplier_status_history(store_id, supplier_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_brand_id ON products(store_id, brand_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(store_id, category_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_size_id ON products(store_id, size_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_color_id ON products(store_id, color_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_products_supplier_id ON products(store_id, supplier_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_supplier_id ON payables(store_id, supplier_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_payables_expense_category_id ON payables(store_id, expense_category_id)")
         row = conn.execute("SELECT data FROM app_state WHERE id = 1").fetchone()
         products_count = conn.execute("SELECT COUNT(*) AS total FROM products").fetchone()["total"]
         customers_count = conn.execute("SELECT COUNT(*) AS total FROM customers").fetchone()["total"]
@@ -1379,6 +2891,7 @@ def init_db() -> None:
                 sync_business_tables(conn, json.loads(row["data"]))
             except json.JSONDecodeError:
                 sync_business_tables(conn, default_state())
+        seed_default_expense_categories(conn)
 
 
 def create_initial_admin_user(conn: sqlite3.Connection, store_id: str = "matriz") -> bool:
@@ -1416,6 +2929,7 @@ def public_user(row: sqlite3.Row | dict) -> dict:
         "login": row["login"],
         "role": row["role"],
         "active": bool(row["active"]),
+        "blocked": bool(row_value(row, "blocked_at")),
     }
 
 
@@ -1539,8 +3053,59 @@ def sync_user_to_state(user: dict | None = None, deleted_id: str | None = None) 
     write_app_state_only(state)
 
 
+def customer_business_schema_available(conn) -> bool:
+    if USE_POSTGRES:
+        return True
+    customer_columns = {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(customers)").fetchall()
+    }
+    table_rows = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN ('customer_status_history', 'customer_credit_limit_history')
+        """
+    ).fetchall()
+    history_tables = {str(row["name"]) for row in table_rows}
+    return {
+        "address_number",
+        "state",
+        "notes",
+        "is_default",
+        "created_at",
+    }.issubset(customer_columns) and history_tables == {
+        "customer_status_history",
+        "customer_credit_limit_history",
+    }
+
+
+def state_catalog_items(state: dict, collection: str, store_id: str, prefix: str) -> list[dict]:
+    now = utc_now()
+    items: list[dict] = []
+    seen: set[str] = set()
+    for value in state.get(collection, []) or []:
+        source = value if isinstance(value, dict) else {"name": value}
+        name = " ".join(str(source.get("name", "") or "").split())
+        normalized = normalized_search_text(name)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append({
+            "id": str(source.get("id") or f"{store_id}:{prefix}:{normalized.replace(' ', '-')}"),
+            "name": name,
+            "normalizedName": normalized,
+            "status": str(source.get("status") or "active"),
+            "createdAt": str(source.get("createdAt") or source.get("updatedAt") or now),
+            "updatedAt": str(source.get("updatedAt") or now),
+        })
+    return items
+
+
 def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = "matriz") -> None:
     now = utc_now()
+    customer_business_schema = customer_business_schema_available(conn)
     conn.execute("DELETE FROM sale_return_items WHERE return_id IN (SELECT id FROM sale_returns WHERE store_id = ?)", (store_id,))
     conn.execute("DELETE FROM sale_returns WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM cash_closings WHERE store_id = ?", (store_id,))
@@ -1551,38 +3116,82 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
     conn.execute("DELETE FROM sale_payments WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)", (store_id,))
     conn.execute("DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)", (store_id,))
     conn.execute("DELETE FROM sales WHERE store_id = ?", (store_id,))
+    conn.execute(
+        "DELETE FROM stock_entry_items WHERE entry_id IN "
+        "(SELECT id FROM stock_entries WHERE store_id = ?)",
+        (store_id,),
+    )
+    conn.execute("DELETE FROM stock_movements WHERE store_id = ?", (store_id,))
+    conn.execute("DELETE FROM stock_entries WHERE store_id = ?", (store_id,))
+    conn.execute("DELETE FROM stock_entry_sequences WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM products WHERE store_id = ?", (store_id,))
+    if customer_business_schema:
+        conn.execute("DELETE FROM customer_status_history WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM customer_credit_limit_history WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM customers WHERE store_id = ?", (store_id,))
+    conn.execute("DELETE FROM supplier_status_history WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM suppliers WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM brands WHERE store_id = ?", (store_id,))
     conn.execute("DELETE FROM categories WHERE store_id = ?", (store_id,))
+    conn.execute("DELETE FROM sizes WHERE store_id = ?", (store_id,))
+    conn.execute("DELETE FROM colors WHERE store_id = ?", (store_id,))
+    conn.execute("DELETE FROM expense_categories WHERE store_id = ?", (store_id,))
 
-    for name in sorted({item for item in state.get("brands", []) if item}):
-        conn.execute(
-            "INSERT INTO brands (id, store_id, name, updated_at) VALUES (?, ?, ?, ?)",
-            (f"{store_id}:brand:{name.casefold()}", store_id, name, now),
-        )
-
-    for name in sorted({item for item in state.get("categories", []) if item}):
-        conn.execute(
-            "INSERT INTO categories (id, store_id, name, updated_at) VALUES (?, ?, ?, ?)",
-            (f"{store_id}:category:{name.casefold()}", store_id, name, now),
-        )
+    for collection, table, prefix in (
+        ("brands", "brands", "brand"),
+        ("categories", "categories", "category"),
+        ("sizes", "sizes", "size"),
+        ("colors", "colors", "color"),
+        ("expenseCategories", "expense_categories", "expense-category"),
+    ):
+        for item in state_catalog_items(state, collection, store_id, prefix):
+            conn.execute(
+                f"""
+                INSERT INTO {table} (
+                    id, store_id, name, normalized_name, status, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["id"],
+                    store_id,
+                    item["name"],
+                    item["normalizedName"],
+                    item["status"],
+                    item["createdAt"],
+                    item["updatedAt"],
+                ),
+            )
 
     for supplier in state.get("suppliers", []):
         conn.execute(
             """
-            INSERT INTO suppliers (id, store_id, name, cnpj, phone, email, address, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO suppliers (
+                id, store_id, name, cnpj, trade_name, document_normalized, phone,
+                whatsapp, email, zip, address, address_number, district, city,
+                state, notes, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 supplier.get("id"),
                 store_id,
                 supplier.get("name", ""),
-                supplier.get("cnpj", ""),
+                digits_only(supplier.get("document", supplier.get("cnpj", ""))),
+                supplier.get("tradeName", ""),
+                digits_only(supplier.get("document", supplier.get("cnpj", ""))) or None,
                 supplier.get("phone", ""),
+                supplier.get("whatsapp", ""),
                 supplier.get("email", ""),
+                digits_only(supplier.get("zip", "")),
                 supplier.get("address", ""),
+                supplier.get("addressNumber", ""),
+                supplier.get("district", ""),
+                supplier.get("city", ""),
+                supplier.get("state", ""),
+                supplier.get("notes", ""),
+                supplier.get("status", "active"),
+                supplier.get("createdAt", supplier.get("updatedAt", now)),
                 supplier.get("updatedAt", now),
             ),
         )
@@ -1690,9 +3299,10 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
         conn.execute(
             """
             INSERT INTO cash_movements (
-                id, store_id, direction, type, description, method, amount, ref_id, created_at
+                id, store_id, direction, type, description, method, amount,
+                ref_id, expense_category_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement.get("id"),
@@ -1703,6 +3313,7 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
                 movement.get("method", ""),
                 float(movement.get("amount") or 0),
                 movement.get("refId", ""),
+                movement.get("expenseCategoryId") or None,
                 movement.get("createdAt", now),
             ),
         )
@@ -1788,9 +3399,10 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
             """
             INSERT INTO payables (
                 id, store_id, supplier, category, amount, issue_date, due_date,
-                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at
+                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at,
+                supplier_id, expense_category_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payable.get("id"),
@@ -1808,17 +3420,50 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
                 payable.get("paidAt", ""),
                 payable.get("createdAt", now),
                 payable.get("updatedAt", payable.get("paidAt", payable.get("createdAt", now))),
+                payable.get("supplierId") or None,
+                payable.get("expenseCategoryId") or None,
             ),
         )
 
+    ensure_default_customer_in_state(state, store_id)
     for customer in state.get("customers", []):
+        if not customer_business_schema:
+            conn.execute(
+                """
+                INSERT INTO customers (
+                    id, store_id, code, name, cpf, rg, birth, whatsapp, email,
+                    address, city, district, zip, credit_limit, status, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    customer.get("id"),
+                    store_id,
+                    customer.get("code", ""),
+                    customer.get("name", ""),
+                    customer.get("cpf", ""),
+                    customer.get("rg", ""),
+                    customer.get("birth", ""),
+                    customer.get("whatsapp", ""),
+                    customer.get("email", ""),
+                    customer.get("address", ""),
+                    customer.get("city", ""),
+                    customer.get("district", ""),
+                    customer.get("zip", ""),
+                    float(customer.get("limit") or 0),
+                    customer.get("status", "active"),
+                    customer.get("updatedAt") or now,
+                ),
+            )
+            continue
         conn.execute(
             """
             INSERT INTO customers (
                 id, store_id, code, name, cpf, rg, birth, whatsapp, email, address,
-                city, district, zip, credit_limit, status, updated_at
+                city, district, zip, credit_limit, status, updated_at,
+                address_number, state, notes, is_default, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 customer.get("id"),
@@ -1837,6 +3482,11 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
                 float(customer.get("limit") or 0),
                 customer.get("status", "active"),
                 customer.get("updatedAt", now),
+                customer.get("addressNumber", ""),
+                customer.get("state", ""),
+                customer.get("notes", ""),
+                1 if customer.get("isDefault") else 0,
+                customer.get("createdAt", customer.get("updatedAt", now)),
             ),
         )
 
@@ -1844,15 +3494,19 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
         conn.execute(
             """
             INSERT INTO products (
-                id, store_id, barcode, name, size, color, gender, category_name, brand_name,
-                stock, min_stock, description, active, cost, price, photo, updated_at
+                id, store_id, barcode, barcode_normalized, name, size, color, gender,
+                category_name, brand_name,
+                stock, min_stock, description, active, cost, price, photo, updated_at,
+                brand_id, category_id, size_id, color_id, supplier_id,
+                created_at, stock_entered_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 product.get("id"),
                 store_id,
                 product.get("barcode", ""),
+                normalize_product_code(product.get("barcode", "")),
                 product.get("name", ""),
                 product.get("size", ""),
                 product.get("color", ""),
@@ -1867,7 +3521,138 @@ def sync_business_tables(conn: sqlite3.Connection, state: dict, store_id: str = 
                 float(product.get("price") or 0),
                 product.get("photo", ""),
                 product.get("updatedAt", now),
+                product.get("brandId") or None,
+                product.get("categoryId") or None,
+                product.get("sizeId") or None,
+                product.get("colorId") or None,
+                product.get("supplierId") or None,
+                product.get("createdAt") or None,
+                product.get("stockEnteredAt") or None,
             ),
+        )
+
+    products_by_id = {
+        str(product.get("id", "")): product
+        for product in state.get("products", [])
+        if isinstance(product, dict)
+    }
+    movements_by_entry = {
+        str(movement.get("referenceId", "")): movement
+        for movement in state.get("stockMovements", [])
+        if isinstance(movement, dict)
+    }
+    highest_entry_number = 0
+    for entry in state.get("stockEntries", []):
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        items = [item for item in entry.get("items", []) if isinstance(item, dict)]
+        if not items:
+            continue
+        entry_number = int(entry.get("entryNumber") or 0)
+        if entry_number <= 0:
+            continue
+        highest_entry_number = max(highest_entry_number, entry_number)
+        movement = movements_by_entry.get(str(entry.get("id", "")), {})
+        product = products_by_id.get(str(items[0].get("productId", "")), {})
+        response = {"product": product, "entry": entry, "movement": movement}
+        request_hash = hashlib.sha256(
+            json.dumps(entry, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        conn.execute(
+            """
+            INSERT INTO stock_entries (
+                id, store_id, entry_number, supplier_id, supplier_name, status,
+                total_quantity, total_cost, idempotency_key, request_hash,
+                response_json, user_id, user_name, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry.get("id"),
+                store_id,
+                entry_number,
+                entry.get("supplierId"),
+                entry.get("supplier", ""),
+                int(entry.get("totalQuantity") or 0),
+                float(entry.get("totalCost") or 0),
+                f"import:{entry.get('id')}",
+                request_hash,
+                json.dumps(response, ensure_ascii=False, sort_keys=True),
+                entry.get("userId", ""),
+                entry.get("userName", ""),
+                entry.get("createdAt", now),
+                entry.get("updatedAt", entry.get("createdAt", now)),
+            ),
+        )
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO stock_entry_items (
+                    id, entry_id, product_id, barcode, product_name, brand_id,
+                    brand_name, category_id, category_name, size_id, size_name,
+                    color_id, color_name, supplier_id, supplier_name, quantity,
+                    unit_cost, total_cost, sale_price, stock_before, stock_after
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.get("id") or os.urandom(16).hex(),
+                    entry.get("id"),
+                    item.get("productId"),
+                    item.get("barcode", ""),
+                    item.get("productName", item.get("name", "")),
+                    item.get("brandId") or None,
+                    item.get("brand", ""),
+                    item.get("categoryId") or None,
+                    item.get("category", ""),
+                    item.get("sizeId") or None,
+                    item.get("size", ""),
+                    item.get("colorId") or None,
+                    item.get("color", ""),
+                    item.get("supplierId"),
+                    item.get("supplier", ""),
+                    int(item.get("quantity") or 0),
+                    float(item.get("unitCost") or 0),
+                    float(item.get("totalCost") or 0),
+                    float(item.get("salePrice") or 0),
+                    int(item.get("stockBefore") or 0),
+                    int(item.get("stockAfter") or 0),
+                ),
+            )
+    for movement in state.get("stockMovements", []):
+        if not isinstance(movement, dict) or not movement.get("id"):
+            continue
+        conn.execute(
+            """
+            INSERT INTO stock_movements (
+                id, store_id, product_id, movement_type, direction, quantity,
+                balance_before, balance_after, reference_type, reference_id,
+                user_id, user_name, created_at
+            )
+            VALUES (?, ?, ?, 'entry', 'in', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                movement.get("id"),
+                store_id,
+                movement.get("productId"),
+                int(movement.get("quantity") or 0),
+                int(movement.get("balanceBefore") or 0),
+                int(movement.get("balanceAfter") or 0),
+                movement.get("referenceType", "stock_entry"),
+                movement.get("referenceId", ""),
+                movement.get("userId", ""),
+                movement.get("userName", ""),
+                movement.get("createdAt", now),
+            ),
+        )
+    if highest_entry_number:
+        conn.execute(
+            """
+            INSERT INTO stock_entry_sequences (store_id, next_number)
+            VALUES (?, ?)
+            ON CONFLICT(store_id) DO UPDATE SET next_number = excluded.next_number
+            """,
+            (store_id, highest_entry_number + 1),
         )
 
 
@@ -1939,6 +3724,30 @@ def stored_app_state_from_connection(conn) -> dict:
     return value if isinstance(value, dict) else default_state()
 
 
+def database_table_exists(conn, table_name: str) -> bool:
+    if table_name not in REQUIRED_SCHEMA_TABLES:
+        return False
+    if USE_POSTGRES:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public' AND table_name = ?
+            """,
+            (table_name,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            """,
+            (table_name,),
+        ).fetchone()
+    return row is not None
+
+
 def prepare_state_for_storage(conn, state: dict, store_id: str = "matriz") -> dict:
     existing_state = stored_app_state_from_connection(conn)
     legacy_users = existing_state.get("users") if isinstance(existing_state.get("users"), list) else []
@@ -1973,6 +3782,9 @@ def reset_business_data(store_id: str = "matriz") -> tuple[str, dict]:
         conn.execute("PRAGMA foreign_keys = ON")
         users = users_state_from_db(conn, store_id)
         empty_state = prepare_state_for_storage(conn, {**default_state(), "users": users}, store_id)
+        ensure_default_customer_in_state(empty_state, store_id)
+        if database_table_exists(conn, "generated_documents"):
+            conn.execute("DELETE FROM generated_documents WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM sale_return_items WHERE return_id IN (SELECT id FROM sale_returns WHERE store_id = ?)", (store_id,))
         conn.execute("DELETE FROM sale_returns WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM cash_closings WHERE store_id = ?", (store_id,))
@@ -1984,10 +3796,40 @@ def reset_business_data(store_id: str = "matriz") -> tuple[str, dict]:
         conn.execute("DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)", (store_id,))
         conn.execute("DELETE FROM sales WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM products WHERE store_id = ?", (store_id,))
+        customer_business_schema = customer_business_schema_available(conn)
+        if customer_business_schema:
+            conn.execute("DELETE FROM customer_status_history WHERE store_id = ?", (store_id,))
+            conn.execute("DELETE FROM customer_credit_limit_history WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM customers WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM supplier_status_history WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM suppliers WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM brands WHERE store_id = ?", (store_id,))
         conn.execute("DELETE FROM categories WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM sizes WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM colors WHERE store_id = ?", (store_id,))
+        conn.execute("DELETE FROM expense_categories WHERE store_id = ?", (store_id,))
+        seed_default_expense_categories(conn, store_id)
+        empty_state["expenseCategories"] = catalog_rows(conn, "expense-categories", store_id)
+        if customer_business_schema:
+            upsert_customer(conn, default_customer_record(updated_at, store_id), store_id)
+        else:
+            default_customer = default_customer_record(updated_at, store_id)
+            conn.execute(
+                """
+                INSERT INTO customers (
+                    id, store_id, code, name, cpf, rg, birth, whatsapp, email,
+                    address, city, district, zip, credit_limit, status, updated_at
+                )
+                VALUES (?, ?, ?, ?, '', '', '', '', '', '', '', '', '', 0, 'active', ?)
+                """,
+                (
+                    default_customer["id"],
+                    store_id,
+                    default_customer["code"],
+                    default_customer["name"],
+                    updated_at,
+                ),
+            )
         conn.execute(
             """
             INSERT INTO app_state (id, data, updated_at)
@@ -2019,25 +3861,87 @@ def reset_business_data(store_id: str = "matriz") -> tuple[str, dict]:
     }
 
 
+def normalize_product_code(value) -> str:
+    return str(value or "").strip().upper()
+
+
+PRODUCT_SELECT = """
+    SELECT id, barcode, barcode_normalized AS "barcodeNormalized", name, size,
+           size_id AS "sizeId", color, color_id AS "colorId", gender,
+           category_name AS category, category_id AS "categoryId",
+           brand_name AS brand, brand_id AS "brandId",
+           COALESCE(
+               (SELECT name FROM suppliers WHERE suppliers.id = products.supplier_id),
+               ''
+           ) AS supplier,
+           supplier_id AS "supplierId", stock, min_stock AS "minStock",
+           description, active, cost, price, photo,
+           created_at AS "createdAt", stock_entered_at AS "stockEnteredAt",
+           updated_at AS "updatedAt"
+    FROM products
+"""
+
+
+def product_number_input(value):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return value
+    return numeric if math.isfinite(numeric) else value
+
+
+def product_integer_input(value):
+    numeric = product_number_input(value)
+    if isinstance(numeric, float) and numeric.is_integer():
+        return int(numeric)
+    return numeric
+
+
 def normalize_product_payload(payload: dict, existing: dict | None = None) -> dict:
     now = utc_now()
     existing = existing or {}
+    barcode = normalize_product_code(payload.get("barcode", existing.get("barcode", "")))
     return {
         "id": payload.get("id") or existing.get("id") or os.urandom(16).hex(),
-        "barcode": str(payload.get("barcode", existing.get("barcode", ""))).strip(),
+        "barcode": barcode,
+        "barcodeNormalized": barcode,
         "name": str(payload.get("name", existing.get("name", ""))).strip(),
         "size": str(payload.get("size", existing.get("size", ""))).strip(),
+        "sizeId": str(payload.get("sizeId", existing.get("sizeId", "")) or "").strip(),
         "color": str(payload.get("color", existing.get("color", ""))).strip(),
+        "colorId": str(payload.get("colorId", existing.get("colorId", "")) or "").strip(),
         "gender": str(payload.get("gender", existing.get("gender", ""))).strip(),
         "category": str(payload.get("category", existing.get("category", ""))).strip(),
+        "categoryId": str(
+            payload.get("categoryId", existing.get("categoryId", "")) or ""
+        ).strip(),
         "brand": str(payload.get("brand", existing.get("brand", ""))).strip(),
-        "stock": max(0, int(float(payload.get("stock", existing.get("stock", 0)) or 0))),
-        "minStock": max(0, int(float(payload.get("minStock", existing.get("minStock", 0)) or 0))),
+        "brandId": str(payload.get("brandId", existing.get("brandId", "")) or "").strip(),
+        "supplier": str(payload.get("supplier", existing.get("supplier", "")) or "").strip(),
+        "supplierId": str(
+            payload.get("supplierId", existing.get("supplierId", "")) or ""
+        ).strip(),
+        "stock": product_integer_input(
+            payload.get("stock", existing.get("stock", 0))
+        ),
+        "minStock": product_integer_input(
+            payload.get("minStock", existing.get("minStock", 0))
+        ),
         "description": str(payload.get("description", existing.get("description", ""))).strip(),
         "active": bool(payload.get("active", existing.get("active", True))),
-        "cost": float(payload.get("cost", existing.get("cost", 0)) or 0),
-        "price": float(payload.get("price", existing.get("price", 0)) or 0),
+        "cost": product_number_input(
+            payload.get("cost", existing.get("cost", 0))
+        ),
+        "price": product_number_input(
+            payload.get("price", existing.get("price", 0))
+        ),
         "photo": payload.get("photo", existing.get("photo", "")) or "",
+        "createdAt": existing.get("createdAt") or payload.get("createdAt") or now,
+        "stockEnteredAt": (
+            existing.get("stockEnteredAt")
+            or payload.get("stockEnteredAt")
+            or ""
+        ),
         "updatedAt": now,
     }
 
@@ -2047,19 +3951,448 @@ def validate_product(product: dict) -> str | None:
         return "Código de barras é obrigatório."
     if not product["name"]:
         return "Nome do produto é obrigatório."
+    if product["gender"] and product["gender"] not in CONTROLLED_GENDERS:
+        return "Gênero do produto é inválido."
     return None
 
 
+ROLE_PERMISSION_MATRIX = (
+    {"module": "dashboard", "label": "Dashboard", "admin": True, "operator": True},
+    {"module": "sales", "label": "Vendas, trocas e condicionais", "admin": True, "operator": True},
+    {"module": "stock", "label": "Estoque e inventario", "admin": True, "operator": True},
+    {"module": "customers", "label": "Clientes e crediario", "admin": True, "operator": True},
+    {"module": "finance", "label": "Caixa e contas a pagar", "admin": True, "operator": True},
+    {"module": "reports", "label": "Relatorios operacionais", "admin": True, "operator": True},
+    {"module": "users", "label": "Gestao de usuarios", "admin": True, "operator": False},
+    {"module": "settings", "label": "Configuracoes da loja", "admin": True, "operator": False},
+    {"module": "sensitiveIndicators", "label": "Lucro e valor financeiro do estoque", "admin": True, "operator": False},
+)
+
+
+def row_value(row, key: str, default=None):
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def default_store_settings(name: str = "Mova Sports") -> dict:
+    return {
+        "storeName": str(name or "").strip() or "Mova Sports",
+        "legalName": "",
+        "tradeName": "",
+        "document": "",
+        "documentType": "",
+        "phone": "",
+        "whatsapp": "",
+        "email": "",
+        "zip": "",
+        "address": "",
+        "addressNumber": "",
+        "complement": "",
+        "district": "",
+        "city": "",
+        "state": "",
+        "logoUrl": "",
+        "printPreferences": {
+            "showDocument": True,
+            "showPhone": True,
+            "showWhatsapp": True,
+            "showAddress": True,
+            "showEmail": True,
+        },
+        "receiptFooter": "",
+        "pix": {
+            "key": "",
+            "keyType": "",
+            "recipientName": "",
+            "recipientDocument": "",
+            "bank": "",
+        },
+        "paymentMethods": {
+            "cash": True,
+            "pix": True,
+            "debit": True,
+            "credit": True,
+            "storeCredit": True,
+        },
+        "version": 0,
+        "updatedAt": "",
+    }
+
+
+def store_settings_from_row(store_row, settings_row) -> dict:
+    settings = default_store_settings(row_value(store_row, "name", "Mova Sports"))
+    if not settings_row:
+        return settings
+    settings.update({
+        "legalName": str(row_value(settings_row, "legal_name", "") or ""),
+        "tradeName": str(row_value(settings_row, "trade_name", "") or ""),
+        "document": str(row_value(settings_row, "document", "") or ""),
+        "documentType": str(row_value(settings_row, "document_type", "") or ""),
+        "phone": str(row_value(settings_row, "phone", "") or ""),
+        "whatsapp": str(row_value(settings_row, "whatsapp", "") or ""),
+        "email": str(row_value(settings_row, "email", "") or ""),
+        "zip": str(row_value(settings_row, "zip", "") or ""),
+        "address": str(row_value(settings_row, "address", "") or ""),
+        "addressNumber": str(row_value(settings_row, "address_number", "") or ""),
+        "complement": str(row_value(settings_row, "complement", "") or ""),
+        "district": str(row_value(settings_row, "district", "") or ""),
+        "city": str(row_value(settings_row, "city", "") or ""),
+        "state": str(row_value(settings_row, "state", "") or ""),
+        "logoUrl": str(row_value(settings_row, "logo_url", "") or ""),
+        "receiptFooter": str(row_value(settings_row, "receipt_footer", "") or ""),
+        "version": int(row_value(settings_row, "version", 0) or 0),
+        "updatedAt": str(row_value(settings_row, "updated_at", "") or ""),
+    })
+    settings["printPreferences"] = {
+        "showDocument": bool(row_value(settings_row, "print_show_document", 1)),
+        "showPhone": bool(row_value(settings_row, "print_show_phone", 1)),
+        "showWhatsapp": bool(row_value(settings_row, "print_show_whatsapp", 1)),
+        "showAddress": bool(row_value(settings_row, "print_show_address", 1)),
+        "showEmail": bool(row_value(settings_row, "print_show_email", 1)),
+    }
+    settings["pix"] = {
+        "key": str(row_value(settings_row, "pix_key", "") or ""),
+        "keyType": str(row_value(settings_row, "pix_key_type", "") or ""),
+        "recipientName": str(row_value(settings_row, "pix_recipient_name", "") or ""),
+        "recipientDocument": str(row_value(settings_row, "pix_recipient_document", "") or ""),
+        "bank": str(row_value(settings_row, "pix_bank", "") or ""),
+    }
+    settings["paymentMethods"] = {
+        "cash": True,
+        "pix": bool(row_value(settings_row, "pix_enabled", 1)),
+        "debit": bool(row_value(settings_row, "debit_enabled", 1)),
+        "credit": bool(row_value(settings_row, "credit_enabled", 1)),
+        "storeCredit": bool(row_value(settings_row, "store_credit_enabled", 1)),
+    }
+    return settings
+
+
+def fetch_store_settings(conn, store_id: str = "matriz", lock: bool = False) -> dict:
+    store_row = conn.execute("SELECT id, name FROM stores WHERE id = ?", (store_id,)).fetchone()
+    lock_clause = " FOR UPDATE" if USE_POSTGRES and lock else ""
+    settings_row = conn.execute(
+        f"SELECT * FROM store_settings WHERE store_id = ?{lock_clause}",
+        (store_id,),
+    ).fetchone()
+    return store_settings_from_row(store_row, settings_row)
+
+
+def normalize_store_settings_payload(payload: dict, current: dict) -> dict:
+    print_payload = payload.get("printPreferences")
+    print_payload = print_payload if isinstance(print_payload, dict) else {}
+    pix_payload = payload.get("pix")
+    pix_payload = pix_payload if isinstance(pix_payload, dict) else {}
+    payment_payload = payload.get("paymentMethods")
+    payment_payload = payment_payload if isinstance(payment_payload, dict) else {}
+
+    def text_value(key: str, fallback: str = "") -> str:
+        return " ".join(str(payload.get(key, fallback) or "").split())
+
+    normalized = {
+        "storeName": text_value("storeName", current["storeName"]),
+        "legalName": text_value("legalName", current["legalName"]),
+        "tradeName": text_value("tradeName", current["tradeName"]),
+        "document": digits_only(payload.get("document", current["document"])),
+        "phone": str(payload.get("phone", current["phone"]) or "").strip(),
+        "whatsapp": str(payload.get("whatsapp", current["whatsapp"]) or "").strip(),
+        "email": str(payload.get("email", current["email"]) or "").strip().lower(),
+        "zip": digits_only(payload.get("zip", current["zip"])),
+        "address": text_value("address", current["address"]),
+        "addressNumber": str(payload.get("addressNumber", current["addressNumber"]) or "").strip(),
+        "complement": text_value("complement", current["complement"]),
+        "district": text_value("district", current["district"]),
+        "city": text_value("city", current["city"]),
+        "state": str(payload.get("state", current["state"]) or "").strip().upper(),
+        "logoUrl": current["logoUrl"],
+        "receiptFooter": str(payload.get("receiptFooter", current["receiptFooter"]) or "").strip(),
+        "printPreferences": {
+            key: bool(print_payload.get(key, current["printPreferences"][key]))
+            for key in ("showDocument", "showPhone", "showWhatsapp", "showAddress", "showEmail")
+        },
+        "pix": {
+            "key": str(pix_payload.get("key", current["pix"]["key"]) or "").strip(),
+            "keyType": str(pix_payload.get("keyType", current["pix"]["keyType"]) or "").strip(),
+            "recipientName": " ".join(str(pix_payload.get("recipientName", current["pix"]["recipientName"]) or "").split()),
+            "recipientDocument": digits_only(pix_payload.get("recipientDocument", current["pix"]["recipientDocument"])),
+            "bank": " ".join(str(pix_payload.get("bank", current["pix"]["bank"]) or "").split()),
+        },
+        "paymentMethods": {
+            "cash": True,
+            **{
+                key: bool(payment_payload.get(key, current["paymentMethods"][key]))
+                for key in ("pix", "debit", "credit", "storeCredit")
+            },
+        },
+    }
+    document = normalized["document"]
+    normalized["documentType"] = "cpf" if len(document) == 11 else "cnpj" if len(document) == 14 else ""
+    return normalized
+
+
+def validate_store_settings(settings: dict) -> str | None:
+    if not settings["storeName"]:
+        return "Nome da loja e obrigatorio."
+    if len(settings["storeName"]) > 120:
+        return "Nome da loja deve ter no maximo 120 caracteres."
+    if settings["document"] and not valid_cpf_or_cnpj(settings["document"]):
+        return "CPF/CNPJ da loja e invalido."
+    if not valid_email(settings["email"]):
+        return "E-mail da loja e invalido."
+    if settings["zip"] and len(settings["zip"]) != 8:
+        return "CEP deve possuir 8 digitos."
+    if settings["state"] and (len(settings["state"]) != 2 or not settings["state"].isalpha()):
+        return "Estado deve ser informado pela sigla com 2 letras."
+    if len(settings["receiptFooter"]) > 300:
+        return "Rodape do comprovante deve ter no maximo 300 caracteres."
+    key_type = settings["pix"]["keyType"]
+    if key_type not in {"", "cpf", "cnpj", "email", "phone", "random"}:
+        return "Tipo de chave Pix invalido."
+    recipient_document = settings["pix"]["recipientDocument"]
+    if recipient_document and not valid_cpf_or_cnpj(recipient_document):
+        return "CPF/CNPJ do favorecido Pix e invalido."
+    return None
+
+
+def store_settings_audit_changes(current: dict, updated: dict) -> dict:
+    changes = {}
+    for key in (
+        "storeName", "legalName", "tradeName", "document", "phone", "whatsapp",
+        "email", "zip", "address", "addressNumber", "complement", "district",
+        "city", "state", "receiptFooter", "printPreferences", "pix", "paymentMethods",
+    ):
+        if current.get(key) != updated.get(key):
+            changes[key] = {"before": current.get(key), "after": updated.get(key)}
+    return changes
+
+
+def persist_store_settings(payload: dict, user: dict, store_id: str = "matriz") -> dict:
+    expected_version = payload.get("expectedVersion")
+    if isinstance(expected_version, bool):
+        raise ValueError("Versao de configuracao invalida.")
+    try:
+        expected_version = int(expected_version)
+    except (TypeError, ValueError):
+        raise ValueError("Informe a versao atual das configuracoes.")
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        current = fetch_store_settings(conn, store_id, lock=True)
+        if current["version"] != expected_version:
+            raise RuntimeError("CONFIGURATION_VERSION_CONFLICT")
+        updated = normalize_store_settings_payload(payload, current)
+        validation_error = validate_store_settings(updated)
+        if validation_error:
+            raise ValueError(validation_error)
+        changes = store_settings_audit_changes(current, updated)
+        if not changes:
+            return current
+        now = utc_now()
+        next_version = current["version"] + 1
+        conn.execute("UPDATE stores SET name = ? WHERE id = ?", (updated["storeName"], store_id))
+        conn.execute(
+            """
+            INSERT INTO store_settings (
+                store_id, legal_name, trade_name, document, document_type,
+                phone, whatsapp, email, zip, address, address_number, complement,
+                district, city, state, logo_url,
+                print_show_document, print_show_phone, print_show_whatsapp,
+                print_show_address, print_show_email, receipt_footer,
+                pix_key, pix_key_type, pix_recipient_name, pix_recipient_document, pix_bank,
+                pix_enabled, debit_enabled, credit_enabled, store_credit_enabled,
+                version, updated_by_id, updated_by_name, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(store_id) DO UPDATE SET
+                legal_name = excluded.legal_name, trade_name = excluded.trade_name,
+                document = excluded.document, document_type = excluded.document_type,
+                phone = excluded.phone, whatsapp = excluded.whatsapp, email = excluded.email,
+                zip = excluded.zip, address = excluded.address, address_number = excluded.address_number,
+                complement = excluded.complement, district = excluded.district,
+                city = excluded.city, state = excluded.state, logo_url = excluded.logo_url,
+                print_show_document = excluded.print_show_document,
+                print_show_phone = excluded.print_show_phone,
+                print_show_whatsapp = excluded.print_show_whatsapp,
+                print_show_address = excluded.print_show_address,
+                print_show_email = excluded.print_show_email,
+                receipt_footer = excluded.receipt_footer, pix_key = excluded.pix_key,
+                pix_key_type = excluded.pix_key_type,
+                pix_recipient_name = excluded.pix_recipient_name,
+                pix_recipient_document = excluded.pix_recipient_document,
+                pix_bank = excluded.pix_bank, pix_enabled = excluded.pix_enabled,
+                debit_enabled = excluded.debit_enabled, credit_enabled = excluded.credit_enabled,
+                store_credit_enabled = excluded.store_credit_enabled,
+                version = excluded.version, updated_by_id = excluded.updated_by_id,
+                updated_by_name = excluded.updated_by_name, updated_at = excluded.updated_at
+            """,
+            (
+                store_id, updated["legalName"], updated["tradeName"], updated["document"],
+                updated["documentType"], updated["phone"], updated["whatsapp"], updated["email"],
+                updated["zip"], updated["address"], updated["addressNumber"], updated["complement"],
+                updated["district"], updated["city"], updated["state"], updated["logoUrl"],
+                int(updated["printPreferences"]["showDocument"]),
+                int(updated["printPreferences"]["showPhone"]),
+                int(updated["printPreferences"]["showWhatsapp"]),
+                int(updated["printPreferences"]["showAddress"]),
+                int(updated["printPreferences"]["showEmail"]),
+                updated["receiptFooter"], updated["pix"]["key"], updated["pix"]["keyType"],
+                updated["pix"]["recipientName"], updated["pix"]["recipientDocument"],
+                updated["pix"]["bank"], int(updated["paymentMethods"]["pix"]),
+                int(updated["paymentMethods"]["debit"]), int(updated["paymentMethods"]["credit"]),
+                int(updated["paymentMethods"]["storeCredit"]), next_version,
+                user.get("id", ""), user.get("name", ""), now, now,
+            ),
+        )
+        record_audit(
+            "update",
+            "store_settings",
+            store_id,
+            {"versionBefore": current["version"], "versionAfter": next_version, "changes": changes},
+            conn,
+        )
+        updated.update({"version": next_version, "updatedAt": now})
+        return updated
+
+
+def payment_method_availability(conn, store_id: str = "matriz") -> dict:
+    return fetch_store_settings(conn, store_id)["paymentMethods"]
+
+
+def register_persisted_login_failure(user_id: str) -> bool:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT failed_login_attempts, blocked_at
+            FROM users
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            ("matriz", user_id),
+        ).fetchone()
+        if not row:
+            return False
+        attempts = int(row["failed_login_attempts"] or 0) + 1
+        blocked_at = row["blocked_at"] or (utc_now() if attempts >= 5 else None)
+        conn.execute(
+            """
+            UPDATE users
+            SET failed_login_attempts = ?, blocked_at = ?, updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (attempts, blocked_at, utc_now(), "matriz", user_id),
+        )
+        if blocked_at and not row["blocked_at"]:
+            record_audit(
+                "block",
+                "auth",
+                user_id,
+                {"reason": "five_consecutive_failures", "attempts": attempts},
+                conn,
+            )
+        return bool(blocked_at)
+
+
+def register_successful_login(user_id: str) -> None:
+    with connect_db() as conn:
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE users
+            SET failed_login_attempts = 0, blocked_at = NULL,
+                last_login_at = ?, updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (now, now, "matriz", user_id),
+        )
+
+
+def active_admin_count(conn, excluding_user_id: str = "") -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM users
+        WHERE store_id = ? AND role = 'admin' AND active = 1
+          AND id <> ?
+        """,
+        ("matriz", excluding_user_id),
+    ).fetchone()
+    return int(row["total"] or 0)
+
+
+def user_preference_from_row(row) -> dict:
+    return {
+        "theme": str(row_value(row, "theme", "system") or "system"),
+        "version": int(row_value(row, "version", 0) or 0),
+        "updatedAt": str(row_value(row, "updated_at", "") or ""),
+    }
+
+
+def resolve_product_catalog_links(conn, product: dict, store_id: str = "matriz") -> dict:
+    fields = (
+        ("brands", "brandId", "brand"),
+        ("categories", "categoryId", "category"),
+        ("sizes", "sizeId", "size"),
+        ("colors", "colorId", "color"),
+    )
+    for kind, id_field, name_field in fields:
+        identifier = product.get(id_field) or product.get(name_field)
+        if not identifier:
+            continue
+        row = catalog_item_reference(conn, kind, str(identifier), store_id)
+        if not row:
+            if product.get(id_field):
+                raise CatalogOperationError(f"{product.get(name_field) or 'Cadastro auxiliar'} não encontrado.")
+            continue
+        if row["status"] != "active":
+            raise CatalogOperationError(f"{row['name']} está desativado e não pode ser selecionado.")
+        product[id_field] = row["id"]
+        product[name_field] = row["name"]
+    supplier_identifier = product.get("supplierId") or product.get("supplier")
+    if supplier_identifier:
+        supplier_row = conn.execute(
+            """
+            SELECT id, name, status FROM suppliers
+            WHERE store_id = ?
+              AND (id = ? OR LOWER(name) = LOWER(?))
+            LIMIT 1
+            """,
+            (store_id, supplier_identifier, supplier_identifier),
+        ).fetchone()
+        if not supplier_row:
+            if product.get("supplierId"):
+                raise CatalogOperationError("Fornecedor não encontrado.")
+        elif supplier_row["status"] != "active":
+            raise CatalogOperationError("Fornecedor desativado não pode ser selecionado.")
+        else:
+            product["supplierId"] = supplier_row["id"]
+            product["supplier"] = supplier_row["name"]
+    return product
+
+
 def product_from_row(row: sqlite3.Row) -> dict:
+    keys = set(row.keys())
     return {
         "id": row["id"],
         "barcode": row["barcode"] or "",
+        "barcodeNormalized": (
+            row["barcodeNormalized"]
+            if "barcodeNormalized" in keys
+            else normalize_product_code(row["barcode"])
+        ) or "",
         "name": row["name"] or "",
         "size": row["size"] or "",
+        "sizeId": row["sizeId"] or "",
         "color": row["color"] or "",
+        "colorId": row["colorId"] or "",
         "gender": row["gender"] or "",
         "category": row["category"] or "",
+        "categoryId": row["categoryId"] or "",
         "brand": row["brand"] or "",
+        "brandId": row["brandId"] or "",
+        "supplier": row["supplier"] or "",
+        "supplierId": row["supplierId"] or "",
         "stock": int(row["stock"] or 0),
         "minStock": int(row["minStock"] or 0),
         "description": row["description"] or "",
@@ -2067,6 +4400,10 @@ def product_from_row(row: sqlite3.Row) -> dict:
         "cost": float(row["cost"] or 0),
         "price": float(row["price"] or 0),
         "photo": row["photo"] or "",
+        "createdAt": row["createdAt"] if "createdAt" in keys else "",
+        "stockEnteredAt": (
+            row["stockEnteredAt"] if "stockEnteredAt" in keys else ""
+        ) or "",
         "updatedAt": row["updatedAt"],
     }
 
@@ -2075,18 +4412,27 @@ def upsert_product(conn: sqlite3.Connection, product: dict, store_id: str = "mat
     conn.execute(
         """
         INSERT INTO products (
-            id, store_id, barcode, name, size, color, gender, category_name, brand_name,
-            stock, min_stock, description, active, cost, price, photo, updated_at
+            id, store_id, barcode, barcode_normalized, name, size, color, gender,
+            category_name, brand_name,
+            stock, min_stock, description, active, cost, price, photo, updated_at,
+            brand_id, category_id, size_id, color_id, supplier_id,
+            created_at, stock_entered_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             barcode = excluded.barcode,
+            barcode_normalized = excluded.barcode_normalized,
             name = excluded.name,
             size = excluded.size,
             color = excluded.color,
             gender = excluded.gender,
             category_name = excluded.category_name,
             brand_name = excluded.brand_name,
+            brand_id = excluded.brand_id,
+            category_id = excluded.category_id,
+            size_id = excluded.size_id,
+            color_id = excluded.color_id,
+            supplier_id = excluded.supplier_id,
             stock = excluded.stock,
             min_stock = excluded.min_stock,
             description = excluded.description,
@@ -2094,12 +4440,15 @@ def upsert_product(conn: sqlite3.Connection, product: dict, store_id: str = "mat
             cost = excluded.cost,
             price = excluded.price,
             photo = excluded.photo,
+            created_at = COALESCE(products.created_at, excluded.created_at),
+            stock_entered_at = COALESCE(products.stock_entered_at, excluded.stock_entered_at),
             updated_at = excluded.updated_at
         """,
         (
             product["id"],
             store_id,
             product["barcode"],
+            product["barcodeNormalized"],
             product["name"],
             product["size"],
             product["color"],
@@ -2114,6 +4463,13 @@ def upsert_product(conn: sqlite3.Connection, product: dict, store_id: str = "mat
             product["price"],
             product["photo"],
             product["updatedAt"],
+            product["brandId"] or None,
+            product["categoryId"] or None,
+            product["sizeId"] or None,
+            product["colorId"] or None,
+            product["supplierId"] or None,
+            product["createdAt"] or None,
+            product["stockEnteredAt"] or None,
         ),
     )
 
@@ -2125,44 +4481,3253 @@ def sync_product_to_state(product: dict | None = None, deleted_id: str | None = 
     elif product:
         products = [item for item in state.get("products", []) if item.get("id") != product["id"]]
         state["products"] = [product, *products]
-        if product["brand"] and product["brand"] not in state["brands"]:
-            state["brands"].append(product["brand"])
-        if product["category"] and product["category"] not in state["categories"]:
-            state["categories"].append(product["category"])
     write_app_state_only(state)
+
+
+class ProductEntryOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def strict_positive_integer(value, field_name: str = "Quantidade") -> int:
+    if isinstance(value, bool):
+        raise ProductEntryOperationError(f"{field_name} deve ser um número inteiro maior que zero.")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as error:
+        raise ProductEntryOperationError(
+            f"{field_name} deve ser um número inteiro maior que zero."
+        ) from error
+    if not math.isfinite(numeric) or numeric <= 0 or not numeric.is_integer():
+        raise ProductEntryOperationError(f"{field_name} deve ser um número inteiro maior que zero.")
+    return int(numeric)
+
+
+def strict_positive_money(value, field_name: str) -> float:
+    if isinstance(value, bool):
+        raise ProductEntryOperationError(f"{field_name} deve ser maior que zero.")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as error:
+        raise ProductEntryOperationError(f"{field_name} deve ser maior que zero.") from error
+    if not math.isfinite(numeric) or numeric <= 0:
+        raise ProductEntryOperationError(f"{field_name} deve ser maior que zero.")
+    return money_round(numeric)
+
+
+def strict_nonnegative_integer(value, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ProductEntryOperationError(
+            f"{field_name} deve ser um número inteiro maior ou igual a zero."
+        )
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ProductEntryOperationError(
+            f"{field_name} deve ser um número inteiro maior ou igual a zero."
+        ) from error
+    if not math.isfinite(numeric) or numeric < 0 or not numeric.is_integer():
+        raise ProductEntryOperationError(
+            f"{field_name} deve ser um número inteiro maior ou igual a zero."
+        )
+    return int(numeric)
+
+
+def validate_product_current_values(product: dict) -> None:
+    product["minStock"] = strict_nonnegative_integer(
+        product.get("minStock", 0), "Estoque mínimo"
+    )
+    product["cost"] = strict_positive_money(product.get("cost"), "Preço de custo")
+    product["price"] = strict_positive_money(product.get("price"), "Preço de venda")
+
+
+def product_state_for_update(conn) -> dict:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+    if not row:
+        return default_state()
+    try:
+        state = json.loads(row["data"])
+    except (json.JSONDecodeError, TypeError):
+        state = default_state()
+    return state if isinstance(state, dict) else default_state()
+
+
+def replace_product_in_state(state: dict, product: dict) -> None:
+    current = state.get("products")
+    products = current if isinstance(current, list) else []
+    state["products"] = [
+        product,
+        *[item for item in products if str(item.get("id", "")) != product["id"]],
+    ]
+
+
+def prepend_product_entry_state(
+    state: dict,
+    product: dict,
+    entry: dict,
+    movement: dict,
+) -> None:
+    replace_product_in_state(state, product)
+    entries = state.get("stockEntries")
+    movements = state.get("stockMovements")
+    state["stockEntries"] = [
+        entry,
+        *(entries if isinstance(entries, list) else []),
+    ]
+    state["stockMovements"] = [
+        movement,
+        *(movements if isinstance(movements, list) else []),
+    ]
+
+
+def persist_product_app_state(conn, state: dict, updated_at: str) -> None:
+    state_to_store = prepare_state_for_storage(conn, state)
+    conn.execute(
+        """
+        INSERT INTO app_state (id, data, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            data = excluded.data,
+            updated_at = excluded.updated_at
+        """,
+        (json.dumps(state_to_store, ensure_ascii=False), updated_at),
+    )
+
+
+def product_with_availability(product: dict, state: dict | None = None) -> dict:
+    state = state if isinstance(state, dict) else {}
+    reserved = int(conditional_reserved_quantities(state).get(product["id"], 0) or 0)
+    stock = max(0, int(product.get("stock", 0) or 0))
+    return {
+        **product,
+        "reservedStock": reserved,
+        "availableStock": max(0, stock - reserved),
+    }
+
+
+class InventoryOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 409, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def persist_inventory_movement(
+    conn,
+    *,
+    product_id: str,
+    movement_type: str,
+    real_before: int,
+    real_after: int,
+    reserved_before: int,
+    reserved_after: int,
+    reference_type: str,
+    reference_id: str,
+    source_key: str,
+    created_at: str,
+    store_id: str = "matriz",
+    user: dict | None = None,
+    notes: str = "",
+) -> dict:
+    product_row = conn.execute(
+        "SELECT name, barcode FROM products WHERE store_id = ? AND id = ?",
+        (store_id, product_id),
+    ).fetchone()
+    if not product_row:
+        raise InventoryOperationError("Produto da movimentação não encontrado.", 409)
+    real_before = int(real_before)
+    real_after = int(real_after)
+    reserved_before = int(reserved_before)
+    reserved_after = int(reserved_after)
+    real_delta = real_after - real_before
+    reserved_delta = reserved_after - reserved_before
+    available_before = real_before - reserved_before
+    available_after = real_after - reserved_after
+    if min(
+        real_before,
+        real_after,
+        reserved_before,
+        reserved_after,
+        available_before,
+        available_after,
+    ) < 0:
+        raise InventoryOperationError(
+            "A movimentação deixaria o estoque real, reservado ou disponível negativo.",
+            409,
+            "NEGATIVE_STOCK_NOT_ALLOWED",
+        )
+    if real_delta == 0 and reserved_delta == 0:
+        raise InventoryOperationError(
+            "A movimentação de estoque não possui variação.",
+            400,
+            "EMPTY_STOCK_MOVEMENT",
+        )
+    quantity = max(abs(real_delta), abs(reserved_delta))
+    if reserved_delta > 0:
+        direction = "reserve"
+    elif reserved_delta < 0:
+        direction = "release"
+    elif real_delta > 0:
+        direction = "in"
+    else:
+        direction = "out"
+    user = user if isinstance(user, dict) else {}
+    movement = {
+        "id": os.urandom(16).hex(),
+        "productId": product_id,
+        "productName": str(product_row["name"] or ""),
+        "barcode": str(product_row["barcode"] or ""),
+        "movementType": str(movement_type),
+        "direction": direction,
+        "quantity": quantity,
+        "realDelta": real_delta,
+        "reservedDelta": reserved_delta,
+        "realBefore": real_before,
+        "realAfter": real_after,
+        "reservedBefore": reserved_before,
+        "reservedAfter": reserved_after,
+        "availableBefore": available_before,
+        "availableAfter": available_after,
+        "referenceType": str(reference_type),
+        "referenceId": str(reference_id),
+        "sourceKey": str(source_key),
+        "userId": str(user.get("id", "") or ""),
+        "userName": str(user.get("name", "") or ""),
+        "notes": str(notes or ""),
+        "createdAt": str(created_at),
+    }
+    conn.execute(
+        """
+        INSERT INTO inventory_movements (
+            id, store_id, product_id, product_name, barcode,
+            movement_type, direction, quantity,
+            real_delta, reserved_delta, real_before, real_after,
+            reserved_before, reserved_after, available_before, available_after,
+            reference_type, reference_id, source_key, user_id, user_name,
+            notes, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            movement["id"],
+            store_id,
+            movement["productId"],
+            movement["productName"],
+            movement["barcode"],
+            movement["movementType"],
+            movement["direction"],
+            movement["quantity"],
+            movement["realDelta"],
+            movement["reservedDelta"],
+            movement["realBefore"],
+            movement["realAfter"],
+            movement["reservedBefore"],
+            movement["reservedAfter"],
+            movement["availableBefore"],
+            movement["availableAfter"],
+            movement["referenceType"],
+            movement["referenceId"],
+            movement["sourceKey"],
+            movement["userId"] or None,
+            movement["userName"] or None,
+            movement["notes"] or None,
+            movement["createdAt"],
+        ),
+    )
+    return movement
+
+
+def prepend_inventory_movements(state: dict, movements: list[dict]) -> None:
+    current = state.get("inventoryMovements")
+    state["inventoryMovements"] = [
+        *movements,
+        *(current if isinstance(current, list) else []),
+    ]
+
+
+def inventory_movement_rows(
+    conn,
+    *,
+    product_id: str = "",
+    movement_type: str = "",
+    limit: int = 200,
+    store_id: str = "matriz",
+) -> list[dict]:
+    conditions = ["movement.store_id = ?"]
+    params: list = [store_id]
+    if product_id:
+        conditions.append("movement.product_id = ?")
+        params.append(product_id)
+    if movement_type:
+        conditions.append("movement.movement_type = ?")
+        params.append(movement_type)
+    params.append(max(1, min(int(limit), 500)))
+    rows = conn.execute(
+        f"""
+        SELECT movement.id, movement.product_id AS "productId",
+               movement.barcode, movement.product_name AS "productName",
+               movement.movement_type AS "movementType",
+               movement.direction, movement.quantity,
+               movement.real_delta AS "realDelta",
+               movement.reserved_delta AS "reservedDelta",
+               movement.real_before AS "realBefore",
+               movement.real_after AS "realAfter",
+               movement.reserved_before AS "reservedBefore",
+               movement.reserved_after AS "reservedAfter",
+               movement.available_before AS "availableBefore",
+               movement.available_after AS "availableAfter",
+               movement.reference_type AS "referenceType",
+               movement.reference_id AS "referenceId",
+               movement.user_id AS "userId",
+               movement.user_name AS "userName",
+               movement.notes,
+               movement.created_at AS "createdAt"
+        FROM inventory_movements movement
+        WHERE {' AND '.join(conditions)}
+        ORDER BY movement.created_at DESC, movement.id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+class InventoryWorkflowError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def inventory_request_hash(payload: dict) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def inventory_scope_payload(payload: dict) -> tuple[str, dict]:
+    inventory_type = str(payload.get("type", "") or "").strip().lower()
+    if inventory_type not in {"general", "partial"}:
+        raise InventoryWorkflowError("Selecione Inventário Geral ou Parcial.")
+    if inventory_type == "general":
+        return inventory_type, {}
+
+    source = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    product_ids = source.get("productIds")
+    product_ids = product_ids if isinstance(product_ids, list) else []
+    scope = {
+        "brandId": str(source.get("brandId", "") or "").strip(),
+        "categoryId": str(source.get("categoryId", "") or "").strip(),
+        "gender": str(source.get("gender", "") or "").strip(),
+        "barcode": normalize_product_code(source.get("barcode")),
+        "productIds": sorted({
+            str(product_id or "").strip()
+            for product_id in product_ids
+            if str(product_id or "").strip()
+        }),
+    }
+    if scope["gender"] and scope["gender"] not in CONTROLLED_GENDERS:
+        raise InventoryWorkflowError("Gênero informado no escopo é inválido.")
+    if not any((
+        scope["brandId"],
+        scope["categoryId"],
+        scope["gender"],
+        scope["barcode"],
+        scope["productIds"],
+    )):
+        raise InventoryWorkflowError(
+            "Defina ao menos um filtro para o Inventário Parcial."
+        )
+    return inventory_type, scope
+
+
+def inventory_scope_products(
+    conn,
+    inventory_type: str,
+    scope: dict,
+    store_id: str = "matriz",
+) -> list[dict]:
+    rows = conn.execute(
+        f"{PRODUCT_SELECT} WHERE store_id = ? AND active = 1 ORDER BY name",
+        (store_id,),
+    ).fetchall()
+    products = [product_from_row(row) for row in rows]
+    if inventory_type == "general":
+        return products
+    product_ids = set(scope.get("productIds") or [])
+    return [
+        product
+        for product in products
+        if (
+            not scope.get("brandId")
+            or str(product.get("brandId", "")) == scope["brandId"]
+        )
+        and (
+            not scope.get("categoryId")
+            or str(product.get("categoryId", "")) == scope["categoryId"]
+        )
+        and (
+            not scope.get("gender")
+            or str(product.get("gender", "")) == scope["gender"]
+        )
+        and (
+            not scope.get("barcode")
+            or normalize_product_code(product.get("barcode")) == scope["barcode"]
+        )
+        and (not product_ids or str(product.get("id", "")) in product_ids)
+    ]
+
+
+def inventory_scope_label(
+    conn,
+    inventory_type: str,
+    scope: dict,
+    products: list[dict],
+    store_id: str = "matriz",
+) -> str:
+    if inventory_type == "general":
+        return "Todos os produtos ativos"
+    parts: list[str] = []
+    for table, key, label in (
+        ("brands", "brandId", "Marca"),
+        ("categories", "categoryId", "Categoria"),
+    ):
+        identifier = scope.get(key)
+        if not identifier:
+            continue
+        row = conn.execute(
+            f"SELECT name FROM {table} WHERE store_id = ? AND id = ?",
+            (store_id, identifier),
+        ).fetchone()
+        parts.append(f"{label}: {row['name'] if row else identifier}")
+    if scope.get("gender"):
+        parts.append(f"Gênero: {scope['gender']}")
+    if scope.get("barcode"):
+        parts.append(f"Código: {scope['barcode']}")
+    if scope.get("productIds"):
+        names = [product["name"] for product in products[:3]]
+        suffix = (
+            f" +{len(products) - len(names)}"
+            if len(products) > len(names)
+            else ""
+        )
+        parts.append(f"Produtos: {', '.join(names)}{suffix}")
+    return " | ".join(parts) or "Escopo parcial"
+
+
+def next_inventory_number(conn, store_id: str = "matriz") -> int:
+    conn.execute(
+        """
+        INSERT INTO inventory_sequences (store_id, next_number)
+        VALUES (?, 1)
+        ON CONFLICT(store_id) DO NOTHING
+        """,
+        (store_id,),
+    )
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"SELECT next_number FROM inventory_sequences WHERE store_id = ?{lock_clause}",
+        (store_id,),
+    ).fetchone()
+    if not row:
+        raise InventoryWorkflowError(
+            "Não foi possível gerar o número do inventário.", 500
+        )
+    number = int(row["next_number"])
+    conn.execute(
+        "UPDATE inventory_sequences SET next_number = ? WHERE store_id = ?",
+        (number + 1, store_id),
+    )
+    return number
+
+
+def inventory_state_snapshot(conn) -> dict:
+    row = conn.execute("SELECT data FROM app_state WHERE id = 1").fetchone()
+    try:
+        state = json.loads(row["data"]) if row else default_state()
+    except (json.JSONDecodeError, TypeError):
+        state = default_state()
+    return state if isinstance(state, dict) else default_state()
+
+
+def inventory_summary_from_row(row, counted_count: int | None = None) -> dict:
+    keys = set(row.keys())
+    product_count = int(row["product_count"] or 0)
+    counted = (
+        int(counted_count)
+        if counted_count is not None
+        else int(row["counted_count"] or 0)
+        if "counted_count" in keys
+        else 0
+    )
+    return {
+        "id": str(row["id"]),
+        "number": int(row["inventory_number"]),
+        "code": f"INV{int(row['inventory_number']):06d}",
+        "type": str(row["inventory_type"]),
+        "scope": json.loads(row["scope_json"] or "{}"),
+        "scopeLabel": str(row["scope_label"] or ""),
+        "status": str(row["status"]),
+        "productCount": product_count,
+        "countedCount": counted,
+        "uncountedCount": max(0, product_count - counted),
+        "divergenceCount": int(row["divergence_count"] or 0),
+        "positiveItemCount": int(row["positive_item_count"] or 0),
+        "negativeItemCount": int(row["negative_item_count"] or 0),
+        "positiveQuantity": int(row["positive_quantity"] or 0),
+        "negativeQuantity": int(row["negative_quantity"] or 0),
+        "positiveImpact": float(row["positive_impact"] or 0),
+        "negativeImpact": float(row["negative_impact"] or 0),
+        "generalNotes": str(row["general_notes"] or ""),
+        "cancellationReason": str(row["cancellation_reason"] or ""),
+        "startedById": str(row["started_by_id"] or ""),
+        "startedByName": str(row["started_by_name"] or ""),
+        "startedAt": str(row["started_at"] or ""),
+        "finalizedById": str(row["finalized_by_id"] or ""),
+        "finalizedByName": str(row["finalized_by_name"] or ""),
+        "finalizedAt": str(row["finalized_at"] or ""),
+        "cancelledById": str(row["cancelled_by_id"] or ""),
+        "cancelledByName": str(row["cancelled_by_name"] or ""),
+        "cancelledAt": str(row["cancelled_at"] or ""),
+        "updatedAt": str(row["updated_at"] or ""),
+    }
+
+
+def inventory_item_from_row(
+    row,
+    *,
+    current_real: int | None = None,
+    current_reserved: int | None = None,
+) -> dict:
+    keys = set(row.keys())
+    counted = (
+        int(row["counted_quantity"])
+        if row["counted_quantity"] is not None
+        else None
+    )
+    final_expected = (
+        int(row["final_expected"])
+        if row["final_expected"] is not None
+        else None
+    )
+    expected = (
+        max(0, int(current_real) - int(current_reserved or 0))
+        if current_real is not None
+        else final_expected
+        if final_expected is not None
+        else int(row["initial_expected"])
+    )
+    divergence = (
+        int(row["divergence"])
+        if row["divergence"] is not None
+        else counted - expected
+        if counted is not None
+        else None
+    )
+    return {
+        "id": str(row["id"]),
+        "inventoryId": str(row["inventory_id"]),
+        "productId": str(row["product_id"]),
+        "barcode": str(row["barcode"] or ""),
+        "productName": str(row["product_name"] or ""),
+        "brand": str(row["brand_name"] or ""),
+        "category": str(row["category_name"] or ""),
+        "gender": str(row["gender"] or ""),
+        "color": str(row["color"] or ""),
+        "size": str(row["size"] or ""),
+        "initialReal": int(row["initial_real"]),
+        "initialReserved": int(row["initial_reserved"]),
+        "initialAvailable": int(row["initial_available"]),
+        "initialExpected": int(row["initial_expected"]),
+        "currentReal": int(current_real) if current_real is not None else (
+            int(row["final_real"]) if row["final_real"] is not None else None
+        ),
+        "currentReserved": (
+            int(current_reserved or 0)
+            if current_real is not None
+            else int(row["final_reserved"])
+            if row["final_reserved"] is not None
+            else None
+        ),
+        "expectedQuantity": expected,
+        "countedQuantity": counted,
+        "countVersion": int(row["count_version"]),
+        "countedById": str(row["counted_by_id"] or ""),
+        "countedByName": str(row["counted_by_name"] or ""),
+        "countedAt": str(row["counted_at"] or ""),
+        "divergence": divergence,
+        "adjustmentType": str(row["adjustment_type"] or ""),
+        "adjustmentQuantity": int(row["adjustment_quantity"] or 0),
+        "costReference": (
+            float(row["cost_reference"])
+            if row["cost_reference"] is not None
+            else None
+        ),
+        "impactValue": float(row["impact_value"] or 0),
+        "updatedAt": str(row["updated_at"] or ""),
+        "hasCountHistory": bool(
+            int(row["event_count"] or 0) if "event_count" in keys else 0
+        ),
+    }
+
+
+def inventory_detail(
+    conn,
+    inventory_id: str,
+    *,
+    store_id: str = "matriz",
+    include_current: bool = True,
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT inventory.*,
+               (
+                   SELECT COUNT(*)
+                   FROM inventory_items item
+                   WHERE item.inventory_id = inventory.id
+                     AND item.counted_quantity IS NOT NULL
+               ) AS counted_count
+        FROM inventories inventory
+        WHERE inventory.store_id = ? AND inventory.id = ?
+        """,
+        (store_id, inventory_id),
+    ).fetchone()
+    if not row:
+        return None
+    summary = inventory_summary_from_row(row)
+    item_rows = conn.execute(
+        """
+        SELECT item.*,
+               (
+                   SELECT COUNT(*)
+                   FROM inventory_count_events event
+                   WHERE event.inventory_item_id = item.id
+               ) AS event_count
+        FROM inventory_items item
+        WHERE item.store_id = ? AND item.inventory_id = ?
+        ORDER BY item.product_name, item.barcode
+        """,
+        (store_id, inventory_id),
+    ).fetchall()
+    product_state: dict[str, tuple[int, int]] = {}
+    if include_current and summary["status"] == "in_progress":
+        state = inventory_state_snapshot(conn)
+        reserved = conditional_reserved_quantities(state)
+        rows = conn.execute(
+            "SELECT id, stock FROM products WHERE store_id = ?",
+            (store_id,),
+        ).fetchall()
+        product_state = {
+            str(product["id"]): (
+                int(product["stock"] or 0),
+                int(reserved.get(str(product["id"]), 0) or 0),
+            )
+            for product in rows
+        }
+    items = []
+    for item_row in item_rows:
+        current = product_state.get(str(item_row["product_id"]))
+        items.append(inventory_item_from_row(
+            item_row,
+            current_real=current[0] if current else None,
+            current_reserved=current[1] if current else None,
+        ))
+    return {**summary, "items": items}
+
+
+def replace_inventory_in_state(state: dict, inventory: dict) -> None:
+    summaries = state.get("inventories")
+    summaries = summaries if isinstance(summaries, list) else []
+    summary = {key: value for key, value in inventory.items() if key != "items"}
+    state["inventories"] = [
+        summary,
+        *[
+            item
+            for item in summaries
+            if str(item.get("id", "")) != str(summary["id"])
+        ],
+    ]
+
+
+def persist_inventory_state(conn, state: dict, updated_at: str) -> None:
+    persist_product_app_state(conn, state, updated_at)
+
+
+def create_inventory(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise InventoryWorkflowError("Envie um JSON válido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise InventoryWorkflowError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    inventory_type, scope = inventory_scope_payload(payload)
+    canonical = {"type": inventory_type, "scope": scope}
+    request_hash = inventory_request_hash(canonical)
+    now = utc_now()
+    user = session.get("user") or {}
+
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash, response_json
+            FROM inventories
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["request_hash"]) != request_hash:
+                raise InventoryWorkflowError(
+                    "A chave de idempotência já foi usada com outro inventário.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                return json.loads(replay["response_json"]), True
+            except (json.JSONDecodeError, TypeError) as error:
+                raise InventoryWorkflowError(
+                    "O inventário já existe, mas sua resposta histórica está inconsistente.",
+                    409,
+                    "INVENTORY_RESPONSE_INCONSISTENT",
+                ) from error
+
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        products = inventory_scope_products(
+            conn, inventory_type, scope, store_id
+        )
+        if not products:
+            raise InventoryWorkflowError(
+                "Nenhum produto ativo corresponde ao escopo informado.",
+                409,
+                "EMPTY_INVENTORY_SCOPE",
+            )
+        number = next_inventory_number(conn, store_id)
+        inventory_id = os.urandom(16).hex()
+        scope_label = inventory_scope_label(
+            conn, inventory_type, scope, products, store_id
+        )
+        conn.execute(
+            """
+            INSERT INTO inventories (
+                id, store_id, inventory_number, inventory_type,
+                scope_json, scope_label, status, product_count,
+                idempotency_key, request_hash, response_json,
+                started_by_id, started_by_name, started_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'in_progress', ?, ?, ?, '{}', ?, ?, ?, ?)
+            """,
+            (
+                inventory_id,
+                store_id,
+                number,
+                inventory_type,
+                json.dumps(scope, ensure_ascii=False, sort_keys=True),
+                scope_label,
+                len(products),
+                key,
+                request_hash,
+                str(user.get("id", "") or "") or None,
+                str(user.get("name", "") or "Usuário"),
+                now,
+                now,
+            ),
+        )
+        for product in products:
+            real = int(product.get("stock", 0) or 0)
+            reserved_quantity = int(reserved.get(product["id"], 0) or 0)
+            if reserved_quantity > real:
+                raise InventoryWorkflowError(
+                    f"Reserva inconsistente para {product['name']}.",
+                    409,
+                    "INVENTORY_RESERVATION_CONFLICT",
+                )
+            available = real - reserved_quantity
+            conn.execute(
+                """
+                INSERT INTO inventory_items (
+                    id, inventory_id, store_id, product_id, barcode,
+                    product_name, brand_name, category_name, gender, color, size,
+                    initial_real, initial_reserved, initial_available,
+                    initial_expected, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    inventory_id,
+                    store_id,
+                    product["id"],
+                    product.get("barcode", ""),
+                    product.get("name", ""),
+                    product.get("brand", ""),
+                    product.get("category", ""),
+                    product.get("gender", ""),
+                    product.get("color", ""),
+                    product.get("size", ""),
+                    real,
+                    reserved_quantity,
+                    available,
+                    available,
+                    now,
+                    now,
+                ),
+            )
+        inventory = inventory_detail(
+            conn, inventory_id, store_id=store_id, include_current=True
+        )
+        conn.execute(
+            "UPDATE inventories SET response_json = ? WHERE id = ?",
+            (json.dumps(inventory, ensure_ascii=False), inventory_id),
+        )
+        replace_inventory_in_state(state, inventory)
+        persist_inventory_state(conn, state, now)
+        record_audit(
+            "create",
+            "physical_inventory",
+            inventory_id,
+            {
+                "number": number,
+                "type": inventory_type,
+                "scope": scope,
+                "productCount": len(products),
+            },
+            conn,
+        )
+    return inventory, False
+
+
+def list_inventories(
+    *,
+    search: str = "",
+    inventory_type: str = "",
+    status: str = "",
+    user_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    store_id: str = "matriz",
+) -> list[dict]:
+    if inventory_type and inventory_type not in {"general", "partial"}:
+        raise InventoryWorkflowError("Tipo de inventário inválido.")
+    if status and status not in {"in_progress", "finalized", "cancelled"}:
+        raise InventoryWorkflowError("Status de inventário inválido.")
+    try:
+        start = date.fromisoformat(start_date) if start_date else None
+        end = date.fromisoformat(end_date) if end_date else None
+    except ValueError as error:
+        raise InventoryWorkflowError("Período de inventário inválido.") from error
+    if start and end and start > end:
+        raise InventoryWorkflowError(
+            "A data inicial não pode ser posterior à data final."
+        )
+    conditions = ["inventory.store_id = ?"]
+    params: list = [store_id]
+    if inventory_type:
+        conditions.append("inventory.inventory_type = ?")
+        params.append(inventory_type)
+    if status:
+        conditions.append("inventory.status = ?")
+        params.append(status)
+    if user_id:
+        conditions.append("inventory.started_by_id = ?")
+        params.append(user_id)
+    normalized_search = str(search or "").strip().lower()
+    if normalized_search:
+        pattern = f"%{normalized_search}%"
+        conditions.append(
+            """
+            (
+                LOWER(inventory.scope_label) LIKE ?
+                OR CAST(inventory.inventory_number AS TEXT) LIKE ?
+                OR EXISTS (
+                    SELECT 1 FROM inventory_items search_item
+                    WHERE search_item.inventory_id = inventory.id
+                      AND (
+                          LOWER(search_item.product_name) LIKE ?
+                          OR LOWER(search_item.barcode) LIKE ?
+                          OR LOWER(search_item.brand_name) LIKE ?
+                      )
+                )
+            )
+            """
+        )
+        params.extend((pattern, pattern, pattern, pattern, pattern))
+    with connect_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT inventory.*,
+                   (
+                       SELECT COUNT(*) FROM inventory_items item
+                       WHERE item.inventory_id = inventory.id
+                         AND item.counted_quantity IS NOT NULL
+                   ) AS counted_count
+            FROM inventories inventory
+            WHERE {' AND '.join(conditions)}
+            ORDER BY inventory.inventory_number DESC
+            """,
+            tuple(params),
+        ).fetchall()
+    result = []
+    for row in rows:
+        summary = inventory_summary_from_row(row)
+        try:
+            started = parse_iso_datetime(summary["startedAt"]).astimezone(
+                STORE_TIMEZONE
+            ).date()
+        except (ValueError, TypeError):
+            started = None
+        if start and (started is None or started < start):
+            continue
+        if end and (started is None or started > end):
+            continue
+        result.append(summary)
+    return result
+
+
+def save_inventory_count(
+    inventory_id: str,
+    item_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> dict:
+    if not isinstance(payload, dict):
+        raise InventoryWorkflowError("Envie um JSON válido.")
+    try:
+        quantity = strict_nonnegative_integer(
+            payload.get("quantity"), "Quantidade contada"
+        )
+        expected_version = strict_nonnegative_integer(
+            payload.get("version"), "Versão da contagem"
+        )
+    except ProductEntryOperationError as error:
+        raise InventoryWorkflowError(error.message) from error
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        inventory = conn.execute(
+            f"""
+            SELECT id, status FROM inventories
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, inventory_id),
+        ).fetchone()
+        if not inventory:
+            raise InventoryWorkflowError("Inventário não encontrado.", 404)
+        if inventory["status"] != "in_progress":
+            raise InventoryWorkflowError(
+                "Somente Inventário Em andamento aceita contagens.",
+                409,
+                "INVENTORY_NOT_IN_PROGRESS",
+            )
+        item = conn.execute(
+            f"""
+            SELECT * FROM inventory_items
+            WHERE store_id = ? AND inventory_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, inventory_id, item_id),
+        ).fetchone()
+        if not item:
+            raise InventoryWorkflowError(
+                "Produto não pertence a este inventário.", 404
+            )
+        current_version = int(item["count_version"])
+        if expected_version != current_version:
+            current_item = inventory_item_from_row(item)
+            raise InventoryWorkflowError(
+                "A contagem foi alterada por outro usuário. Atualize os dados.",
+                409,
+                "INVENTORY_COUNT_CONFLICT",
+            )
+        new_version = current_version + 1
+        updated = conn.execute(
+            """
+            UPDATE inventory_items
+            SET counted_quantity = ?, count_version = ?,
+                counted_by_id = ?, counted_by_name = ?,
+                counted_at = ?, updated_at = ?
+            WHERE id = ? AND inventory_id = ? AND count_version = ?
+            """,
+            (
+                quantity,
+                new_version,
+                str(user.get("id", "") or "") or None,
+                str(user.get("name", "") or "Usuário"),
+                now,
+                now,
+                item_id,
+                inventory_id,
+                expected_version,
+            ),
+        )
+        if getattr(updated, "rowcount", 1) == 0:
+            raise InventoryWorkflowError(
+                "A contagem foi alterada por outro usuário. Atualize os dados.",
+                409,
+                "INVENTORY_COUNT_CONFLICT",
+            )
+        conn.execute(
+            """
+            INSERT INTO inventory_count_events (
+                id, inventory_id, inventory_item_id, store_id,
+                previous_quantity, counted_quantity, count_version,
+                user_id, user_name, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                os.urandom(16).hex(),
+                inventory_id,
+                item_id,
+                store_id,
+                item["counted_quantity"],
+                quantity,
+                new_version,
+                str(user.get("id", "") or "") or None,
+                str(user.get("name", "") or "Usuário"),
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE inventories SET updated_at = ? WHERE id = ?",
+            (now, inventory_id),
+        )
+        detail = inventory_detail(
+            conn, inventory_id, store_id=store_id, include_current=True
+        )
+        state = locked_app_state(conn)
+        replace_inventory_in_state(state, detail)
+        persist_inventory_state(conn, state, now)
+        record_audit(
+            "count",
+            "physical_inventory",
+            inventory_id,
+            {
+                "itemId": item_id,
+                "productId": str(item["product_id"]),
+                "previousQuantity": item["counted_quantity"],
+                "countedQuantity": quantity,
+                "version": new_version,
+            },
+            conn,
+        )
+        saved = next(
+            detail_item
+            for detail_item in detail["items"]
+            if detail_item["id"] == item_id
+        )
+    return {"item": saved, "inventory": {k: v for k, v in detail.items() if k != "items"}}
+
+
+def lookup_inventory_barcode(
+    inventory_id: str,
+    barcode: str,
+    store_id: str = "matriz",
+) -> dict:
+    code = normalize_product_code(barcode)
+    if not code:
+        raise InventoryWorkflowError("Informe o código do produto.")
+    with connect_db() as conn:
+        inventory = conn.execute(
+            "SELECT status FROM inventories WHERE store_id = ? AND id = ?",
+            (store_id, inventory_id),
+        ).fetchone()
+        if not inventory:
+            raise InventoryWorkflowError("Inventário não encontrado.", 404)
+        if inventory["status"] != "in_progress":
+            raise InventoryWorkflowError(
+                "Somente Inventário Em andamento aceita leitura.", 409
+            )
+        product = conn.execute(
+            """
+            SELECT id FROM products
+            WHERE store_id = ? AND barcode_normalized = ?
+            """,
+            (store_id, code),
+        ).fetchone()
+        if not product:
+            raise InventoryWorkflowError(
+                "Produto não encontrado.", 404, "PRODUCT_NOT_FOUND"
+            )
+        item = conn.execute(
+            """
+            SELECT * FROM inventory_items
+            WHERE store_id = ? AND inventory_id = ? AND product_id = ?
+            """,
+            (store_id, inventory_id, product["id"]),
+        ).fetchone()
+        if not item:
+            raise InventoryWorkflowError(
+                "Produto fora deste inventário.",
+                409,
+                "PRODUCT_OUTSIDE_INVENTORY",
+            )
+        return inventory_item_from_row(item)
+
+
+def cancel_inventory(
+    inventory_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> dict:
+    reason = str((payload or {}).get("reason", "") or "").strip()
+    if not reason:
+        raise InventoryWorkflowError(
+            "Informe o motivo do cancelamento."
+        )
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT status FROM inventories
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, inventory_id),
+        ).fetchone()
+        if not row:
+            raise InventoryWorkflowError("Inventário não encontrado.", 404)
+        if row["status"] == "finalized":
+            raise InventoryWorkflowError(
+                "Inventário Finalizado não pode ser cancelado.", 409
+            )
+        if row["status"] == "cancelled":
+            detail = inventory_detail(
+                conn, inventory_id, store_id=store_id, include_current=False
+            )
+            return detail
+        conn.execute(
+            """
+            UPDATE inventories
+            SET status = 'cancelled', cancellation_reason = ?,
+                cancelled_by_id = ?, cancelled_by_name = ?,
+                cancelled_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                reason,
+                str(user.get("id", "") or "") or None,
+                str(user.get("name", "") or "Usuário"),
+                now,
+                now,
+                inventory_id,
+            ),
+        )
+        detail = inventory_detail(
+            conn, inventory_id, store_id=store_id, include_current=False
+        )
+        state = locked_app_state(conn)
+        replace_inventory_in_state(state, detail)
+        persist_inventory_state(conn, state, now)
+        record_audit(
+            "cancel",
+            "physical_inventory",
+            inventory_id,
+            {"reason": reason},
+            conn,
+        )
+    return detail
+
+
+def finalize_inventory(
+    inventory_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise InventoryWorkflowError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    notes = str((payload or {}).get("notes", "") or "").strip()
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        inventory = conn.execute(
+            f"""
+            SELECT * FROM inventories
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, inventory_id),
+        ).fetchone()
+        if not inventory:
+            raise InventoryWorkflowError("Inventário não encontrado.", 404)
+        if inventory["status"] == "finalized":
+            if (
+                str(inventory["finalization_key"] or "") == key
+                and inventory["finalization_response_json"]
+            ):
+                try:
+                    return json.loads(inventory["finalization_response_json"]), True
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            raise InventoryWorkflowError(
+                "Inventário já finalizado.", 409, "INVENTORY_ALREADY_FINALIZED"
+            )
+        if inventory["status"] != "in_progress":
+            raise InventoryWorkflowError(
+                "Inventário cancelado não pode ser finalizado.", 409
+            )
+        items = conn.execute(
+            f"""
+            SELECT * FROM inventory_items
+            WHERE store_id = ? AND inventory_id = ?
+            ORDER BY product_id{lock_clause}
+            """,
+            (store_id, inventory_id),
+        ).fetchall()
+        uncounted = [
+            item for item in items if item["counted_quantity"] is None
+        ]
+        if uncounted:
+            raise InventoryWorkflowError(
+                f"Existem {len(uncounted)} produtos ainda não contados.",
+                409,
+                "INVENTORY_UNCOUNTED_ITEMS",
+            )
+
+        state = locked_app_state(conn)
+        current_reserved = conditional_reserved_quantities(state)
+        calculations = []
+        for item in items:
+            product = conn.execute(
+                f"""
+                SELECT id, stock, cost FROM products
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, item["product_id"]),
+            ).fetchone()
+            if not product:
+                raise InventoryWorkflowError(
+                    f"Produto {item['product_name']} não está mais disponível.",
+                    409,
+                    "INVENTORY_PRODUCT_MISSING",
+                )
+            real = int(product["stock"] or 0)
+            reserved = int(
+                current_reserved.get(str(item["product_id"]), 0) or 0
+            )
+            if reserved > real:
+                raise InventoryWorkflowError(
+                    f"Reserva inconsistente para {item['product_name']}.",
+                    409,
+                    "INVENTORY_RESERVATION_CONFLICT",
+                )
+            expected = real - reserved
+            counted = int(item["counted_quantity"])
+            divergence = counted - expected
+            calculations.append({
+                "item": item,
+                "real": real,
+                "reserved": reserved,
+                "expected": expected,
+                "counted": counted,
+                "divergence": divergence,
+                "cost": max(0, float(product["cost"] or 0)),
+            })
+        divergent = [
+            calculation
+            for calculation in calculations
+            if calculation["divergence"] != 0
+        ]
+        if divergent and user.get("role") != "admin":
+            raise InventoryWorkflowError(
+                "Apenas administrador pode confirmar ajustes de inventário.",
+                403,
+                "INVENTORY_ADJUSTMENT_REQUIRES_ADMIN",
+            )
+        if divergent and not notes:
+            raise InventoryWorkflowError(
+                "Informe uma observação geral para finalizar com divergências.",
+                400,
+                "INVENTORY_NOTES_REQUIRED",
+            )
+
+        movements = []
+        positive_items = 0
+        negative_items = 0
+        positive_quantity = 0
+        negative_quantity = 0
+        positive_impact = 0.0
+        negative_impact = 0.0
+        for calculation in calculations:
+            item = calculation["item"]
+            divergence = calculation["divergence"]
+            adjustment_type = "none"
+            adjustment_quantity = abs(divergence)
+            new_real = calculation["real"] + divergence
+            impact = money_round(adjustment_quantity * calculation["cost"])
+            if divergence > 0:
+                adjustment_type = "in"
+                positive_items += 1
+                positive_quantity += divergence
+                positive_impact = money_round(positive_impact + impact)
+            elif divergence < 0:
+                adjustment_type = "out"
+                negative_items += 1
+                negative_quantity += abs(divergence)
+                negative_impact = money_round(negative_impact + impact)
+            if divergence:
+                movement = persist_inventory_movement(
+                    conn,
+                    product_id=str(item["product_id"]),
+                    movement_type="inventory_adjustment",
+                    real_before=calculation["real"],
+                    real_after=new_real,
+                    reserved_before=calculation["reserved"],
+                    reserved_after=calculation["reserved"],
+                    reference_type="physical_inventory",
+                    reference_id=inventory_id,
+                    source_key=f"inventory:{inventory_id}:adjustment:{item['product_id']}",
+                    created_at=now,
+                    store_id=store_id,
+                    user=user,
+                    notes=notes,
+                )
+                movements.append(movement)
+                conn.execute(
+                    """
+                    UPDATE products SET stock = ?, updated_at = ?
+                    WHERE store_id = ? AND id = ?
+                    """,
+                    (new_real, now, store_id, item["product_id"]),
+                )
+                state_product = next(
+                    (
+                        product
+                        for product in state.get("products", []) or []
+                        if str(product.get("id", "")) == str(item["product_id"])
+                    ),
+                    None,
+                )
+                if state_product:
+                    state_product["stock"] = new_real
+                    state_product["updatedAt"] = now
+            conn.execute(
+                """
+                UPDATE inventory_items
+                SET final_real = ?, final_reserved = ?, final_expected = ?,
+                    divergence = ?, adjustment_type = ?,
+                    adjustment_quantity = ?, cost_reference = ?,
+                    impact_value = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    new_real,
+                    calculation["reserved"],
+                    calculation["expected"],
+                    divergence,
+                    adjustment_type,
+                    adjustment_quantity,
+                    calculation["cost"],
+                    impact,
+                    now,
+                    item["id"],
+                ),
+            )
+
+        conn.execute(
+            """
+            UPDATE inventories
+            SET status = 'finalized', divergence_count = ?,
+                positive_item_count = ?, negative_item_count = ?,
+                positive_quantity = ?, negative_quantity = ?,
+                positive_impact = ?, negative_impact = ?,
+                general_notes = ?, finalization_key = ?,
+                finalized_by_id = ?, finalized_by_name = ?,
+                finalized_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                len(divergent),
+                positive_items,
+                negative_items,
+                positive_quantity,
+                negative_quantity,
+                positive_impact,
+                negative_impact,
+                notes or None,
+                key,
+                str(user.get("id", "") or "") or None,
+                str(user.get("name", "") or "Usuário"),
+                now,
+                now,
+                inventory_id,
+            ),
+        )
+        prepend_inventory_movements(state, movements)
+        detail = inventory_detail(
+            conn, inventory_id, store_id=store_id, include_current=False
+        )
+        replace_inventory_in_state(state, detail)
+        persist_inventory_state(conn, state, now)
+        record_audit(
+            "finalize",
+            "physical_inventory",
+            inventory_id,
+            {
+                "number": int(inventory["inventory_number"]),
+                "divergenceCount": len(divergent),
+                "movementIds": [movement["id"] for movement in movements],
+                "positiveQuantity": positive_quantity,
+                "negativeQuantity": negative_quantity,
+            },
+            conn,
+        )
+        conn.execute(
+            """
+            UPDATE inventories
+            SET finalization_response_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(detail, ensure_ascii=False), inventory_id),
+        )
+    return detail, False
+
+
+def product_entry_request_hash(payload: dict, quantity: int) -> str:
+    source = payload.get("product") if isinstance(payload.get("product"), dict) else payload
+    canonical = {
+        "quantity": quantity,
+        "product": {
+            "barcode": normalize_product_code(source.get("barcode")),
+            "name": str(source.get("name", "") or "").strip(),
+            "size": str(source.get("size", "") or "").strip(),
+            "sizeId": str(source.get("sizeId", "") or "").strip(),
+            "color": str(source.get("color", "") or "").strip(),
+            "colorId": str(source.get("colorId", "") or "").strip(),
+            "gender": str(source.get("gender", "") or "").strip(),
+            "category": str(source.get("category", "") or "").strip(),
+            "categoryId": str(source.get("categoryId", "") or "").strip(),
+            "brand": str(source.get("brand", "") or "").strip(),
+            "brandId": str(source.get("brandId", "") or "").strip(),
+            "supplier": str(source.get("supplier", "") or "").strip(),
+            "supplierId": str(source.get("supplierId", "") or "").strip(),
+            "minStock": source.get("minStock", 0),
+            "description": str(source.get("description", "") or "").strip(),
+            "active": bool(source.get("active", True)),
+            "cost": source.get("cost", 0),
+            "price": source.get("price", 0),
+            "photo": source.get("photo", "") or "",
+        },
+    }
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def product_entry_lock_key(store_id: str, idempotency_key: str) -> int:
+    digest = hashlib.sha256(f"{store_id}:{idempotency_key}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+
+def next_stock_entry_number(conn, store_id: str) -> int:
+    conn.execute(
+        """
+        INSERT INTO stock_entry_sequences (store_id, next_number)
+        VALUES (?, 1)
+        ON CONFLICT(store_id) DO NOTHING
+        """,
+        (store_id,),
+    )
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"SELECT next_number FROM stock_entry_sequences WHERE store_id = ?{lock_clause}",
+        (store_id,),
+    ).fetchone()
+    if not row:
+        raise ProductEntryOperationError(
+            "Não foi possível gerar o número da entrada.", 500, "ENTRY_SEQUENCE_ERROR"
+        )
+    number = int(row["next_number"])
+    conn.execute(
+        "UPDATE stock_entry_sequences SET next_number = ? WHERE store_id = ?",
+        (number + 1, store_id),
+    )
+    return number
+
+
+def validate_product_for_entry(product: dict, *, existing: bool) -> None:
+    error = validate_product(product)
+    if error:
+        raise ProductEntryOperationError(error)
+    if not product["brandId"]:
+        raise ProductEntryOperationError("Selecione uma marca ativa.")
+    if not product["categoryId"]:
+        raise ProductEntryOperationError("Selecione uma categoria ativa.")
+    if not product["supplierId"]:
+        raise ProductEntryOperationError("Selecione um fornecedor ativo.")
+    validate_product_current_values(product)
+    if not product["active"]:
+        message = (
+            "Produto desativado. Reative o produto antes de confirmar a entrada."
+            if existing
+            else "O novo produto deve estar ativo para receber a primeira entrada."
+        )
+        raise ProductEntryOperationError(message, 409, "PRODUCT_DEACTIVATED")
+
+
+def persist_product_update(
+    product_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> dict:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+            (store_id, product_id),
+        ).fetchone()
+        if not row:
+            raise ProductEntryOperationError("Produto não encontrado.", 404)
+        previous = product_from_row(row)
+        product = normalize_product_payload(payload, previous)
+        product["id"] = product_id
+        product["stock"] = previous["stock"]
+        product["stockEnteredAt"] = previous["stockEnteredAt"]
+        error = validate_product(product)
+        if error:
+            raise ProductEntryOperationError(error)
+        try:
+            resolve_product_catalog_links(conn, product, store_id)
+        except CatalogOperationError as error:
+            raise ProductEntryOperationError(
+                error.message, error.status_code
+            ) from error
+        validate_product_current_values(product)
+        duplicate = conn.execute(
+            """
+            SELECT id FROM products
+            WHERE store_id = ? AND barcode_normalized = ? AND id <> ?
+            """,
+            (store_id, product["barcodeNormalized"], product_id),
+        ).fetchone()
+        if duplicate:
+            raise ProductEntryOperationError("Código de barras já cadastrado.", 409)
+        upsert_product(conn, product, store_id)
+        state = product_state_for_update(conn)
+        product = product_with_availability(product, state)
+        replace_product_in_state(state, product)
+        persist_product_app_state(conn, state, product["updatedAt"])
+        changed_fields = [
+            field
+            for field in (
+                "barcode",
+                "name",
+                "sizeId",
+                "colorId",
+                "gender",
+                "categoryId",
+                "brandId",
+                "supplierId",
+                "minStock",
+                "description",
+                "active",
+                "cost",
+                "price",
+                "photo",
+            )
+            if previous.get(field) != product.get(field)
+        ]
+        record_audit(
+            "update",
+            "product",
+            product_id,
+            {"changedFields": changed_fields, "stockChanged": False},
+            conn,
+        )
+    return product
+
+
+def persist_product_entry(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ProductEntryOperationError("Envie um JSON válido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ProductEntryOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    quantity = strict_positive_integer(payload.get("quantity"))
+    request_hash = product_entry_request_hash(payload, quantity)
+    source = payload.get("product") if isinstance(payload.get("product"), dict) else payload
+    barcode = normalize_product_code(source.get("barcode"))
+    if not barcode:
+        raise ProductEntryOperationError("Código de barras é obrigatório.")
+
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (product_entry_lock_key(store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay_row = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM stock_entries
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay_row:
+            if replay_row["requestHash"] != request_hash:
+                raise ProductEntryOperationError(
+                    "A chave de idempotência já foi utilizada com dados diferentes.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                response = json.loads(replay_row["responseJson"])
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ProductEntryOperationError(
+                    "A entrada já existe, mas sua resposta histórica está inconsistente.",
+                    409,
+                    "ENTRY_RESPONSE_INCONSISTENT",
+                ) from error
+            return response, True
+
+        product_row = conn.execute(
+            f"{PRODUCT_SELECT} WHERE store_id = ? AND barcode_normalized = ?{lock_clause}",
+            (store_id, barcode),
+        ).fetchone()
+        previous = product_from_row(product_row) if product_row else None
+        product = normalize_product_payload(source, previous)
+        if previous:
+            product["id"] = previous["id"]
+            product["createdAt"] = previous["createdAt"]
+            product["stockEnteredAt"] = previous["stockEnteredAt"]
+            stock_before = max(0, int(previous["stock"] or 0))
+        else:
+            product["id"] = os.urandom(16).hex()
+            product["stockEnteredAt"] = ""
+            stock_before = 0
+        try:
+            resolve_product_catalog_links(conn, product, store_id)
+        except CatalogOperationError as error:
+            raise ProductEntryOperationError(
+                error.message, error.status_code
+            ) from error
+        validate_product_for_entry(product, existing=bool(previous))
+        duplicate = conn.execute(
+            """
+            SELECT id FROM products
+            WHERE store_id = ? AND barcode_normalized = ? AND id <> ?
+            """,
+            (store_id, product["barcodeNormalized"], product["id"]),
+        ).fetchone()
+        if duplicate:
+            raise ProductEntryOperationError("Código de barras já cadastrado.", 409)
+
+        created_at = utc_now()
+        stock_after = stock_before + quantity
+        if not previous:
+            product["createdAt"] = created_at
+        product["stock"] = stock_after
+        product["stockEnteredAt"] = product["stockEnteredAt"] or created_at
+        product["updatedAt"] = created_at
+        entry_id = os.urandom(16).hex()
+        entry_number = next_stock_entry_number(conn, store_id)
+        user = session.get("user") or {}
+        item = {
+            "id": os.urandom(16).hex(),
+            "entryId": entry_id,
+            "productId": product["id"],
+            "barcode": product["barcode"],
+            "productName": product["name"],
+            "brandId": product["brandId"],
+            "brand": product["brand"],
+            "categoryId": product["categoryId"],
+            "category": product["category"],
+            "sizeId": product["sizeId"],
+            "size": product["size"],
+            "colorId": product["colorId"],
+            "color": product["color"],
+            "supplierId": product["supplierId"],
+            "supplier": product["supplier"],
+            "quantity": quantity,
+            "unitCost": product["cost"],
+            "totalCost": money_round(quantity * product["cost"]),
+            "salePrice": product["price"],
+            "stockBefore": stock_before,
+            "stockAfter": stock_after,
+        }
+        entry = {
+            "id": entry_id,
+            "entryNumber": entry_number,
+            "code": f"ENTRADA{entry_number:06d}",
+            "supplierId": product["supplierId"],
+            "supplier": product["supplier"],
+            "status": "confirmed",
+            "totalQuantity": quantity,
+            "totalCost": item["totalCost"],
+            "userId": user.get("id", ""),
+            "userName": user.get("name", ""),
+            "createdAt": created_at,
+            "updatedAt": created_at,
+            "items": [item],
+        }
+        movement = {
+            "id": os.urandom(16).hex(),
+            "productId": product["id"],
+            "movementType": "entry",
+            "direction": "in",
+            "quantity": quantity,
+            "balanceBefore": stock_before,
+            "balanceAfter": stock_after,
+            "referenceType": "stock_entry",
+            "referenceId": entry_id,
+            "userId": user.get("id", ""),
+            "userName": user.get("name", ""),
+            "createdAt": created_at,
+        }
+
+        upsert_product(conn, product, store_id)
+        state = product_state_for_update(conn)
+        product = product_with_availability(product, state)
+        reserved = int(product.get("reservedStock", 0) or 0)
+        inventory_movement = persist_inventory_movement(
+            conn,
+            product_id=product["id"],
+            movement_type="entry",
+            real_before=stock_before,
+            real_after=stock_after,
+            reserved_before=reserved,
+            reserved_after=reserved,
+            reference_type="stock_entry",
+            reference_id=entry_id,
+            source_key=f"stock_entry:{entry_id}:{item['id']}",
+            created_at=created_at,
+            store_id=store_id,
+            user=user,
+        )
+        response = {
+            "product": product,
+            "entry": entry,
+            "movement": movement,
+            "inventoryMovement": inventory_movement,
+        }
+        response_json = json.dumps(response, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            INSERT INTO stock_entries (
+                id, store_id, entry_number, supplier_id, supplier_name, status,
+                total_quantity, total_cost, idempotency_key, request_hash,
+                response_json, user_id, user_name, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id,
+                store_id,
+                entry_number,
+                entry["supplierId"],
+                entry["supplier"],
+                quantity,
+                entry["totalCost"],
+                key,
+                request_hash,
+                response_json,
+                entry["userId"],
+                entry["userName"],
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_entry_items (
+                id, entry_id, product_id, barcode, product_name, brand_id,
+                brand_name, category_id, category_name, size_id, size_name,
+                color_id, color_name, supplier_id, supplier_name, quantity,
+                unit_cost, total_cost, sale_price, stock_before, stock_after
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item["id"],
+                entry_id,
+                item["productId"],
+                item["barcode"],
+                item["productName"],
+                item["brandId"] or None,
+                item["brand"],
+                item["categoryId"] or None,
+                item["category"],
+                item["sizeId"] or None,
+                item["size"],
+                item["colorId"] or None,
+                item["color"],
+                item["supplierId"],
+                item["supplier"],
+                quantity,
+                item["unitCost"],
+                item["totalCost"],
+                item["salePrice"],
+                stock_before,
+                stock_after,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_movements (
+                id, store_id, product_id, movement_type, direction, quantity,
+                balance_before, balance_after, reference_type, reference_id,
+                user_id, user_name, created_at
+            )
+            VALUES (?, ?, ?, 'entry', 'in', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                movement["id"],
+                store_id,
+                movement["productId"],
+                quantity,
+                stock_before,
+                stock_after,
+                movement["referenceType"],
+                movement["referenceId"],
+                movement["userId"],
+                movement["userName"],
+                created_at,
+            ),
+        )
+        prepend_product_entry_state(state, product, entry, movement)
+        prepend_inventory_movements(state, [inventory_movement])
+        persist_product_app_state(conn, state, created_at)
+        record_audit(
+            "create",
+            "stock_entry",
+            entry_id,
+            {
+                "entryNumber": entry_number,
+                "productId": product["id"],
+                "quantity": quantity,
+                "stockBefore": stock_before,
+                "stockAfter": stock_after,
+                "supplierId": product["supplierId"],
+            },
+            conn,
+        )
+    return response, False
+
+
+def list_stock_entries_data(
+    product_id: str = "",
+    limit: int = 100,
+    store_id: str = "matriz",
+) -> list[dict]:
+    conditions = ["store_id = ?"]
+    params: list = [store_id]
+    if product_id:
+        conditions.append(
+            "id IN (SELECT entry_id FROM stock_entry_items WHERE product_id = ?)"
+        )
+        params.append(product_id)
+    params.append(max(1, min(int(limit or 100), 200)))
+    with connect_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT response_json AS "responseJson"
+            FROM stock_entries
+            WHERE {' AND '.join(conditions)}
+            ORDER BY entry_number DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    entries = []
+    for row in rows:
+        try:
+            response = json.loads(row["responseJson"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        entry = response.get("entry")
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+class PurchaseOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def purchase_request_hash(payload: dict) -> str:
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def locked_app_state(conn) -> dict:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+    try:
+        state = json.loads(row["data"]) if row else default_state()
+    except (json.JSONDecodeError, TypeError):
+        state = default_state()
+    return state if isinstance(state, dict) else default_state()
+
+
+def payable_adjustment_total(conn, payable_id: str) -> float:
+    returned_row = conn.execute(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS total
+        FROM supplier_return_allocations
+        WHERE payable_id = ? AND allocation_type = 'payable_abatement' AND status = 'active'
+        """,
+        (payable_id,),
+    ).fetchone()
+    credited_row = conn.execute(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS total
+        FROM supplier_credit_usages
+        WHERE payable_id = ? AND status = 'active'
+        """,
+        (payable_id,),
+    ).fetchone()
+    returned = returned_row["total"] if returned_row else 0
+    credited = credited_row["total"] if credited_row else 0
+    return money_round(float(returned or 0) + float(credited or 0))
+
+
+def enrich_payable(conn, payable: dict) -> dict:
+    adjustment = payable_adjustment_total(conn, payable["id"])
+    total_due = payable_total_due(payable)
+    open_amount = max(
+        0,
+        money_round(total_due - float(payable.get("paidAmount") or 0) - adjustment),
+    )
+    return {
+        **payable,
+        "supplierAdjustments": adjustment,
+        "openAmount": open_amount,
+        "status": (
+            "paid"
+            if payable.get("status") != "cancelled" and open_amount <= 0.01
+            else payable.get("status", "pending")
+        ),
+    }
+
+
+def next_supplier_return_number(conn, store_id: str = "matriz") -> int:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"SELECT next_number AS number FROM supplier_return_sequences WHERE store_id = ?{lock_clause}",
+        (store_id,),
+    ).fetchone()
+    number = int(row["number"]) if row else 1
+    conn.execute(
+        """
+        INSERT INTO supplier_return_sequences (store_id, next_number)
+        VALUES (?, ?)
+        ON CONFLICT(store_id) DO UPDATE SET next_number = excluded.next_number
+        """,
+        (store_id, number + 1),
+    )
+    return number
+
+
+def stock_entry_details(conn, entry_id: str, store_id: str = "matriz") -> dict | None:
+    row = conn.execute(
+        """
+        SELECT e.id, e.entry_number AS "entryNumber", e.supplier_id AS "supplierId",
+               e.supplier_name AS supplier, e.total_quantity AS "totalQuantity",
+               e.total_cost AS "totalCost", e.user_id AS "userId",
+               e.user_name AS "userName", e.created_at AS "createdAt",
+               e.updated_at AS "updatedAt", c.created_at AS "cancelledAt",
+               c.reason AS "cancellationReason", c.notes AS "cancellationNotes",
+               e.origin, e.warranty_id AS "warrantyId"
+        FROM stock_entries e
+        LEFT JOIN stock_entry_cancellations c ON c.entry_id = e.id
+        WHERE e.store_id = ? AND e.id = ?
+        """,
+        (store_id, entry_id),
+    ).fetchone()
+    if not row:
+        return None
+    entry = dict(row)
+    entry["code"] = f"ENTRADA{int(entry['entryNumber']):06d}"
+    entry["status"] = "cancelled" if entry.get("cancelledAt") else "confirmed"
+    entry["items"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT id, entry_id AS "entryId", product_id AS "productId",
+                   barcode, product_name AS "productName", brand_id AS "brandId",
+                   brand_name AS brand, category_id AS "categoryId",
+                   category_name AS category, size_id AS "sizeId", size_name AS size,
+                   color_id AS "colorId", color_name AS color,
+                   supplier_id AS "supplierId", supplier_name AS supplier,
+                   quantity, unit_cost AS "unitCost", total_cost AS "totalCost",
+                   sale_price AS "salePrice", stock_before AS "stockBefore",
+                   stock_after AS "stockAfter"
+            FROM stock_entry_items WHERE entry_id = ? ORDER BY id
+            """,
+            (entry_id,),
+        ).fetchall()
+    ]
+    payable_rows = conn.execute(
+        """
+        SELECT p.id, p.supplier, p.category, p.amount, p.issue_date AS "issueDate",
+               p.due_date AS "dueDate", p.notes, p.paid_amount AS "paidAmount",
+               p.fee, p.discount, p.status, p.paid_at AS "paidAt",
+               p.created_at AS "createdAt", p.updated_at AS "updatedAt",
+               p.supplier_id AS "supplierId",
+               p.expense_category_id AS "expenseCategoryId"
+        FROM stock_entry_payables l
+        JOIN payables p ON p.id = l.payable_id
+        WHERE l.store_id = ? AND l.entry_id = ?
+        ORDER BY p.due_date, p.created_at
+        """,
+        (store_id, entry_id),
+    ).fetchall()
+    entry["payables"] = [enrich_payable(conn, payable_from_row(item)) for item in payable_rows]
+    valid_payables = [item for item in entry["payables"] if item["status"] != "cancelled"]
+    entry["financial"] = {
+        "payableTotal": money_round(sum(item["amount"] for item in valid_payables)),
+        "paidTotal": money_round(sum(item["paidAmount"] for item in valid_payables)),
+        "openTotal": money_round(sum(item["openAmount"] for item in valid_payables)),
+    }
+    entry["financial"]["difference"] = money_round(
+        entry["totalCost"] - entry["financial"]["payableTotal"]
+    )
+    entry["returns"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT id, return_number AS "returnNumber", total_quantity AS "totalQuantity",
+                   total_value AS "totalValue", pending_value AS "pendingValue",
+                   status, financial_status AS "financialStatus",
+                   created_at AS "createdAt"
+            FROM supplier_returns WHERE store_id = ? AND entry_id = ?
+            ORDER BY return_number DESC
+            """,
+            (store_id, entry_id),
+        ).fetchall()
+    ]
+    return entry
+
+
+def list_purchase_stock_entries(
+    product_id: str = "",
+    limit: int = 100,
+    store_id: str = "matriz",
+) -> list[dict]:
+    conditions = ["e.store_id = ?"]
+    params: list = [store_id]
+    if product_id:
+        conditions.append(
+            "e.id IN (SELECT entry_id FROM stock_entry_items WHERE product_id = ?)"
+        )
+        params.append(product_id)
+    params.append(max(1, min(int(limit or 100), 200)))
+    with connect_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.id FROM stock_entries e
+            WHERE {' AND '.join(conditions)}
+            ORDER BY e.entry_number DESC LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [
+            entry
+            for row in rows
+            if (entry := stock_entry_details(conn, row["id"], store_id)) is not None
+        ]
+
+
+def create_entry_payables(
+    entry_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> tuple[dict, list[dict]]:
+    requested = payload.get("payables")
+    items = requested if isinstance(requested, list) else [payload]
+    if not items or len(items) > 24:
+        raise PurchaseOperationError("Informe de uma a 24 contas a pagar.")
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        entry = stock_entry_details(conn, entry_id, store_id)
+        if not entry:
+            raise PurchaseOperationError("Entrada não encontrada.", 404)
+        if entry.get("origin") == "warranty_replacement":
+            raise PurchaseOperationError(
+                "Entrada de substituicao em garantia nao gera conta a pagar.",
+                409,
+            )
+        if entry["status"] != "confirmed":
+            raise PurchaseOperationError("Entrada cancelada não pode gerar contas.", 409)
+        supplier = conn.execute(
+            f"SELECT id, name, status FROM suppliers WHERE store_id = ? AND id = ?{lock_clause}",
+            (store_id, entry["supplierId"]),
+        ).fetchone()
+        if not supplier or supplier["status"] != "active":
+            raise PurchaseOperationError("O fornecedor histórico precisa estar ativo.", 409)
+        now = utc_now()
+        state = locked_app_state(conn)
+        created = []
+        for source in items:
+            if not isinstance(source, dict):
+                raise PurchaseOperationError("Conta a pagar inválida.")
+            payable = normalize_payable_payload({
+                "id": source.get("id") or os.urandom(16).hex(),
+                "supplierId": entry["supplierId"],
+                "supplier": entry["supplier"],
+                "category": "Mercadorias",
+                "amount": source.get("amount"),
+                "issueDate": source.get("issueDate") or now[:10],
+                "dueDate": source.get("dueDate"),
+                "notes": source.get("notes") or f"Entrada {entry['code']}",
+                "status": "pending",
+                "paidAmount": 0,
+                "fee": 0,
+                "discount": 0,
+                "createdAt": now,
+            })
+            error = validate_payable(payable)
+            if error:
+                raise PurchaseOperationError(error)
+            duplicate = conn.execute(
+                "SELECT id FROM stock_entry_payables WHERE payable_id = ?",
+                (payable["id"],),
+            ).fetchone()
+            if duplicate:
+                raise PurchaseOperationError("Conta já vinculada a uma Entrada.", 409)
+            conn.execute(
+                """
+                INSERT INTO payables (
+                    id, store_id, supplier, category, amount, issue_date, due_date,
+                    notes, paid_amount, fee, discount, status, paid_at, created_at,
+                    updated_at, supplier_id, expense_category_id
+                ) VALUES (?, ?, ?, 'Mercadorias', ?, ?, ?, ?, 0, 0, 0,
+                          'pending', '', ?, ?, ?, NULL)
+                """,
+                (
+                    payable["id"], store_id, entry["supplier"], payable["amount"],
+                    payable["issueDate"], payable["dueDate"], payable["notes"],
+                    now, now, entry["supplierId"],
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO stock_entry_payables
+                    (id, store_id, entry_id, payable_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (os.urandom(16).hex(), store_id, entry_id, payable["id"], now),
+            )
+            created.append(payable)
+        current = state.get("payables") if isinstance(state.get("payables"), list) else []
+        ids = {item["id"] for item in created}
+        state["payables"] = [*created, *[item for item in current if item.get("id") not in ids]]
+        persist_product_app_state(conn, state, now)
+        record_audit(
+            "create",
+            "stock_entry_payables",
+            entry_id,
+            {"payableIds": sorted(ids), "total": sum(item["amount"] for item in created)},
+            conn,
+        )
+        result = stock_entry_details(conn, entry_id, store_id)
+    return result, created
+
+
+def cancel_stock_entry(
+    entry_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    reason = str(payload.get("reason", "") or "").strip()
+    notes = str(payload.get("notes", "") or "").strip()
+    key = str(idempotency_key or "").strip()
+    if not reason:
+        raise PurchaseOperationError("Informe o motivo do cancelamento.")
+    if not key:
+        raise PurchaseOperationError("Informe a chave de idempotência.", 400, "IDEMPOTENCY_KEY_REQUIRED")
+    request_hash = purchase_request_hash({"entryId": entry_id, "reason": reason, "notes": notes})
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM stock_entry_cancellations
+            WHERE store_id = ? AND (entry_id = ? OR idempotency_key = ?){lock_clause}
+            """,
+            (store_id, entry_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise PurchaseOperationError("Cancelamento já registrado com dados diferentes.", 409, "IDEMPOTENCY_CONFLICT")
+            return json.loads(replay["responseJson"]), True
+        entry = stock_entry_details(conn, entry_id, store_id)
+        if not entry:
+            raise PurchaseOperationError("Entrada não encontrada.", 404)
+        if entry.get("origin") == "warranty_replacement":
+            raise PurchaseOperationError(
+                "Entrada de garantia deve ser corrigida pelo fluxo da garantia.",
+                409,
+            )
+        if any(item["status"] == "confirmed" for item in entry["returns"]):
+            raise PurchaseOperationError("Entrada com devolução ao fornecedor não pode ser cancelada.", 409)
+        for payable in entry["payables"]:
+            if payable["paidAmount"] > 0 or payable["supplierAdjustments"] > 0:
+                raise PurchaseOperationError("Há conta vinculada com efeito financeiro. Regularize-a antes de cancelar.", 409)
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        now = utc_now()
+        user = session.get("user") or {}
+        movements = []
+        inventory_movements = []
+        products = []
+        for item in entry["items"]:
+            product_row = conn.execute(
+                f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+                (store_id, item["productId"]),
+            ).fetchone()
+            if not product_row:
+                raise PurchaseOperationError("Produto da Entrada não foi encontrado.", 409)
+            product = product_from_row(product_row)
+            available = int(product["stock"]) - int(reserved.get(product["id"], 0) or 0)
+            if available < int(item["quantity"]):
+                raise PurchaseOperationError(
+                    f"Estoque disponível insuficiente para cancelar {item['productName']}.",
+                    409,
+                )
+            before = int(product["stock"])
+            after = before - int(item["quantity"])
+            product["stock"] = after
+            product["updatedAt"] = now
+            upsert_product(conn, product, store_id)
+            movement = {
+                "id": os.urandom(16).hex(), "productId": product["id"],
+                "movementType": "entry_cancellation", "direction": "out",
+                "quantity": int(item["quantity"]), "balanceBefore": before,
+                "balanceAfter": after, "referenceType": "stock_entry_cancellation",
+                "referenceId": entry_id, "userId": user.get("id", ""),
+                "userName": user.get("name", ""), "createdAt": now,
+            }
+            conn.execute(
+                """
+                INSERT INTO purchase_stock_movements (
+                    id, store_id, product_id, movement_type, direction, quantity,
+                    balance_before, balance_after, reference_type, reference_id,
+                    user_id, user_name, created_at
+                ) VALUES (?, ?, ?, 'entry_cancellation', 'out', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    movement["id"], store_id, product["id"], movement["quantity"],
+                    before, after, movement["referenceType"], entry_id,
+                    movement["userId"], movement["userName"], now,
+                ),
+            )
+            reserved_quantity = int(reserved.get(product["id"], 0) or 0)
+            inventory_movements.append(
+                persist_inventory_movement(
+                    conn,
+                    product_id=product["id"],
+                    movement_type="entry_cancellation",
+                    real_before=before,
+                    real_after=after,
+                    reserved_before=reserved_quantity,
+                    reserved_after=reserved_quantity,
+                    reference_type="stock_entry_cancellation",
+                    reference_id=entry_id,
+                    source_key=f"stock_entry_cancellation:{entry_id}:{item['id']}",
+                    created_at=now,
+                    store_id=store_id,
+                    user=user,
+                    notes=reason,
+                )
+            )
+            products.append(product_with_availability(product, state))
+            movements.append(movement)
+        payable_ids = [item["id"] for item in entry["payables"] if item["status"] != "cancelled"]
+        for payable_id in payable_ids:
+            conn.execute(
+                "UPDATE payables SET status = 'cancelled', updated_at = ? WHERE store_id = ? AND id = ?",
+                (now, store_id, payable_id),
+            )
+        result = {
+            "entry": {**entry, "status": "cancelled", "cancelledAt": now,
+                      "cancellationReason": reason, "cancellationNotes": notes},
+            "products": products, "movements": movements,
+            "inventoryMovements": inventory_movements,
+            "cancelledPayableIds": payable_ids,
+        }
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            INSERT INTO stock_entry_cancellations (
+                id, store_id, entry_id, reason, notes, idempotency_key,
+                request_hash, response_json, user_id, user_name, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                os.urandom(16).hex(), store_id, entry_id, reason, notes, key,
+                request_hash, response_json, user.get("id", ""), user.get("name", ""), now,
+            ),
+        )
+        for product in products:
+            replace_product_in_state(state, product)
+        entries = state.get("stockEntries") if isinstance(state.get("stockEntries"), list) else []
+        state["stockEntries"] = [result["entry"] if item.get("id") == entry_id else item for item in entries]
+        cash_movements = state.get("stockMovements") if isinstance(state.get("stockMovements"), list) else []
+        state["stockMovements"] = [*movements, *cash_movements]
+        prepend_inventory_movements(state, inventory_movements)
+        state["payables"] = [
+            {**item, "status": "cancelled", "updatedAt": now}
+            if item.get("id") in payable_ids else item
+            for item in (state.get("payables") or [])
+        ]
+        persist_product_app_state(conn, state, now)
+        record_audit("cancel", "stock_entry", entry_id, {
+            "reason": reason, "productIds": [item["productId"] for item in entry["items"]],
+            "cancelledPayableIds": payable_ids,
+        }, conn)
+    return result, False
+
+
+def supplier_credit_rows(conn, supplier_id: str = "", store_id: str = "matriz") -> list[dict]:
+    conditions = ["store_id = ?"]
+    params: list = [store_id]
+    if supplier_id:
+        conditions.append("supplier_id = ?")
+        params.append(supplier_id)
+    rows = conn.execute(
+        f"""
+        SELECT id, supplier_id AS "supplierId", supplier_name AS supplier,
+               return_id AS "returnId", original_amount AS "originalAmount",
+               used_amount AS "usedAmount", status, created_at AS "createdAt",
+               updated_at AS "updatedAt"
+        FROM supplier_credits WHERE {' AND '.join(conditions)}
+        ORDER BY created_at, id
+        """,
+        tuple(params),
+    ).fetchall()
+    return [
+        {
+            **dict(row),
+            "availableAmount": (
+                0 if row["status"] == "reversed"
+                else money_round(row["originalAmount"] - row["usedAmount"])
+            ),
+        }
+        for row in rows
+    ]
+
+
+def create_supplier_return(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    entry_id = str(payload.get("entryId", "") or "").strip()
+    reason = str(payload.get("reason", "") or "").strip()
+    notes = str(payload.get("notes", "") or "").strip()
+    requested_items = payload.get("items")
+    key = str(idempotency_key or "").strip()
+    if not entry_id or not reason or not isinstance(requested_items, list) or not requested_items:
+        raise PurchaseOperationError("Informe Entrada, itens e motivo da devolução.")
+    if not key:
+        raise PurchaseOperationError("Informe a chave de idempotência.", 400, "IDEMPOTENCY_KEY_REQUIRED")
+    canonical_items = sorted(
+        [
+            {
+                "entryItemId": str(item.get("entryItemId", "") or "").strip(),
+                "quantity": strict_positive_integer(item.get("quantity")),
+            }
+            for item in requested_items if isinstance(item, dict)
+        ],
+        key=lambda item: item["entryItemId"],
+    )
+    financial = payload.get("financial") if isinstance(payload.get("financial"), dict) else {}
+    canonical = {
+        "entryId": entry_id, "reason": reason, "notes": notes,
+        "items": canonical_items,
+        "financial": {
+            "payableAbatements": sorted(financial.get("payableAbatements") or [], key=lambda x: str(x.get("payableId", ""))),
+            "creditAmount": money_round(financial.get("creditAmount", 0)),
+            "cashRefund": money_round(financial.get("cashRefund", 0)),
+            "pixRefund": money_round(financial.get("pixRefund", 0)),
+        },
+    }
+    request_hash = purchase_request_hash(canonical)
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM supplier_returns WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise PurchaseOperationError("Chave já utilizada com outra devolução.", 409, "IDEMPOTENCY_CONFLICT")
+            return json.loads(replay["responseJson"]), True
+        entry = stock_entry_details(conn, entry_id, store_id)
+        if not entry:
+            raise PurchaseOperationError("Entrada não encontrada.", 404)
+        if entry["status"] != "confirmed":
+            raise PurchaseOperationError("Entrada cancelada não aceita devolução.", 409)
+        by_id = {item["id"]: item for item in entry["items"]}
+        if not canonical_items or any(item["entryItemId"] not in by_id for item in canonical_items):
+            raise PurchaseOperationError("Há item que não pertence à Entrada.")
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        now = utc_now()
+        user = session.get("user") or {}
+        return_id = os.urandom(16).hex()
+        return_number = next_supplier_return_number(conn, store_id)
+        items = []
+        products = []
+        movements = []
+        inventory_movements = []
+        for requested in canonical_items:
+            source = by_id[requested["entryItemId"]]
+            previous = conn.execute(
+                """
+                SELECT COALESCE(SUM(i.quantity), 0) AS total
+                FROM supplier_return_items i
+                JOIN supplier_returns r ON r.id = i.return_id
+                WHERE i.entry_item_id = ? AND r.status = 'confirmed'
+                """,
+                (source["id"],),
+            ).fetchone()["total"]
+            if int(previous or 0) + requested["quantity"] > int(source["quantity"]):
+                raise PurchaseOperationError(f"Quantidade devolvida excede a Entrada de {source['productName']}.", 409)
+            product_row = conn.execute(
+                f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+                (store_id, source["productId"]),
+            ).fetchone()
+            if not product_row:
+                raise PurchaseOperationError("Produto da Entrada não encontrado.", 409)
+            product = product_from_row(product_row)
+            available = int(product["stock"]) - int(reserved.get(product["id"], 0) or 0)
+            if available < requested["quantity"]:
+                raise PurchaseOperationError(f"Estoque disponível insuficiente para devolver {source['productName']}.", 409)
+            before = int(product["stock"])
+            after = before - requested["quantity"]
+            product["stock"] = after
+            product["updatedAt"] = now
+            upsert_product(conn, product, store_id)
+            item = {
+                "id": os.urandom(16).hex(), "entryItemId": source["id"],
+                "productId": source["productId"], "productName": source["productName"],
+                "barcode": source["barcode"], "quantity": requested["quantity"],
+                "unitCost": source["unitCost"],
+                "totalCost": money_round(requested["quantity"] * source["unitCost"]),
+                "stockBefore": before, "stockAfter": after,
+            }
+            items.append(item)
+            movement = {
+                "id": os.urandom(16).hex(), "productId": source["productId"],
+                "movementType": "supplier_return", "direction": "out",
+                "quantity": requested["quantity"], "balanceBefore": before,
+                "balanceAfter": after, "referenceType": "supplier_return",
+                "referenceId": return_id, "userId": user.get("id", ""),
+                "userName": user.get("name", ""), "createdAt": now,
+            }
+            movements.append(movement)
+            reserved_quantity = int(reserved.get(product["id"], 0) or 0)
+            inventory_movements.append(
+                persist_inventory_movement(
+                    conn,
+                    product_id=product["id"],
+                    movement_type="supplier_return",
+                    real_before=before,
+                    real_after=after,
+                    reserved_before=reserved_quantity,
+                    reserved_after=reserved_quantity,
+                    reference_type="supplier_return",
+                    reference_id=return_id,
+                    source_key=f"supplier_return:{return_id}:{item['id']}",
+                    created_at=now,
+                    store_id=store_id,
+                    user=user,
+                    notes=reason,
+                )
+            )
+            products.append(product_with_availability(product, state))
+        total_value = money_round(sum(item["totalCost"] for item in items))
+        abatements = canonical["financial"]["payableAbatements"]
+        credit_amount = canonical["financial"]["creditAmount"]
+        cash_refund = canonical["financial"]["cashRefund"]
+        pix_refund = canonical["financial"]["pixRefund"]
+        allocated = money_round(
+            sum(money_round(item.get("amount", 0)) for item in abatements)
+            + credit_amount + cash_refund + pix_refund
+        )
+        if min(credit_amount, cash_refund, pix_refund) < 0 or allocated - total_value > 0.01:
+            raise PurchaseOperationError("Tratamento financeiro excede o valor da devolução.")
+        pending_value = money_round(total_value - allocated)
+        financial_status = "pending" if allocated <= 0 else "settled" if pending_value <= 0.01 else "partial"
+        conn.execute(
+            """
+            INSERT INTO supplier_returns (
+                id, store_id, return_number, entry_id, supplier_id, supplier_name,
+                reason, notes, total_quantity, total_value, pending_value, status,
+                financial_status, idempotency_key, request_hash, response_json,
+                user_id, user_name, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, '{}', ?, ?, ?, ?)
+            """,
+            (
+                return_id, store_id, return_number, entry_id, entry["supplierId"],
+                entry["supplier"], reason, notes, sum(item["quantity"] for item in items),
+                total_value, pending_value, financial_status, key, request_hash,
+                user.get("id", ""), user.get("name", ""), now, now,
+            ),
+        )
+        allocations = []
+        cash = []
+        for source in abatements:
+            payable_id = str(source.get("payableId", "") or "").strip()
+            amount = money_round(source.get("amount", 0))
+            row = conn.execute(
+                f"""
+                SELECT id, supplier, category, amount, issue_date AS "issueDate",
+                       due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+                       fee, discount, status, paid_at AS "paidAt",
+                       created_at AS "createdAt", updated_at AS "updatedAt",
+                       supplier_id AS "supplierId",
+                       expense_category_id AS "expenseCategoryId"
+                FROM payables WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, payable_id),
+            ).fetchone()
+            if not row or amount <= 0:
+                raise PurchaseOperationError("Conta para abatimento inválida.")
+            payable = enrich_payable(conn, payable_from_row(row))
+            if payable["supplierId"] != entry["supplierId"] or payable["status"] == "cancelled":
+                raise PurchaseOperationError("A conta não pertence ao mesmo fornecedor.", 409)
+            if amount - payable["openAmount"] > 0.01:
+                raise PurchaseOperationError("Abatimento excede o saldo da conta.", 409)
+            allocations.append({"type": "payable_abatement", "payableId": payable_id, "amount": amount})
+        if credit_amount > 0:
+            credit = {
+                "id": os.urandom(16).hex(), "supplierId": entry["supplierId"],
+                "supplier": entry["supplier"], "returnId": return_id,
+                "originalAmount": credit_amount, "usedAmount": 0,
+                "availableAmount": credit_amount, "status": "available",
+                "createdAt": now, "updatedAt": now,
+            }
+            conn.execute(
+                """
+                INSERT INTO supplier_credits (
+                    id, store_id, supplier_id, supplier_name, return_id,
+                    original_amount, used_amount, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 'available', ?, ?)
+                """,
+                (credit["id"], store_id, entry["supplierId"], entry["supplier"], return_id, credit_amount, now, now),
+            )
+            allocations.append({"type": "supplier_credit", "creditId": credit["id"], "amount": credit_amount})
+        for method, amount in (("cash", cash_refund), ("pix", pix_refund)):
+            if amount <= 0:
+                continue
+            movement = normalize_cash_movement_payload({
+                "direction": "in", "type": "devolução fornecedor",
+                "description": f"Reembolso {entry['supplier']} - DEVFORN{return_number:06d}",
+                "method": method, "amount": amount, "refId": return_id,
+                "createdAt": now,
+            })
+            conn.execute(
+                """
+                INSERT INTO cash_movements (
+                    id, store_id, direction, type, description, method, amount,
+                    ref_id, expense_category_id, created_at
+                ) VALUES (?, ?, 'in', ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (movement["id"], store_id, movement["type"], movement["description"], method, amount, return_id, now),
+            )
+            cash.append(movement)
+            allocations.append({
+                "type": f"{method}_refund", "cashMovementId": movement["id"], "amount": amount,
+            })
+        result = {
+            "return": {
+                "id": return_id, "returnNumber": return_number,
+                "code": f"DEVFORN{return_number:06d}", "entryId": entry_id,
+                "supplierId": entry["supplierId"], "supplier": entry["supplier"],
+                "reason": reason, "notes": notes,
+                "totalQuantity": sum(item["quantity"] for item in items),
+                "totalValue": total_value, "pendingValue": pending_value,
+                "status": "confirmed", "financialStatus": financial_status,
+                "createdAt": now, "updatedAt": now, "items": items,
+                "allocations": allocations,
+            },
+            "products": products, "movements": movements,
+            "inventoryMovements": inventory_movements, "cash": cash,
+        }
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            "UPDATE supplier_returns SET response_json = ? WHERE id = ?",
+            (response_json, return_id),
+        )
+        for item, movement in zip(items, movements):
+            conn.execute(
+                """
+                INSERT INTO supplier_return_items (
+                    id, return_id, entry_item_id, product_id, product_name,
+                    barcode, quantity, unit_cost, total_cost, stock_before, stock_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["id"], return_id, item["entryItemId"], item["productId"],
+                    item["productName"], item["barcode"], item["quantity"],
+                    item["unitCost"], item["totalCost"], item["stockBefore"], item["stockAfter"],
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO purchase_stock_movements (
+                    id, store_id, product_id, movement_type, direction, quantity,
+                    balance_before, balance_after, reference_type, reference_id,
+                    user_id, user_name, created_at
+                ) VALUES (?, ?, ?, 'supplier_return', 'out', ?, ?, ?, 'supplier_return', ?, ?, ?, ?)
+                """,
+                (
+                    movement["id"], store_id, movement["productId"], movement["quantity"],
+                    movement["balanceBefore"], movement["balanceAfter"], return_id,
+                    movement["userId"], movement["userName"], now,
+                ),
+            )
+        for allocation in allocations:
+            conn.execute(
+                """
+                INSERT INTO supplier_return_allocations (
+                    id, store_id, return_id, allocation_type, payable_id,
+                    credit_id, cash_movement_id, amount, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                """,
+                (
+                    os.urandom(16).hex(), store_id, return_id, allocation["type"],
+                    allocation.get("payableId"), allocation.get("creditId"),
+                    allocation.get("cashMovementId"), allocation["amount"], now,
+                ),
+            )
+        for product in products:
+            replace_product_in_state(state, product)
+        state["supplierReturns"] = [result["return"], *(state.get("supplierReturns") or [])]
+        state["stockMovements"] = [*movements, *(state.get("stockMovements") or [])]
+        prepend_inventory_movements(state, inventory_movements)
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        state["supplierCredits"] = [
+            *supplier_credit_rows(conn, entry["supplierId"], store_id),
+            *[item for item in (state.get("supplierCredits") or []) if item.get("supplierId") != entry["supplierId"]],
+        ]
+        persist_product_app_state(conn, state, now)
+        record_audit("create", "supplier_return", return_id, {
+            "entryId": entry_id, "totalQuantity": result["return"]["totalQuantity"],
+            "totalValue": total_value, "financialStatus": financial_status,
+        }, conn)
+    return result, False
+
+
+def use_supplier_credit(
+    payable_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    amount = money_round(payload.get("amount", 0))
+    key = str(idempotency_key or "").strip()
+    if amount <= 0 or not key:
+        raise PurchaseOperationError("Informe valor e chave de idempotência válidos.")
+    request_hash = purchase_request_hash({"payableId": payable_id, "amount": amount})
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM supplier_credit_usages WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise PurchaseOperationError("Chave já utilizada com dados diferentes.", 409, "IDEMPOTENCY_CONFLICT")
+            return json.loads(replay["responseJson"]), True
+        row = conn.execute(
+            f"""
+            SELECT id, supplier, category, amount, issue_date AS "issueDate",
+                   due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+                   fee, discount, status, paid_at AS "paidAt",
+                   created_at AS "createdAt", updated_at AS "updatedAt",
+                   supplier_id AS "supplierId",
+                   expense_category_id AS "expenseCategoryId"
+            FROM payables WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, payable_id),
+        ).fetchone()
+        if not row:
+            raise PurchaseOperationError("Conta não encontrada.", 404)
+        payable = enrich_payable(conn, payable_from_row(row))
+        if not payable["supplierId"] or payable["status"] in {"paid", "cancelled"}:
+            raise PurchaseOperationError("Conta não aceita crédito de fornecedor.", 409)
+        if amount - payable["openAmount"] > 0.01:
+            raise PurchaseOperationError("Crédito excede o saldo da conta.", 409)
+        credits = conn.execute(
+            f"""
+            SELECT id, original_amount AS "originalAmount", used_amount AS "usedAmount"
+            FROM supplier_credits
+            WHERE store_id = ? AND supplier_id = ? AND status IN ('available', 'partially_used')
+              AND original_amount - used_amount > 0.009
+            ORDER BY created_at, id{lock_clause}
+            """,
+            (store_id, payable["supplierId"]),
+        ).fetchall()
+        available = money_round(sum(row["originalAmount"] - row["usedAmount"] for row in credits))
+        if amount - available > 0.01:
+            raise PurchaseOperationError("Crédito disponível insuficiente.", 409)
+        now = utc_now()
+        user = session.get("user") or {}
+        usage_id = os.urandom(16).hex()
+        conn.execute(
+            """
+            INSERT INTO supplier_credit_usages (
+                id, store_id, supplier_id, payable_id, amount, status,
+                idempotency_key, request_hash, response_json, user_id,
+                user_name, created_at, reversed_at
+            ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, '{}', ?, ?, ?, NULL)
+            """,
+            (
+                usage_id, store_id, payable["supplierId"], payable_id, amount,
+                key, request_hash, user.get("id", ""), user.get("name", ""), now,
+            ),
+        )
+        remaining = amount
+        allocations = []
+        for credit in credits:
+            if remaining <= 0.009:
+                break
+            credit_available = money_round(credit["originalAmount"] - credit["usedAmount"])
+            used = min(remaining, credit_available)
+            new_used = money_round(credit["usedAmount"] + used)
+            status = "used" if new_used + 0.01 >= credit["originalAmount"] else "partially_used"
+            conn.execute(
+                "UPDATE supplier_credits SET used_amount = ?, status = ?, updated_at = ? WHERE id = ?",
+                (new_used, status, now, credit["id"]),
+            )
+            allocation = {"id": os.urandom(16).hex(), "creditId": credit["id"], "amount": used}
+            conn.execute(
+                """
+                INSERT INTO supplier_credit_allocations
+                    (id, usage_id, credit_id, amount, status, created_at)
+                VALUES (?, ?, ?, ?, 'active', ?)
+                """,
+                (allocation["id"], usage_id, credit["id"], used, now),
+            )
+            allocations.append(allocation)
+            remaining = money_round(remaining - used)
+        response = {
+            "usage": {
+                "id": usage_id, "payableId": payable_id,
+                "supplierId": payable["supplierId"], "amount": amount,
+                "status": "active", "createdAt": now, "allocations": allocations,
+            }
+        }
+        payable = enrich_payable(conn, payable)
+        response["payable"] = payable
+        response["credits"] = supplier_credit_rows(conn, payable["supplierId"], store_id)
+        conn.execute(
+            "UPDATE supplier_credit_usages SET response_json = ? WHERE id = ?",
+            (json.dumps(response, ensure_ascii=False, sort_keys=True), usage_id),
+        )
+        state = locked_app_state(conn)
+        current_payables = state.get("payables") if isinstance(state.get("payables"), list) else []
+        state["payables"] = [payable if item.get("id") == payable_id else item for item in current_payables]
+        state["supplierCredits"] = [
+            *response["credits"],
+            *[item for item in (state.get("supplierCredits") or []) if item.get("supplierId") != payable["supplierId"]],
+        ]
+        persist_product_app_state(conn, state, now)
+        record_audit("apply", "supplier_credit", usage_id, {
+            "payableId": payable_id, "amount": amount,
+            "creditIds": [item["creditId"] for item in allocations],
+        }, conn)
+    return response, False
+
+
+def reverse_supplier_credit_usage(
+    usage_id: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        usage = conn.execute(
+            f"""
+            SELECT id, supplier_id AS "supplierId", payable_id AS "payableId",
+                   amount, status, reversed_at AS "reversedAt"
+            FROM supplier_credit_usages
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, usage_id),
+        ).fetchone()
+        if not usage:
+            raise PurchaseOperationError("Uso de crédito não encontrado.", 404)
+        if usage["status"] == "reversed":
+            return {"usage": dict(usage)}, True
+        allocations = conn.execute(
+            f"""
+            SELECT id, credit_id AS "creditId", amount
+            FROM supplier_credit_allocations
+            WHERE usage_id = ? AND status = 'active'
+            ORDER BY id{lock_clause}
+            """,
+            (usage_id,),
+        ).fetchall()
+        now = utc_now()
+        for allocation in allocations:
+            credit = conn.execute(
+                f"""
+                SELECT original_amount AS "originalAmount", used_amount AS "usedAmount",
+                       status
+                FROM supplier_credits WHERE id = ?{lock_clause}
+                """,
+                (allocation["creditId"],),
+            ).fetchone()
+            if not credit:
+                raise PurchaseOperationError("Crédito de origem não encontrado.", 409)
+            used = max(0, money_round(credit["usedAmount"] - allocation["amount"]))
+            status = "available" if used <= 0.01 else "partially_used"
+            conn.execute(
+                "UPDATE supplier_credits SET used_amount = ?, status = ?, updated_at = ? WHERE id = ?",
+                (used, status, now, allocation["creditId"]),
+            )
+            conn.execute(
+                "UPDATE supplier_credit_allocations SET status = 'reversed' WHERE id = ?",
+                (allocation["id"],),
+            )
+        conn.execute(
+            "UPDATE supplier_credit_usages SET status = 'reversed', reversed_at = ? WHERE id = ?",
+            (now, usage_id),
+        )
+        payable_row = conn.execute(
+            """
+            SELECT id, supplier, category, amount, issue_date AS "issueDate",
+                   due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+                   fee, discount, status, paid_at AS "paidAt",
+                   created_at AS "createdAt", updated_at AS "updatedAt",
+                   supplier_id AS "supplierId",
+                   expense_category_id AS "expenseCategoryId"
+            FROM payables WHERE store_id = ? AND id = ?
+            """,
+            (store_id, usage["payableId"]),
+        ).fetchone()
+        payable = enrich_payable(conn, payable_from_row(payable_row)) if payable_row else None
+        credits = supplier_credit_rows(conn, usage["supplierId"], store_id)
+        result = {
+            "usage": {**dict(usage), "status": "reversed", "reversedAt": now},
+            "payable": payable,
+            "credits": credits,
+        }
+        state = locked_app_state(conn)
+        if payable:
+            state["payables"] = [
+                payable if item.get("id") == payable["id"] else item
+                for item in (state.get("payables") or [])
+            ]
+        state["supplierCredits"] = [
+            *credits,
+            *[item for item in (state.get("supplierCredits") or []) if item.get("supplierId") != usage["supplierId"]],
+        ]
+        persist_product_app_state(conn, state, now)
+        record_audit("reverse", "supplier_credit", usage_id, {
+            "payableId": usage["payableId"], "amount": usage["amount"],
+        }, conn)
+    return result, False
+
+
+def cancel_supplier_return(return_id: str, store_id: str = "matriz") -> tuple[dict, bool]:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT id, supplier_id AS "supplierId", status
+            FROM supplier_returns WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, return_id),
+        ).fetchone()
+        if not row:
+            raise PurchaseOperationError("Devolução não encontrada.", 404)
+        if row["status"] == "cancelled":
+            return {"returnId": return_id, "status": "cancelled"}, True
+        allocations = conn.execute(
+            f"""
+            SELECT id, allocation_type AS "type", credit_id AS "creditId"
+            FROM supplier_return_allocations
+            WHERE return_id = ? AND status = 'active'{lock_clause}
+            """,
+            (return_id,),
+        ).fetchall()
+        blocking = [
+            item for item in allocations
+            if item["type"] in {"payable_abatement", "cash_refund", "pix_refund"}
+        ]
+        if blocking:
+            raise PurchaseOperationError(
+                "Reverta primeiro os efeitos financeiros desta devolução.",
+                409,
+            )
+        for allocation in allocations:
+            if allocation["type"] != "supplier_credit":
+                continue
+            credit = conn.execute(
+                f"SELECT used_amount AS \"usedAmount\" FROM supplier_credits WHERE id = ?{lock_clause}",
+                (allocation["creditId"],),
+            ).fetchone()
+            if credit and float(credit["usedAmount"] or 0) > 0.01:
+                raise PurchaseOperationError(
+                    "O crédito desta devolução já foi utilizado e precisa ser estornado primeiro.",
+                    409,
+                )
+        state = locked_app_state(conn)
+        now = utc_now()
+        user = session.get("user") or {}
+        products = []
+        movements = []
+        inventory_movements = []
+        items = conn.execute(
+            f"""
+            SELECT id AS "returnItemId", product_id AS "productId", quantity
+            FROM supplier_return_items WHERE return_id = ?{lock_clause}
+            """,
+            (return_id,),
+        ).fetchall()
+        for item in items:
+            product_row = conn.execute(
+                f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+                (store_id, item["productId"]),
+            ).fetchone()
+            if not product_row:
+                raise PurchaseOperationError("Produto da devolução não foi encontrado.", 409)
+            product = product_from_row(product_row)
+            before = int(product["stock"])
+            after = before + int(item["quantity"])
+            product["stock"] = after
+            product["updatedAt"] = now
+            upsert_product(conn, product, store_id)
+            movement = {
+                "id": os.urandom(16).hex(), "productId": product["id"],
+                "movementType": "supplier_return_cancellation", "direction": "in",
+                "quantity": int(item["quantity"]), "balanceBefore": before,
+                "balanceAfter": after, "referenceType": "supplier_return_cancellation",
+                "referenceId": return_id, "userId": user.get("id", ""),
+                "userName": user.get("name", ""), "createdAt": now,
+            }
+            conn.execute(
+                """
+                INSERT INTO purchase_stock_movements (
+                    id, store_id, product_id, movement_type, direction, quantity,
+                    balance_before, balance_after, reference_type, reference_id,
+                    user_id, user_name, created_at
+                ) VALUES (?, ?, ?, 'supplier_return_cancellation', 'in', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    movement["id"], store_id, product["id"], movement["quantity"],
+                    before, after, movement["referenceType"], return_id,
+                    movement["userId"], movement["userName"], now,
+                ),
+            )
+            reserved_quantity = int(
+                conditional_reserved_quantities(state).get(product["id"], 0) or 0
+            )
+            inventory_movements.append(
+                persist_inventory_movement(
+                    conn,
+                    product_id=product["id"],
+                    movement_type="supplier_return_cancellation",
+                    real_before=before,
+                    real_after=after,
+                    reserved_before=reserved_quantity,
+                    reserved_after=reserved_quantity,
+                    reference_type="supplier_return_cancellation",
+                    reference_id=return_id,
+                    source_key=(
+                        f"supplier_return_cancellation:{return_id}:"
+                        f"{item['returnItemId']}"
+                    ),
+                    created_at=now,
+                    store_id=store_id,
+                    user=user,
+                )
+            )
+            products.append(product_with_availability(product, state))
+            movements.append(movement)
+        conn.execute(
+            """
+            UPDATE supplier_returns
+            SET status = 'cancelled', pending_value = 0,
+                financial_status = 'settled', updated_at = ?
+            WHERE id = ?
+            """,
+            (now, return_id),
+        )
+        conn.execute(
+            "UPDATE supplier_return_allocations SET status = 'reversed' WHERE return_id = ?",
+            (return_id,),
+        )
+        conn.execute(
+            "UPDATE supplier_credits SET status = 'reversed', updated_at = ? WHERE return_id = ?",
+            (now, return_id),
+        )
+        for product in products:
+            replace_product_in_state(state, product)
+        state["supplierReturns"] = [
+            {**item, "status": "cancelled", "updatedAt": now}
+            if item.get("id") == return_id else item
+            for item in (state.get("supplierReturns") or [])
+        ]
+        state["stockMovements"] = [*movements, *(state.get("stockMovements") or [])]
+        prepend_inventory_movements(state, inventory_movements)
+        state["supplierCredits"] = [
+            *supplier_credit_rows(conn, row["supplierId"], store_id),
+            *[item for item in (state.get("supplierCredits") or []) if item.get("supplierId") != row["supplierId"]],
+        ]
+        persist_product_app_state(conn, state, now)
+        record_audit("cancel", "supplier_return", return_id, {
+            "restoredProductIds": [item["id"] for item in products],
+        }, conn)
+    return {
+        "returnId": return_id, "status": "cancelled",
+        "products": products, "movements": movements,
+    }, False
+
+
+CUSTOMER_STATUSES = frozenset({"active", "blocked", "deactivated"})
+CUSTOMER_SELECT = """
+    SELECT id, code, name, cpf, rg, birth, whatsapp, email, address,
+           address_number AS "addressNumber", city, district, state, zip, notes,
+           credit_limit AS "limit", status, is_default AS "isDefault",
+           created_at AS "createdAt", updated_at AS "updatedAt"
+    FROM customers
+"""
+
+
+class CustomerOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def default_customer_record(created_at: str | None = None, store_id: str = "matriz") -> dict:
+    timestamp = created_at or utc_now()
+    return {
+        "id": f"{store_id}:customer:default",
+        "code": "PADRAO",
+        "name": "Cliente padrao",
+        "cpf": "",
+        "rg": "",
+        "birth": "",
+        "whatsapp": "",
+        "email": "",
+        "address": "",
+        "addressNumber": "",
+        "city": "",
+        "district": "",
+        "state": "",
+        "zip": "",
+        "notes": "",
+        "limit": 0.0,
+        "status": "active",
+        "isDefault": True,
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
+    }
+
+
+def ensure_default_customer_in_state(state: dict, store_id: str = "matriz") -> dict:
+    customers = state.get("customers")
+    customer_list = customers if isinstance(customers, list) else []
+    if not any(bool(item.get("isDefault")) for item in customer_list if isinstance(item, dict)):
+        state["customers"] = [default_customer_record(store_id=store_id), *customer_list]
+    return state
+
+
+def digits_only(value: object) -> str:
+    return "".join(character for character in str(value or "") if character.isdigit())
+
+
+def normalized_search_text(value: object) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").strip().casefold())
+    without_accents = "".join(
+        character for character in normalized if not unicodedata.combining(character)
+    )
+    return " ".join(without_accents.split())
+
+
+def valid_cpf(value: object) -> bool:
+    digits = digits_only(value)
+    if len(digits) != 11 or digits == digits[0] * 11:
+        return False
+    for expected_length in (9, 10):
+        total = sum(
+            int(digits[index]) * (expected_length + 1 - index)
+            for index in range(expected_length)
+        )
+        check = (total * 10) % 11
+        if check == 10:
+            check = 0
+        if check != int(digits[expected_length]):
+            return False
+    return True
+
+
+def valid_cnpj(value: object) -> bool:
+    digits = digits_only(value)
+    if len(digits) != 14 or digits == digits[0] * 14:
+        return False
+    for length, weights in (
+        (12, (5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2)),
+        (13, (6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2)),
+    ):
+        total = sum(int(digits[index]) * weights[index] for index in range(length))
+        remainder = total % 11
+        expected = 0 if remainder < 2 else 11 - remainder
+        if expected != int(digits[length]):
+            return False
+    return True
+
+
+def valid_cpf_or_cnpj(value: object) -> bool:
+    digits = digits_only(value)
+    return valid_cpf(digits) if len(digits) == 11 else valid_cnpj(digits) if len(digits) == 14 else False
+
+
+def valid_email(value: str) -> bool:
+    return not value or bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value))
+
+
+def parse_customer_limit(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return money_round(parsed) if math.isfinite(parsed) else None
 
 
 def normalize_customer_payload(payload: dict, existing: dict | None = None) -> dict:
     now = utc_now()
     existing = existing or {}
+    limit_value = payload.get("limit", payload.get("creditLimit", existing.get("limit", 0)))
     return {
-        "id": payload.get("id") or existing.get("id") or os.urandom(16).hex(),
-        "code": str(payload.get("code", existing.get("code", ""))).strip(),
-        "name": str(payload.get("name", existing.get("name", ""))).strip(),
-        "cpf": str(payload.get("cpf", existing.get("cpf", ""))).strip(),
-        "rg": str(payload.get("rg", existing.get("rg", ""))).strip(),
-        "birth": str(payload.get("birth", existing.get("birth", ""))).strip(),
-        "whatsapp": str(payload.get("whatsapp", existing.get("whatsapp", ""))).strip(),
-        "email": str(payload.get("email", existing.get("email", ""))).strip(),
-        "address": str(payload.get("address", existing.get("address", ""))).strip(),
-        "city": str(payload.get("city", existing.get("city", ""))).strip(),
-        "district": str(payload.get("district", existing.get("district", ""))).strip(),
-        "zip": str(payload.get("zip", existing.get("zip", ""))).strip(),
-        "limit": float(payload.get("limit", existing.get("limit", 0)) or 0),
-        "status": str(payload.get("status", existing.get("status", "active")) or "active").strip(),
+        "id": str(existing.get("id") or payload.get("id") or os.urandom(16).hex()).strip(),
+        "code": str(existing.get("code") or payload.get("code") or "").strip(),
+        "name": " ".join(str(payload.get("name", existing.get("name", "")) or "").split()),
+        "cpf": digits_only(payload.get("cpf", existing.get("cpf", ""))),
+        "rg": str(payload.get("rg", existing.get("rg", "")) or "").strip(),
+        "birth": str(payload.get("birth", existing.get("birth", "")) or "").strip(),
+        "whatsapp": str(
+            payload.get("phone", payload.get("whatsapp", existing.get("whatsapp", ""))) or ""
+        ).strip(),
+        "email": str(payload.get("email", existing.get("email", "")) or "").strip().casefold(),
+        "address": str(payload.get("address", existing.get("address", "")) or "").strip(),
+        "addressNumber": str(
+            payload.get("addressNumber", existing.get("addressNumber", "")) or ""
+        ).strip(),
+        "city": str(payload.get("city", existing.get("city", "")) or "").strip(),
+        "district": str(payload.get("district", existing.get("district", "")) or "").strip(),
+        "state": str(payload.get("state", existing.get("state", "")) or "").strip().upper(),
+        "zip": digits_only(payload.get("zip", existing.get("zip", ""))),
+        "notes": str(payload.get("notes", existing.get("notes", "")) or "").strip(),
+        "limit": parse_customer_limit(limit_value),
+        "status": str(existing.get("status") or "active"),
+        "isDefault": bool(existing.get("isDefault", False)),
+        "createdAt": str(existing.get("createdAt") or now),
         "updatedAt": now,
     }
 
 
 def validate_customer(customer: dict) -> str | None:
     if not customer["name"]:
-        return "Nome do cliente é obrigatório."
-    if customer["limit"] < 0:
-        return "Limite de crédito não pode ser negativo."
+        return "Nome completo do cliente é obrigatório."
+    if customer["isDefault"]:
+        return None
+    if not customer["whatsapp"]:
+        return "Telefone do cliente é obrigatório."
+    if customer["limit"] is None or customer["limit"] <= 0:
+        return "Limite de crédito deve ser maior que zero."
+    if customer["cpf"] and not valid_cpf(customer["cpf"]):
+        return "CPF inválido."
+    if customer["birth"]:
+        try:
+            birth_date = date.fromisoformat(customer["birth"])
+        except ValueError:
+            return "Data de nascimento inválida."
+        if birth_date > date.today():
+            return "Data de nascimento inválida."
+    if not valid_email(customer["email"]):
+        return "E-mail inválido."
+    if customer["state"] and len(customer["state"]) != 2:
+        return "Estado deve utilizar a sigla com dois caracteres."
+    if customer["status"] not in CUSTOMER_STATUSES:
+        return "Situação do cliente inválida."
     return None
 
 
-def customer_from_row(row: sqlite3.Row) -> dict:
+def customer_from_row(row: sqlite3.Row | dict) -> dict:
     return {
         "id": row["id"],
         "code": row["code"] or "",
@@ -2173,23 +7738,42 @@ def customer_from_row(row: sqlite3.Row) -> dict:
         "whatsapp": row["whatsapp"] or "",
         "email": row["email"] or "",
         "address": row["address"] or "",
+        "addressNumber": row["addressNumber"] or "",
         "city": row["city"] or "",
         "district": row["district"] or "",
+        "state": row["state"] or "",
         "zip": row["zip"] or "",
+        "notes": row["notes"] or "",
         "limit": float(row["limit"] or 0),
         "status": row["status"] or "active",
-        "updatedAt": row["updatedAt"],
+        "isDefault": bool(row["isDefault"]),
+        "createdAt": row["createdAt"] or "",
+        "updatedAt": row["updatedAt"] or "",
     }
 
 
-def upsert_customer(conn: sqlite3.Connection, customer: dict, store_id: str = "matriz") -> None:
+def next_customer_code_db(conn, store_id: str = "matriz") -> str:
+    rows = conn.execute(
+        "SELECT code FROM customers WHERE store_id = ? AND is_default = 0",
+        (store_id,),
+    ).fetchall()
+    highest = 0
+    for row in rows:
+        code = str(row["code"] or "")
+        if code.upper().startswith("CLI") and code[3:].isdigit():
+            highest = max(highest, int(code[3:]))
+    return f"CLI{highest + 1:05d}"
+
+
+def upsert_customer(conn, customer: dict, store_id: str = "matriz") -> None:
     conn.execute(
         """
         INSERT INTO customers (
             id, store_id, code, name, cpf, rg, birth, whatsapp, email, address,
-            city, district, zip, credit_limit, status, updated_at
+            address_number, city, district, state, zip, notes, credit_limit,
+            status, is_default, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             code = excluded.code,
             name = excluded.name,
@@ -2199,11 +7783,13 @@ def upsert_customer(conn: sqlite3.Connection, customer: dict, store_id: str = "m
             whatsapp = excluded.whatsapp,
             email = excluded.email,
             address = excluded.address,
+            address_number = excluded.address_number,
             city = excluded.city,
             district = excluded.district,
+            state = excluded.state,
             zip = excluded.zip,
+            notes = excluded.notes,
             credit_limit = excluded.credit_limit,
-            status = excluded.status,
             updated_at = excluded.updated_at
         """,
         (
@@ -2217,36 +7803,493 @@ def upsert_customer(conn: sqlite3.Connection, customer: dict, store_id: str = "m
             customer["whatsapp"],
             customer["email"],
             customer["address"],
+            customer["addressNumber"],
             customer["city"],
             customer["district"],
+            customer["state"],
             customer["zip"],
+            customer["notes"],
             customer["limit"],
             customer["status"],
+            1 if customer["isDefault"] else 0,
+            customer["createdAt"],
             customer["updatedAt"],
         ),
     )
 
 
-def sync_customer_to_state(customer: dict | None = None, deleted_id: str | None = None) -> None:
-    state, _ = read_state()
-    if deleted_id:
-        state["customers"] = [item for item in state.get("customers", []) if item.get("id") != deleted_id]
-    elif customer:
-        customers = [item for item in state.get("customers", []) if item.get("id") != customer["id"]]
-        state["customers"] = [customer, *customers]
-    write_app_state_only(state)
+def customer_state_for_update(conn) -> dict:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+    if row:
+        try:
+            state = json.loads(row["data"])
+        except (json.JSONDecodeError, TypeError):
+            state = default_state()
+    else:
+        state = default_state()
+    return state if isinstance(state, dict) else default_state()
+
+
+def persist_customer_state(conn, state: dict, updated_at: str) -> None:
+    ensure_default_customer_in_state(state)
+    state_to_store = prepare_state_for_storage(conn, state)
+    conn.execute(
+        """
+        INSERT INTO app_state (id, data, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+        """,
+        (json.dumps(state_to_store, ensure_ascii=False), updated_at),
+    )
+
+
+def replace_customer_in_state(state: dict, customer: dict) -> None:
+    current = state.get("customers")
+    customers = current if isinstance(current, list) else []
+    state["customers"] = [
+        customer,
+        *[item for item in customers if str(item.get("id", "")) != customer["id"]],
+    ]
+
+
+def find_customer_duplicates(
+    conn,
+    customer: dict,
+    store_id: str = "matriz",
+) -> tuple[str | None, list[dict]]:
+    rows = conn.execute(
+        """
+        SELECT id, name, cpf, whatsapp
+        FROM customers
+        WHERE store_id = ? AND id <> ? AND is_default = 0
+        """,
+        (store_id, customer["id"]),
+    ).fetchall()
+    cpf_duplicate = None
+    warnings = []
+    phone_digits = digits_only(customer["whatsapp"])
+    customer_name = normalized_search_text(customer["name"])
+    for row in rows:
+        if customer["cpf"] and digits_only(row["cpf"]) == customer["cpf"]:
+            cpf_duplicate = row["id"]
+        reasons = []
+        if phone_digits and digits_only(row["whatsapp"]) == phone_digits:
+            reasons.append("telefone")
+        if customer_name and normalized_search_text(row["name"]) == customer_name:
+            reasons.append("nome")
+        if reasons:
+            warnings.append({
+                "customerId": row["id"],
+                "customerName": row["name"] or "",
+                "fields": reasons,
+            })
+    return cpf_duplicate, warnings
+
+
+def persist_customer_creation(
+    payload: dict,
+    duplicate_acknowledged: bool = False,
+    store_id: str = "matriz",
+) -> tuple[dict, list[dict]]:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        customer = normalize_customer_payload(payload)
+        customer["id"] = os.urandom(16).hex()
+        customer["code"] = next_customer_code_db(conn, store_id)
+        customer["status"] = "active"
+        customer["isDefault"] = False
+        error = validate_customer(customer)
+        if error:
+            raise CustomerOperationError(error)
+        cpf_duplicate, warnings = find_customer_duplicates(conn, customer, store_id)
+        if cpf_duplicate:
+            raise CustomerOperationError("CPF já cadastrado.", 409, "CPF_DUPLICATE")
+        if warnings and not duplicate_acknowledged:
+            operation_error = CustomerOperationError(
+                "Encontramos um possível cadastro duplicado.",
+                409,
+                "POSSIBLE_DUPLICATE",
+            )
+            operation_error.warnings = warnings
+            raise operation_error
+        upsert_customer(conn, customer, store_id)
+        state = customer_state_for_update(conn)
+        replace_customer_in_state(state, customer)
+        persist_customer_state(conn, state, customer["updatedAt"])
+        record_audit(
+            "create",
+            "customer",
+            customer["id"],
+            {"status": customer["status"], "code": customer["code"]},
+            conn,
+        )
+    return customer, warnings
+
+
+def persist_customer_update(
+    customer_id: str,
+    payload: dict,
+    duplicate_acknowledged: bool = False,
+    store_id: str = "matriz",
+) -> tuple[dict, list[dict]]:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"{CUSTOMER_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+            (store_id, customer_id),
+        ).fetchone()
+        if not row:
+            raise CustomerOperationError("Cliente não encontrado.", 404)
+        previous = customer_from_row(row)
+        if previous["isDefault"]:
+            raise CustomerOperationError("O cliente padrão não pode ser editado.", 409)
+        customer = normalize_customer_payload(payload, previous)
+        customer["id"] = customer_id
+        error = validate_customer(customer)
+        if error:
+            raise CustomerOperationError(error)
+        cpf_duplicate, warnings = find_customer_duplicates(conn, customer, store_id)
+        if cpf_duplicate:
+            raise CustomerOperationError("CPF já cadastrado.", 409, "CPF_DUPLICATE")
+        if warnings and not duplicate_acknowledged:
+            operation_error = CustomerOperationError(
+                "Encontramos um possível cadastro duplicado.",
+                409,
+                "POSSIBLE_DUPLICATE",
+            )
+            operation_error.warnings = warnings
+            raise operation_error
+        upsert_customer(conn, customer, store_id)
+        user = session.get("user") or {}
+        if money_round(previous["limit"]) != money_round(customer["limit"]):
+            conn.execute(
+                """
+                INSERT INTO customer_credit_limit_history (
+                    id, store_id, customer_id, previous_limit, new_limit,
+                    user_id, user_name, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    store_id,
+                    customer_id,
+                    previous["limit"],
+                    customer["limit"],
+                    user.get("id", ""),
+                    user.get("name", ""),
+                    customer["updatedAt"],
+                ),
+            )
+        state = customer_state_for_update(conn)
+        replace_customer_in_state(state, customer)
+        persist_customer_state(conn, state, customer["updatedAt"])
+        changed_fields = [
+            field
+            for field in (
+                "name",
+                "cpf",
+                "rg",
+                "birth",
+                "whatsapp",
+                "email",
+                "address",
+                "addressNumber",
+                "city",
+                "district",
+                "state",
+                "zip",
+                "notes",
+                "limit",
+            )
+            if previous.get(field) != customer.get(field)
+        ]
+        record_audit(
+            "update",
+            "customer",
+            customer_id,
+            {"changedFields": changed_fields},
+            conn,
+        )
+    return customer, warnings
+
+
+def persist_customer_status(
+    customer_id: str,
+    new_status: str,
+    reason: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    new_status = str(new_status or "").strip()
+    reason = str(reason or "").strip()
+    if new_status not in CUSTOMER_STATUSES:
+        raise CustomerOperationError("Situação do cliente inválida.")
+    if new_status == "blocked" and not reason:
+        raise CustomerOperationError("Informe o motivo do bloqueio.")
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"{CUSTOMER_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+            (store_id, customer_id),
+        ).fetchone()
+        if not row:
+            raise CustomerOperationError("Cliente não encontrado.", 404)
+        customer = customer_from_row(row)
+        if customer["isDefault"]:
+            raise CustomerOperationError(
+                "O cliente padrão não pode ter sua situação alterada.",
+                409,
+            )
+        previous_status = customer["status"]
+        if previous_status == new_status:
+            return customer, False
+        now = utc_now()
+        conn.execute(
+            """
+            UPDATE customers
+            SET status = ?, updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (new_status, now, store_id, customer_id),
+        )
+        user = session.get("user") or {}
+        conn.execute(
+            """
+            INSERT INTO customer_status_history (
+                id, store_id, customer_id, previous_status, new_status,
+                reason, user_id, user_name, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                os.urandom(16).hex(),
+                store_id,
+                customer_id,
+                previous_status,
+                new_status,
+                reason,
+                user.get("id", ""),
+                user.get("name", ""),
+                now,
+            ),
+        )
+        customer["status"] = new_status
+        customer["updatedAt"] = now
+        state = customer_state_for_update(conn)
+        replace_customer_in_state(state, customer)
+        persist_customer_state(conn, state, now)
+        record_audit(
+            "status",
+            "customer",
+            customer_id,
+            {
+                "previousStatus": previous_status,
+                "newStatus": new_status,
+                "reason": reason,
+            },
+            conn,
+        )
+    return customer, True
+
+
+def customer_operation_error_response(error: CustomerOperationError):
+    payload = {"ok": False, "error": error.message}
+    if error.code:
+        payload["code"] = error.code
+    warnings = getattr(error, "warnings", None)
+    if warnings:
+        payload["warnings"] = warnings
+    return jsonify(payload), error.status_code
+
+
+def customer_summary_from_rows(customer: dict, sales: list[dict], receivables: list[dict]) -> dict:
+    valid_sales = [sale for sale in sales if sale.get("status") != "cancelled"]
+    credit_items = [
+        item
+        for item in receivables
+        if item.get("method") == "storeCredit" and item.get("status") != "cancelled"
+    ]
+    open_credit = money_round(sum(receivable_open_amount(item) for item in credit_items))
+    overdue_credit = money_round(
+        sum(
+            receivable_open_amount(item)
+            for item in credit_items
+            if item.get("dueDate") and item["dueDate"] < date.today().isoformat()
+        )
+    )
+    paid_credit = money_round(
+        sum(min(float(item.get("received") or 0), float(item.get("amount") or 0)) for item in credit_items)
+    )
+    return {
+        "totalPurchased": money_round(sum(float(sale.get("total") or 0) for sale in valid_sales)),
+        "purchaseCount": len(valid_sales),
+        "creditLimit": money_round(customer.get("limit") or 0),
+        "openCredit": open_credit,
+        "overdueCredit": overdue_credit,
+        "paidCredit": paid_credit,
+        "availableCredit": money_round(max(0, float(customer.get("limit") or 0) - open_credit)),
+    }
+
+
+def load_customer_details(customer_id: str, store_id: str = "matriz") -> dict:
+    with connect_db() as conn:
+        row = conn.execute(
+            f"{CUSTOMER_SELECT} WHERE store_id = ? AND id = ?",
+            (store_id, customer_id),
+        ).fetchone()
+        if not row:
+            raise CustomerOperationError("Cliente não encontrado.", 404)
+        customer = customer_from_row(row)
+        sale_rows = conn.execute(
+            """
+            SELECT id, customer_id AS "customerId", customer_name AS "customerName",
+                   subtotal, discount, total, cost_total AS "costTotal",
+                   status, created_at AS "createdAt", updated_at AS "updatedAt"
+            FROM sales
+            WHERE store_id = ? AND customer_id = ?
+            ORDER BY created_at DESC
+            """,
+            (store_id, customer_id),
+        ).fetchall()
+        sales = [dict(item) for item in sale_rows]
+        sale_ids = [item["id"] for item in sales]
+        payments_by_sale: dict[str, list[dict]] = {}
+        if sale_ids:
+            placeholders = ",".join("?" for _ in sale_ids)
+            payment_rows = conn.execute(
+                f"""
+                SELECT sale_id AS "saleId", method, amount, installments,
+                       status, created_at AS "createdAt"
+                FROM sale_payments
+                WHERE sale_id IN ({placeholders})
+                ORDER BY id
+                """,
+                tuple(sale_ids),
+            ).fetchall()
+            for payment_row in payment_rows:
+                payment = dict(payment_row)
+                payments_by_sale.setdefault(payment.pop("saleId"), []).append(payment)
+        for sale in sales:
+            sale["payments"] = payments_by_sale.get(sale["id"], [])
+
+        receivable_rows = conn.execute(
+            """
+            SELECT id, sale_id AS "saleId", customer_id AS "customerId",
+                   customer_name AS "customerName", method, amount, received,
+                   status, due_date AS "dueDate", paid_at AS "paidAt",
+                   last_payment_at AS "lastPaymentAt", installment,
+                   created_at AS "createdAt", updated_at AS "updatedAt"
+            FROM receivables
+            WHERE store_id = ? AND customer_id = ?
+            ORDER BY due_date, created_at
+            """,
+            (store_id, customer_id),
+        ).fetchall()
+        receivables = [dict(item) for item in receivable_rows]
+        receivable_ids = [item["id"] for item in receivables]
+        payments_by_receivable: dict[str, list[dict]] = {}
+        if receivable_ids:
+            placeholders = ",".join("?" for _ in receivable_ids)
+            payment_rows = conn.execute(
+                f"""
+                SELECT id, receivable_id AS "receivableId", sale_id AS "saleId",
+                       method, amount, created_at AS "createdAt", note
+                FROM receivable_payments
+                WHERE receivable_id IN ({placeholders})
+                ORDER BY created_at
+                """,
+                tuple(receivable_ids),
+            ).fetchall()
+            for payment_row in payment_rows:
+                payment = dict(payment_row)
+                payments_by_receivable.setdefault(payment.pop("receivableId"), []).append(payment)
+        for receivable in receivables:
+            receivable["payments"] = payments_by_receivable.get(receivable["id"], [])
+
+        status_history = [
+            dict(item)
+            for item in conn.execute(
+                """
+                SELECT previous_status AS "previousStatus", new_status AS "newStatus",
+                       reason, user_id AS "userId", user_name AS "userName",
+                       created_at AS "createdAt"
+                FROM customer_status_history
+                WHERE store_id = ? AND customer_id = ?
+                ORDER BY created_at DESC
+                """,
+                (store_id, customer_id),
+            ).fetchall()
+        ]
+        limit_history = [
+            dict(item)
+            for item in conn.execute(
+                """
+                SELECT previous_limit AS "previousLimit", new_limit AS "newLimit",
+                       user_id AS "userId", user_name AS "userName",
+                       created_at AS "createdAt"
+                FROM customer_credit_limit_history
+                WHERE store_id = ? AND customer_id = ?
+                ORDER BY created_at DESC
+                """,
+                (store_id, customer_id),
+            ).fetchall()
+        ]
+        state_row = conn.execute("SELECT data FROM app_state WHERE id = 1").fetchone()
+        try:
+            state = json.loads(state_row["data"]) if state_row else {}
+        except (json.JSONDecodeError, TypeError):
+            state = {}
+
+    conditionals = [
+        item
+        for item in state.get("conditionals", [])
+        if str(item.get("customerId", "")) == customer_id
+    ]
+    return {
+        "customer": customer,
+        "summary": customer_summary_from_rows(customer, sales, receivables),
+        "sales": sales,
+        "receivables": receivables,
+        "conditionals": conditionals,
+        "statusHistory": status_history,
+        "creditLimitHistory": limit_history,
+    }
 
 
 def normalize_supplier_payload(payload: dict, existing: dict | None = None) -> dict:
     now = utc_now()
     existing = existing or {}
+    document = digits_only(
+        payload.get("document", payload.get("cnpj", existing.get("document", existing.get("cnpj", ""))))
+    )
     return {
-        "id": payload.get("id") or existing.get("id") or os.urandom(16).hex(),
-        "name": str(payload.get("name", existing.get("name", ""))).strip(),
-        "cnpj": str(payload.get("cnpj", existing.get("cnpj", ""))).strip(),
-        "phone": str(payload.get("phone", existing.get("phone", ""))).strip(),
-        "email": str(payload.get("email", existing.get("email", ""))).strip(),
-        "address": str(payload.get("address", existing.get("address", ""))).strip(),
+        "id": str(existing.get("id") or payload.get("id") or os.urandom(16).hex()).strip(),
+        "name": " ".join(str(payload.get("name", existing.get("name", "")) or "").split()),
+        "tradeName": " ".join(
+            str(payload.get("tradeName", existing.get("tradeName", "")) or "").split()
+        ),
+        "document": document,
+        "cnpj": document,
+        "phone": str(payload.get("phone", existing.get("phone", "")) or "").strip(),
+        "whatsapp": str(payload.get("whatsapp", existing.get("whatsapp", "")) or "").strip(),
+        "email": str(payload.get("email", existing.get("email", "")) or "").strip().casefold(),
+        "zip": digits_only(payload.get("zip", existing.get("zip", ""))),
+        "address": str(payload.get("address", existing.get("address", "")) or "").strip(),
+        "addressNumber": str(
+            payload.get("addressNumber", existing.get("addressNumber", "")) or ""
+        ).strip(),
+        "district": str(payload.get("district", existing.get("district", "")) or "").strip(),
+        "city": str(payload.get("city", existing.get("city", "")) or "").strip(),
+        "state": str(payload.get("state", existing.get("state", "")) or "").strip().upper(),
+        "notes": str(payload.get("notes", existing.get("notes", "")) or "").strip(),
+        "status": str(existing.get("status") or "active"),
+        "createdAt": str(existing.get("createdAt") or now),
         "updatedAt": now,
     }
 
@@ -2254,6 +8297,14 @@ def normalize_supplier_payload(payload: dict, existing: dict | None = None) -> d
 def validate_supplier(supplier: dict) -> str | None:
     if not supplier["name"]:
         return "Nome do fornecedor é obrigatório."
+    if supplier["document"] and not valid_cpf_or_cnpj(supplier["document"]):
+        return "CPF ou CNPJ do fornecedor é inválido."
+    if not valid_email(supplier["email"]):
+        return "E-mail do fornecedor é inválido."
+    if supplier["state"] and len(supplier["state"]) != 2:
+        return "Estado deve utilizar a sigla com dois caracteres."
+    if supplier["status"] not in SUPPLIER_STATUSES:
+        return "Situação do fornecedor é inválida."
     return None
 
 
@@ -2261,10 +8312,21 @@ def supplier_from_row(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
         "name": row["name"] or "",
+        "tradeName": row["tradeName"] or "",
+        "document": row["document"] or "",
         "cnpj": row["cnpj"] or "",
         "phone": row["phone"] or "",
+        "whatsapp": row["whatsapp"] or "",
         "email": row["email"] or "",
+        "zip": row["zip"] or "",
         "address": row["address"] or "",
+        "addressNumber": row["addressNumber"] or "",
+        "district": row["district"] or "",
+        "city": row["city"] or "",
+        "state": row["state"] or "",
+        "notes": row["notes"] or "",
+        "status": row["status"] or "active",
+        "createdAt": row["createdAt"] or row["updatedAt"],
         "updatedAt": row["updatedAt"],
     }
 
@@ -2272,37 +8334,470 @@ def supplier_from_row(row: sqlite3.Row) -> dict:
 def upsert_supplier(conn: sqlite3.Connection, supplier: dict, store_id: str = "matriz") -> None:
     conn.execute(
         """
-        INSERT INTO suppliers (id, store_id, name, cnpj, phone, email, address, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO suppliers (
+            id, store_id, name, cnpj, trade_name, document_normalized, phone,
+            whatsapp, email, zip, address, address_number, district, city,
+            state, notes, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             cnpj = excluded.cnpj,
+            trade_name = excluded.trade_name,
+            document_normalized = excluded.document_normalized,
             phone = excluded.phone,
+            whatsapp = excluded.whatsapp,
             email = excluded.email,
+            zip = excluded.zip,
             address = excluded.address,
+            address_number = excluded.address_number,
+            district = excluded.district,
+            city = excluded.city,
+            state = excluded.state,
+            notes = excluded.notes,
+            status = excluded.status,
             updated_at = excluded.updated_at
         """,
         (
             supplier["id"],
             store_id,
             supplier["name"],
-            supplier["cnpj"],
+            supplier["document"],
+            supplier["tradeName"],
+            supplier["document"] or None,
             supplier["phone"],
+            supplier["whatsapp"],
             supplier["email"],
+            supplier["zip"],
             supplier["address"],
+            supplier["addressNumber"],
+            supplier["district"],
+            supplier["city"],
+            supplier["state"],
+            supplier["notes"],
+            supplier["status"],
+            supplier["createdAt"],
             supplier["updatedAt"],
         ),
     )
 
 
-def sync_supplier_to_state(supplier: dict | None = None, deleted_id: str | None = None) -> None:
-    state, _ = read_state()
-    if deleted_id:
-        state["suppliers"] = [item for item in state.get("suppliers", []) if item.get("id") != deleted_id]
-    elif supplier:
-        suppliers = [item for item in state.get("suppliers", []) if item.get("id") != supplier["id"]]
-        state["suppliers"] = [supplier, *suppliers]
-    write_app_state_only(state)
+def supplier_document_duplicate(
+    conn,
+    document: str,
+    *,
+    exclude_id: str = "",
+    store_id: str = "matriz",
+) -> bool:
+    normalized = digits_only(document)
+    if not normalized:
+        return False
+    rows = conn.execute(
+        """
+        SELECT id, cnpj, document_normalized
+        FROM suppliers
+        WHERE store_id = ? AND id <> ?
+        """,
+        (store_id, exclude_id),
+    ).fetchall()
+    return any(
+        digits_only(row["document_normalized"] or row["cnpj"]) == normalized
+        for row in rows
+    )
+
+
+def update_state_collection_in_transaction(
+    conn,
+    collection: str,
+    item: dict,
+    *,
+    item_id: str,
+) -> None:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+    try:
+        state = json.loads(row["data"]) if row else default_state()
+    except (json.JSONDecodeError, TypeError):
+        state = default_state()
+    if not isinstance(state, dict):
+        state = default_state()
+    current = state.get(collection)
+    items = current if isinstance(current, list) else []
+    state[collection] = [
+        item,
+        *[
+            value
+            for value in items
+            if not isinstance(value, dict) or str(value.get("id", "")) != item_id
+        ],
+    ]
+    conn.execute(
+        """
+        INSERT INTO app_state (id, data, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+        """,
+        (json.dumps(state, ensure_ascii=False), utc_now()),
+    )
+
+
+def supplier_select_sql() -> str:
+    return """
+        SELECT
+            s.id, s.name, s.trade_name AS "tradeName",
+            COALESCE(s.document_normalized, s.cnpj, '') AS document,
+            COALESCE(s.cnpj, '') AS cnpj, s.phone, s.whatsapp, s.email, s.zip,
+            s.address, s.address_number AS "addressNumber", s.district, s.city,
+            s.state, s.notes, s.status, s.created_at AS "createdAt",
+            s.updated_at AS "updatedAt",
+            COALESCE((
+                SELECT SUM(c.original_amount - c.used_amount)
+                FROM supplier_credits c
+                WHERE c.store_id = s.store_id
+                  AND c.supplier_id = s.id
+                  AND c.status IN ('available', 'partially_used')
+            ), 0) AS "creditAvailable",
+            COALESCE(SUM(CASE
+                WHEN p.status <> 'cancelled'
+                THEN CASE
+                    WHEN p.amount + p.fee - p.discount - p.paid_amount
+                         - COALESCE(return_adjustments.total, 0)
+                         - COALESCE(credit_adjustments.total, 0) > 0
+                    THEN p.amount + p.fee - p.discount - p.paid_amount
+                         - COALESCE(return_adjustments.total, 0)
+                         - COALESCE(credit_adjustments.total, 0)
+                    ELSE 0
+                END
+                ELSE 0
+            END), 0) AS "openAmount",
+            COALESCE(SUM(CASE
+                WHEN p.status <> 'cancelled'
+                 AND p.due_date < ?
+                 AND p.amount + p.fee - p.discount - p.paid_amount
+                     - COALESCE(return_adjustments.total, 0)
+                     - COALESCE(credit_adjustments.total, 0) > 0
+                THEN p.amount + p.fee - p.discount - p.paid_amount
+                     - COALESCE(return_adjustments.total, 0)
+                     - COALESCE(credit_adjustments.total, 0)
+                ELSE 0
+            END), 0) AS "overdueAmount"
+        FROM suppliers s
+        LEFT JOIN payables p
+          ON p.store_id = s.store_id
+         AND (p.supplier_id = s.id OR (p.supplier_id IS NULL AND p.supplier = s.name))
+        LEFT JOIN (
+            SELECT payable_id, SUM(amount) AS total
+            FROM supplier_return_allocations
+            WHERE allocation_type = 'payable_abatement' AND status = 'active'
+            GROUP BY payable_id
+        ) return_adjustments ON return_adjustments.payable_id = p.id
+        LEFT JOIN (
+            SELECT payable_id, SUM(amount) AS total
+            FROM supplier_credit_usages
+            WHERE status = 'active'
+            GROUP BY payable_id
+        ) credit_adjustments ON credit_adjustments.payable_id = p.id
+    """
+
+
+def supplier_with_metrics_from_row(row) -> dict:
+    supplier = supplier_from_row(row)
+    supplier["openAmount"] = money_round(row["openAmount"])
+    supplier["overdueAmount"] = money_round(row["overdueAmount"])
+    supplier["creditAvailable"] = money_round(row["creditAvailable"])
+    return supplier
+
+
+def card_modality_name(method: str, installments: int) -> str:
+    return "Débito" if method == "debit" else f"Crédito {installments}x"
+
+
+def normalize_card_modality_timestamp(value: str | None = None) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    normalized = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise ValueError("Data e hora inválidas.") from error
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=STORE_TIMEZONE)
+    if parsed.utcoffset() is None:
+        raise ValueError("Data e hora inválidas.")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def normalize_card_modality_payload(
+    payload: dict,
+    existing: dict | None = None,
+) -> dict:
+    existing = existing or {}
+    now = utc_now()
+    try:
+        method = str(
+            payload.get("method", existing.get("method", ""))
+        ).strip().lower()
+        installments_value = float(
+            payload.get("installments", existing.get("installments", 1))
+        )
+        status = str(
+            payload.get("status", existing.get("status", "active"))
+        ).strip().lower()
+        tax_percent = float(
+            payload.get("taxPercent", existing.get("taxPercent", 0))
+        )
+        receivable_days_value = float(
+            payload.get(
+                "receivableDays",
+                existing.get("receivableDays", 1),
+            )
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("Informe valores válidos para a modalidade.") from error
+    if (
+        not math.isfinite(installments_value)
+        or not installments_value.is_integer()
+        or not math.isfinite(tax_percent)
+        or not math.isfinite(receivable_days_value)
+        or not receivable_days_value.is_integer()
+    ):
+        raise ValueError("Informe valores válidos para a modalidade.")
+    installments = int(installments_value)
+    receivable_days = int(receivable_days_value)
+
+    valid_from = payload.get("validFrom")
+    if valid_from is None or not str(valid_from).strip():
+        valid_from = now
+    valid_from = normalize_card_modality_timestamp(valid_from)
+
+    valid_until = payload.get("validUntil")
+    if valid_until is None:
+        valid_until = existing.get("validUntil")
+    elif not str(valid_until).strip():
+        valid_until = None
+    else:
+        valid_until = normalize_card_modality_timestamp(valid_until)
+
+    return {
+        "id": existing.get("id") or os.urandom(16).hex(),
+        "cardModalityId": (
+            existing.get("cardModalityId")
+            or str(payload.get("cardModalityId") or os.urandom(16).hex())
+        ),
+        "name": card_modality_name(method, installments),
+        "method": method,
+        "installments": installments,
+        "status": status,
+        "taxPercent": tax_percent,
+        "receivableDays": receivable_days,
+        "validFrom": valid_from,
+        "validUntil": valid_until,
+        "createdAt": existing.get("createdAt") or now,
+        "updatedAt": now,
+    }
+
+
+def validate_card_modality(modality: dict) -> str | None:
+    if modality["method"] not in {"debit", "credit"}:
+        return "Tipo de modalidade inválido."
+    if not 1 <= modality["installments"] <= 10:
+        return "Quantidade de parcelas inválida."
+    if modality["method"] == "debit" and modality["installments"] != 1:
+        return "Débito deve ter 1 parcela."
+    if modality["status"] not in {"active", "inactive"}:
+        return "Situação da modalidade inválida."
+    if modality["taxPercent"] < 0:
+        return "Taxa percentual deve ser maior ou igual a zero."
+    if modality["receivableDays"] < 0:
+        return "Prazo de recebimento deve ser maior ou igual a zero."
+    if modality["validUntil"] and modality["validUntil"] < modality["validFrom"]:
+        return "Data de fim da vigência deve ser posterior ao início."
+    return None
+
+
+def card_modality_from_row(row) -> dict:
+    return {
+        "id": row["id"],
+        "cardModalityId": row["card_modality_id"],
+        "name": row["name"] or "",
+        "method": row["method"] or "",
+        "installments": int(row["installments"] or 0),
+        "status": row["status"] or "inactive",
+        "taxPercent": float(row["tax_percent"] or 0),
+        "receivableDays": int(row["receivable_days"] or 0),
+        "validFrom": row["valid_from"],
+        "validUntil": row["valid_until"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def latest_card_modalities(conn, store_id: str = "matriz") -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT * FROM card_modalities
+        WHERE store_id = ?
+        ORDER BY LOWER(name), valid_from DESC
+        """,
+        (store_id,),
+    ).fetchall()
+    return [card_modality_from_row(row) for row in rows]
+
+
+def get_current_card_modality(
+    conn,
+    card_modality_id: str,
+    store_id: str = "matriz",
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT * FROM card_modalities
+        WHERE store_id = ? AND card_modality_id = ?
+        LIMIT 1
+        """,
+        (store_id, card_modality_id),
+    ).fetchone()
+    return card_modality_from_row(row) if row else None
+
+
+def get_card_modality_history(
+    conn,
+    card_modality_id: str,
+    store_id: str = "matriz",
+) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT * FROM card_modality_history
+        WHERE store_id = ? AND card_modality_id = ?
+        ORDER BY valid_from DESC
+        """,
+        (store_id, card_modality_id),
+    ).fetchall()
+    return [card_modality_from_row(row) for row in rows]
+
+
+def archive_current_card_modality(
+    conn,
+    current: dict,
+    valid_until: str | None = None,
+    store_id: str = "matriz",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO card_modality_history (
+            id, card_modality_id, store_id, name, method, installments, status,
+            tax_percent, receivable_days, valid_from, valid_until, created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            os.urandom(16).hex(),
+            current["cardModalityId"],
+            store_id,
+            current["name"],
+            current["method"],
+            current["installments"],
+            current["status"],
+            current["taxPercent"],
+            current["receivableDays"],
+            current["validFrom"],
+            valid_until,
+            current["createdAt"],
+            current["updatedAt"],
+        ),
+    )
+
+
+def save_card_modality_change(
+    conn,
+    card_modality_id: str,
+    updated: dict,
+    store_id: str = "matriz",
+) -> dict:
+    current = get_current_card_modality(conn, card_modality_id, store_id)
+    if not current:
+        raise KeyError("Modalidade não encontrada.")
+    archive_current_card_modality(
+        conn,
+        current,
+        updated["validFrom"],
+        store_id,
+    )
+    conn.execute(
+        """
+        UPDATE card_modalities SET
+            name = ?, method = ?, installments = ?, status = ?,
+            tax_percent = ?, receivable_days = ?, valid_from = ?,
+            valid_until = ?, created_at = ?, updated_at = ?
+        WHERE store_id = ? AND card_modality_id = ?
+        """,
+        (
+            updated["name"],
+            updated["method"],
+            updated["installments"],
+            updated["status"],
+            updated["taxPercent"],
+            updated["receivableDays"],
+            updated["validFrom"],
+            updated["validUntil"],
+            updated["createdAt"],
+            updated["updatedAt"],
+            store_id,
+            card_modality_id,
+        ),
+    )
+    return get_current_card_modality(conn, card_modality_id, store_id)
+
+
+def insert_card_modality(
+    conn,
+    modality: dict,
+    store_id: str = "matriz",
+) -> dict:
+    conn.execute(
+        """
+        INSERT INTO card_modalities (
+            id, store_id, card_modality_id, name, method, installments, status,
+            tax_percent, receivable_days, valid_from, valid_until, created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            modality["id"],
+            store_id,
+            modality["cardModalityId"],
+            modality["name"],
+            modality["method"],
+            modality["installments"],
+            modality["status"],
+            modality["taxPercent"],
+            modality["receivableDays"],
+            modality["validFrom"],
+            modality["validUntil"],
+            modality["createdAt"],
+            modality["updatedAt"],
+        ),
+    )
+    return modality
+
+
+def check_card_modality_uniqueness(
+    conn,
+    modality: dict,
+    exclude_card_modality_id: str | None = None,
+    store_id: str = "matriz",
+) -> str | None:
+    params = [store_id, modality["method"], modality["installments"]]
+    query = """
+        SELECT 1 FROM card_modalities
+        WHERE store_id = ? AND method = ? AND installments = ?
+    """
+    if exclude_card_modality_id:
+        query += " AND card_modality_id != ?"
+        params.append(exclude_card_modality_id)
+    if conn.execute(query, tuple(params)).fetchone():
+        return "Já existe uma modalidade com o mesmo tipo e quantidade de parcelas."
+    return None
 
 
 def money_round(value: float) -> float:
@@ -2319,15 +8814,6 @@ def next_sale_code_db(conn: sqlite3.Connection, store_id: str = "matriz") -> str
     return f"VENDA{highest + 1:03d}"
 
 
-def next_conditional_code(state: dict) -> str:
-    highest = 0
-    for item in state.get("conditionals", []) or []:
-        conditional_id = str(item.get("id", "") or "")
-        if conditional_id.upper().startswith("COND") and conditional_id[4:].isdigit():
-            highest = max(highest, int(conditional_id[4:]))
-    return f"COND{highest + 1:03d}"
-
-
 def conditional_reserved_quantities(state: dict, exclude_conditional_id: str = "") -> dict[str, int]:
     reserved: dict[str, int] = {}
     for conditional in state.get("conditionals", []) or []:
@@ -2339,7 +8825,17 @@ def conditional_reserved_quantities(state: dict, exclude_conditional_id: str = "
             product_id = str(item.get("productId", "") or "")
             if not product_id:
                 continue
-            reserved[product_id] = reserved.get(product_id, 0) + max(0, int(float(item.get("quantity", 0) or 0)))
+            original = max(0, int(float(item.get("quantity", 0) or 0)))
+            pending = item.get("pendingQuantity")
+            if pending is None:
+                pending = (
+                    original
+                    - max(0, int(float(item.get("returnedQuantity", 0) or 0)))
+                    - max(0, int(float(item.get("soldQuantity", 0) or 0)))
+                )
+            reserved[product_id] = (
+                reserved.get(product_id, 0) + max(0, int(float(pending or 0)))
+            )
     return reserved
 
 
@@ -2389,6 +8885,922 @@ def build_conditional_from_payload(payload: dict, state: dict, conditional_id: s
         "createdAt": str(payload.get("createdAt") or now),
         "updatedAt": now,
     }, None
+
+
+def persist_conditional_inventory_state(
+    conditional: dict,
+    *,
+    releasing: bool = False,
+    store_id: str = "matriz",
+) -> list[dict]:
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        state = locked_app_state(conn)
+        conditionals = state.get("conditionals", []) or []
+        current = next(
+            (
+                item
+                for item in conditionals
+                if str(item.get("id", "")) == str(conditional.get("id", ""))
+            ),
+            None,
+        )
+        if releasing and not current:
+            raise InventoryOperationError("Condicional não encontrado.", 404)
+        if releasing and current.get("status") in {"finalized", "cancelled"}:
+            raise InventoryOperationError("Condicional já finalizado.", 409)
+        if not releasing and current:
+            raise InventoryOperationError("Condicional já cadastrado.", 409)
+
+        reserved_before = conditional_reserved_quantities(state)
+        source_items = current.get("items", []) if releasing else conditional.get("items", [])
+        quantities: dict[str, int] = {}
+        for item in source_items or []:
+            product_id = str(item.get("productId", "") or "")
+            quantity = int(item.get("quantity", 0) or 0)
+            if product_id and quantity > 0:
+                quantities[product_id] = quantities.get(product_id, 0) + quantity
+
+        now = str(conditional.get("updatedAt") or utc_now())
+        user = session.get("user") or {}
+        movements = []
+        action = "release" if releasing else "reserve"
+        movement_type = (
+            "conditional_release" if releasing else "conditional_reserve"
+        )
+        for product_id, quantity in quantities.items():
+            row = conn.execute(
+                f"SELECT stock FROM products WHERE store_id = ? AND id = ?{lock_clause}",
+                (store_id, product_id),
+            ).fetchone()
+            if not row:
+                raise InventoryOperationError("Produto do condicional nÃ£o encontrado.", 409)
+            real = int(row["stock"] or 0)
+            before = int(reserved_before.get(product_id, 0) or 0)
+            after = before - quantity if releasing else before + quantity
+            movements.append(
+                persist_inventory_movement(
+                    conn,
+                    product_id=product_id,
+                    movement_type=movement_type,
+                    real_before=real,
+                    real_after=real,
+                    reserved_before=before,
+                    reserved_after=after,
+                    reference_type="conditional",
+                    reference_id=str(conditional["id"]),
+                    source_key=(
+                        f"conditional:{conditional['id']}:{action}:{product_id}"
+                    ),
+                    created_at=now,
+                    store_id=store_id,
+                    user=user,
+                )
+            )
+        if releasing:
+            state["conditionals"] = [
+                conditional
+                if str(item.get("id", "")) == str(conditional.get("id", ""))
+                else item
+                for item in conditionals
+            ]
+        else:
+            state["conditionals"] = [conditional, *conditionals]
+        prepend_inventory_movements(state, movements)
+        persist_product_app_state(conn, state, now)
+        record_audit(
+            "release" if releasing else "reserve",
+            "inventory",
+            str(conditional["id"]),
+            {
+                "movementIds": [item["id"] for item in movements],
+                "productIds": sorted(quantities),
+            },
+            conn,
+        )
+    return movements
+
+
+class ConditionalOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def conditional_request_hash(payload: dict) -> str:
+    return purchase_request_hash(payload)
+
+
+def conditional_lock_key(store_id: str, key: str) -> int:
+    digest = hashlib.sha256(
+        f"conditional:{store_id}:{key}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+
+def conditional_quantity(value, field: str) -> int:
+    if isinstance(value, bool):
+        raise ConditionalOperationError(f"{field} deve ser uma quantidade inteira.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ConditionalOperationError(
+            f"{field} deve ser uma quantidade inteira."
+        ) from error
+    if not math.isfinite(number) or not number.is_integer() or number < 0:
+        raise ConditionalOperationError(f"{field} deve ser uma quantidade inteira.")
+    return int(number)
+
+
+def next_conditional_number(conn, store_id: str = "matriz") -> int:
+    current = conn.execute(
+        "SELECT next_number FROM conditional_sequences WHERE store_id = ?",
+        (store_id,),
+    ).fetchone()
+    if not current:
+        highest = conn.execute(
+            """
+            SELECT COALESCE(MAX(conditional_number), 0) AS highest
+            FROM conditionals WHERE store_id = ?
+            """,
+            (store_id,),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO conditional_sequences (store_id, next_number)
+            VALUES (?, ?)
+            ON CONFLICT(store_id) DO NOTHING
+            """,
+            (store_id, int(highest["highest"] or 0) + 1),
+        )
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"""
+        SELECT next_number FROM conditional_sequences
+        WHERE store_id = ?{lock_clause}
+        """,
+        (store_id,),
+    ).fetchone()
+    if not row:
+        raise ConditionalOperationError(
+            "Não foi possível gerar o número do condicional.",
+            500,
+            "CONDITIONAL_SEQUENCE_ERROR",
+        )
+    number = int(row["next_number"])
+    conn.execute(
+        "UPDATE conditional_sequences SET next_number = ? WHERE store_id = ?",
+        (number + 1, store_id),
+    )
+    return number
+
+
+def conditional_document(
+    conn,
+    conditional_id: str,
+    store_id: str = "matriz",
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT id, conditional_number AS "conditionalNumber",
+               customer_id AS "customerId", customer_name AS "customerName",
+               customer_cpf AS "customerCpf",
+               customer_phone AS "customerPhone", status,
+               checked_out_at AS "checkedOutAt",
+               expected_return_date AS "expectedReturnDate",
+               responsible_user_id AS "responsibleUserId",
+               responsible_user_name AS "responsibleUserName",
+               cancellation_reason AS "cancellationReason",
+               cancelled_at AS "cancelledAt",
+               cancelled_by_user_id AS "cancelledByUserId",
+               cancelled_by_user_name AS "cancelledByUserName",
+               finalized_at AS "finalizedAt",
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM conditionals
+        WHERE store_id = ? AND id = ?
+        """,
+        (store_id, conditional_id),
+    ).fetchone()
+    if not row:
+        return None
+    doc = dict(row)
+    item_rows = conn.execute(
+        """
+        SELECT id, product_id AS "productId", barcode, name, brand, size, color,
+               original_quantity AS quantity,
+               returned_quantity AS "returnedQuantity",
+               sold_quantity AS "soldQuantity",
+               pending_sale_quantity AS "pendingSaleQuantity",
+               reference_unit_price AS "unitPrice",
+               reference_unit_cost AS "unitCost",
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM conditional_items
+        WHERE conditional_id = ?
+        ORDER BY created_at, id
+        """,
+        (conditional_id,),
+    ).fetchall()
+    items = []
+    for item_row in item_rows:
+        item = dict(item_row)
+        item["pendingQuantity"] = max(
+            0,
+            int(item["quantity"] or 0)
+            - int(item["returnedQuantity"] or 0)
+            - int(item["soldQuantity"] or 0),
+        )
+        item["actionableQuantity"] = max(
+            0,
+            item["pendingQuantity"] - int(item["pendingSaleQuantity"] or 0),
+        )
+        item["total"] = money_round(
+            int(item["quantity"] or 0) * float(item["unitPrice"] or 0)
+        )
+        items.append(item)
+    doc["items"] = items
+    return_rows = conn.execute(
+        """
+        SELECT id, status, user_id AS "userId", user_name AS "userName",
+               created_at AS "createdAt"
+        FROM conditional_returns
+        WHERE store_id = ? AND conditional_id = ?
+        ORDER BY created_at, id
+        """,
+        (store_id, conditional_id),
+    ).fetchall()
+    returns = []
+    for return_row in return_rows:
+        event = dict(return_row)
+        event["items"] = [
+            dict(item)
+            for item in conn.execute(
+                """
+                SELECT conditional_item_id AS "conditionalItemId",
+                       product_id AS "productId",
+                       returned_quantity AS "returnedQuantity",
+                       purchase_quantity AS "purchaseQuantity",
+                       sale_id AS "saleId", status
+                FROM conditional_return_items
+                WHERE return_id = ?
+                ORDER BY id
+                """,
+                (event["id"],),
+            ).fetchall()
+        ]
+        returns.append(event)
+    doc["returns"] = returns
+    doc["linkedSales"] = [
+        {
+            "saleId": link["saleId"],
+            "returnId": link["returnId"],
+            "createdAt": link["createdAt"],
+        }
+        for link in conn.execute(
+            """
+            SELECT sale_id AS "saleId", return_id AS "returnId",
+                   created_at AS "createdAt"
+            FROM conditional_sale_links
+            WHERE store_id = ? AND conditional_id = ?
+            ORDER BY created_at, id
+            """,
+            ("matriz", conditional_id),
+        ).fetchall()
+    ]
+    pending = sum(item["pendingQuantity"] for item in items)
+    doc["pendingPieces"] = pending
+    doc["pendingValue"] = money_round(sum(
+        item["pendingQuantity"] * float(item["unitPrice"] or 0)
+        for item in items
+    ))
+    if doc["status"] == "open" and pending > 0:
+        if str(doc["expectedReturnDate"]) < datetime.now(
+            STORE_TIMEZONE
+        ).date().isoformat():
+            doc["status"] = "overdue"
+    return doc
+
+
+def replace_conditional_in_state(state: dict, conditional: dict) -> None:
+    current = state.get("conditionals")
+    conditionals = current if isinstance(current, list) else []
+    state["conditionals"] = [
+        conditional,
+        *[
+            item
+            for item in conditionals
+            if str(item.get("id", "")) != str(conditional["id"])
+        ],
+    ]
+
+
+def persist_conditional_creation(
+    payload: dict,
+    idempotency_key: str = "",
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ConditionalOperationError("Envie um JSON válido.")
+    key = str(idempotency_key or "").strip() or os.urandom(16).hex()
+    if len(key) > 160:
+        raise ConditionalOperationError(
+            "Chave de idempotência inválida.",
+            400,
+            "IDEMPOTENCY_KEY_INVALID",
+        )
+    request_hash = conditional_request_hash({
+        "customerId": payload.get("customerId"),
+        "items": payload.get("items"),
+    })
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (conditional_lock_key(store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM conditionals
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise ConditionalOperationError(
+                    "A chave de idempotência já foi utilizada com dados diferentes.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+        state = locked_app_state(conn)
+        customer_id = str(payload.get("customerId", "") or "").strip()
+        customer = conn.execute(
+            f"""
+            SELECT id, name, cpf, whatsapp AS phone, status,
+                   is_default AS "isDefault"
+            FROM customers
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, customer_id),
+        ).fetchone()
+        if not customer:
+            raise ConditionalOperationError(
+                "Cliente cadastrado é obrigatório para condicional."
+            )
+        if bool(customer["isDefault"]) or customer["status"] != "active":
+            raise ConditionalOperationError(
+                "Somente cliente ativo e identificado pode receber novo condicional.",
+                409,
+                "CUSTOMER_NOT_ELIGIBLE",
+            )
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ConditionalOperationError("Adicione produtos ao condicional.")
+        quantities: dict[str, int] = {}
+        for item in raw_items:
+            if not isinstance(item, dict):
+                raise ConditionalOperationError("Item de condicional inválido.")
+            product_id = str(item.get("productId", "") or "").strip()
+            quantity = conditional_quantity(item.get("quantity"), "Quantidade")
+            if not product_id or quantity <= 0:
+                raise ConditionalOperationError("Item de condicional inválido.")
+            quantities[product_id] = quantities.get(product_id, 0) + quantity
+        placeholders = ",".join("?" for _ in quantities)
+        rows = conn.execute(
+            f"""
+            {PRODUCT_SELECT}
+            WHERE store_id = ? AND id IN ({placeholders}){lock_clause}
+            """,
+            (store_id, *quantities),
+        ).fetchall()
+        products = {str(row["id"]): row for row in rows}
+        reserved_before = conditional_reserved_quantities(state)
+        for product_id, quantity in quantities.items():
+            product = products.get(product_id)
+            if not product or not bool(product["active"]):
+                raise ConditionalOperationError(
+                    "Produto ativo do condicional não encontrado.",
+                    409,
+                )
+            available = int(product["stock"] or 0) - int(
+                reserved_before.get(product_id, 0) or 0
+            )
+            if quantity > available:
+                raise ConditionalOperationError(
+                    f"Estoque disponível insuficiente para {product['name']}.",
+                    409,
+                    "INSUFFICIENT_AVAILABLE_STOCK",
+                )
+        number = next_conditional_number(conn, store_id)
+        conditional_id = f"COND{number:03d}"
+        expected_return = (
+            sale_operational_date(now) + timedelta(days=3)
+        ).isoformat()
+        conn.execute(
+            """
+            INSERT INTO conditionals (
+                id, store_id, conditional_number, customer_id, customer_name,
+                customer_cpf, customer_phone, status, checked_out_at,
+                expected_return_date, responsible_user_id,
+                responsible_user_name, idempotency_key, request_hash,
+                response_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+            """,
+            (
+                conditional_id,
+                store_id,
+                number,
+                customer["id"],
+                customer["name"],
+                customer["cpf"] or "",
+                customer["phone"] or "",
+                now,
+                expected_return,
+                user.get("id", "") or None,
+                user.get("name", "") or None,
+                key,
+                request_hash,
+                now,
+                now,
+            ),
+        )
+        movements = []
+        running_reserved = dict(reserved_before)
+        for product_id, quantity in quantities.items():
+            product = products[product_id]
+            item_id = os.urandom(16).hex()
+            conn.execute(
+                """
+                INSERT INTO conditional_items (
+                    id, conditional_id, product_id, barcode, name, brand, size,
+                    color, original_quantity, returned_quantity, sold_quantity,
+                    pending_sale_quantity, reference_unit_price,
+                    reference_unit_cost, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    conditional_id,
+                    product_id,
+                    product["barcode"] or "",
+                    product["name"],
+                    product["brand"] or "",
+                    product["size"] or "",
+                    product["color"] or "",
+                    quantity,
+                    float(product["price"] or 0),
+                    float(product["cost"] or 0),
+                    now,
+                    now,
+                ),
+            )
+            before = int(running_reserved.get(product_id, 0) or 0)
+            after = before + quantity
+            movements.append(persist_inventory_movement(
+                conn,
+                product_id=product_id,
+                movement_type="conditional_reserve",
+                real_before=int(product["stock"] or 0),
+                real_after=int(product["stock"] or 0),
+                reserved_before=before,
+                reserved_after=after,
+                reference_type="conditional",
+                reference_id=conditional_id,
+                source_key=f"conditional:{conditional_id}:reserve:{item_id}",
+                created_at=now,
+                store_id=store_id,
+                user=user,
+            ))
+            running_reserved[product_id] = after
+        conditional = conditional_document(conn, conditional_id)
+        result = {"conditional": conditional, "inventoryMovements": movements}
+        conn.execute(
+            "UPDATE conditionals SET response_json = ? WHERE id = ?",
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                conditional_id,
+            ),
+        )
+        replace_conditional_in_state(state, conditional)
+        prepend_inventory_movements(state, movements)
+        persist_product_app_state(conn, state, now)
+        record_audit(
+            "create",
+            "conditional",
+            conditional_id,
+            {
+                "conditionalNumber": number,
+                "customerId": customer["id"],
+                "productIds": sorted(quantities),
+                "movementIds": [item["id"] for item in movements],
+            },
+            conn,
+        )
+    return result, False
+
+
+def persist_conditional_return(
+    conditional_id: str,
+    payload: dict,
+    idempotency_key: str = "",
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ConditionalOperationError("Envie um JSON válido.")
+    key = str(idempotency_key or "").strip() or os.urandom(16).hex()
+    if len(key) > 160:
+        raise ConditionalOperationError(
+            "Chave de idempotência inválida.",
+            400,
+            "IDEMPOTENCY_KEY_INVALID",
+        )
+    request_hash = conditional_request_hash({
+        "conditionalId": conditional_id,
+        "items": payload.get("items"),
+    })
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (conditional_lock_key(store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM conditional_returns
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise ConditionalOperationError(
+                    "A chave de idempotência já foi utilizada com dados diferentes.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+        header = conn.execute(
+            f"""
+            SELECT id, status, customer_id AS "customerId"
+            FROM conditionals
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, conditional_id),
+        ).fetchone()
+        if not header:
+            raise ConditionalOperationError("Condicional não encontrado.", 404)
+        if header["status"] != "open":
+            raise ConditionalOperationError(
+                "Somente condicional aberto pode receber retorno.",
+                409,
+                "CONDITIONAL_NOT_OPEN",
+            )
+        item_rows = conn.execute(
+            f"""
+            SELECT id, product_id AS "productId", original_quantity AS quantity,
+                   returned_quantity AS "returnedQuantity",
+                   sold_quantity AS "soldQuantity",
+                   pending_sale_quantity AS "pendingSaleQuantity"
+            FROM conditional_items
+            WHERE conditional_id = ?{lock_clause}
+            """,
+            (conditional_id,),
+        ).fetchall()
+        by_id = {str(row["id"]): row for row in item_rows}
+        by_product = {str(row["productId"]): row for row in item_rows}
+        if any(int(row["pendingSaleQuantity"] or 0) > 0 for row in item_rows):
+            raise ConditionalOperationError(
+                "Existe uma venda do condicional aguardando conclusão.",
+                409,
+                "CONDITIONAL_SALE_PENDING",
+            )
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ConditionalOperationError("Informe as peças do retorno.")
+        normalized = []
+        seen: set[str] = set()
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                raise ConditionalOperationError("Item de retorno inválido.")
+            item_id = str(raw.get("conditionalItemId", "") or "").strip()
+            product_id = str(raw.get("productId", "") or "").strip()
+            row = by_id.get(item_id) if item_id else by_product.get(product_id)
+            if not row or str(row["id"]) in seen:
+                raise ConditionalOperationError("Item de retorno inválido.")
+            seen.add(str(row["id"]))
+            returned = conditional_quantity(
+                raw.get("returnedQuantity", 0),
+                "Quantidade devolvida",
+            )
+            purchase = conditional_quantity(
+                raw.get("purchaseQuantity", 0),
+                "Quantidade para compra",
+            )
+            if returned + purchase <= 0:
+                raise ConditionalOperationError(
+                    "Informe uma quantidade devolvida ou destinada à compra."
+                )
+            actionable = (
+                int(row["quantity"] or 0)
+                - int(row["returnedQuantity"] or 0)
+                - int(row["soldQuantity"] or 0)
+            )
+            if returned + purchase > actionable:
+                raise ConditionalOperationError(
+                    "A quantidade do retorno ultrapassa o saldo da peça.",
+                    409,
+                    "CONDITIONAL_QUANTITY_EXCEEDED",
+                )
+            normalized.append({
+                "conditionalItemId": str(row["id"]),
+                "productId": str(row["productId"]),
+                "returnedQuantity": returned,
+                "purchaseQuantity": purchase,
+            })
+        return_id = os.urandom(16).hex()
+        awaiting_sale = any(item["purchaseQuantity"] > 0 for item in normalized)
+        return_status = "awaiting_sale" if awaiting_sale else "completed"
+        conn.execute(
+            """
+            INSERT INTO conditional_returns (
+                id, store_id, conditional_id, status, user_id, user_name,
+                idempotency_key, request_hash, response_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
+            """,
+            (
+                return_id,
+                store_id,
+                conditional_id,
+                return_status,
+                user.get("id", "") or None,
+                user.get("name", "") or None,
+                key,
+                request_hash,
+                now,
+            ),
+        )
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        movements = []
+        for item in normalized:
+            status = (
+                "awaiting_sale"
+                if item["purchaseQuantity"] > 0
+                else "completed"
+            )
+            conn.execute(
+                """
+                INSERT INTO conditional_return_items (
+                    id, return_id, conditional_item_id, product_id,
+                    returned_quantity, purchase_quantity, sale_id, status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    return_id,
+                    item["conditionalItemId"],
+                    item["productId"],
+                    item["returnedQuantity"],
+                    item["purchaseQuantity"],
+                    status,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE conditional_items
+                SET returned_quantity = returned_quantity + ?,
+                    pending_sale_quantity = pending_sale_quantity + ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    item["returnedQuantity"],
+                    item["purchaseQuantity"],
+                    now,
+                    item["conditionalItemId"],
+                ),
+            )
+            if item["returnedQuantity"] <= 0:
+                continue
+            product = conn.execute(
+                f"""
+                SELECT stock FROM products
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, item["productId"]),
+            ).fetchone()
+            if not product:
+                raise ConditionalOperationError(
+                    "Produto do retorno não encontrado.",
+                    409,
+                )
+            before = int(reserved.get(item["productId"], 0) or 0)
+            after = before - item["returnedQuantity"]
+            movements.append(persist_inventory_movement(
+                conn,
+                product_id=item["productId"],
+                movement_type="conditional_return",
+                real_before=int(product["stock"] or 0),
+                real_after=int(product["stock"] or 0),
+                reserved_before=before,
+                reserved_after=after,
+                reference_type="conditional_return",
+                reference_id=return_id,
+                source_key=(
+                    f"conditional:{conditional_id}:return:{return_id}:"
+                    f"{item['conditionalItemId']}"
+                ),
+                created_at=now,
+                store_id=store_id,
+                user=user,
+            ))
+            reserved[item["productId"]] = after
+        remaining = conn.execute(
+            """
+            SELECT COALESCE(SUM(
+                original_quantity - returned_quantity - sold_quantity
+            ), 0) AS remaining,
+            COALESCE(SUM(pending_sale_quantity), 0) AS pending_sale
+            FROM conditional_items WHERE conditional_id = ?
+            """,
+            (conditional_id,),
+        ).fetchone()
+        if int(remaining["remaining"] or 0) == 0:
+            conn.execute(
+                """
+                UPDATE conditionals
+                SET status = 'finalized', finalized_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, now, conditional_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE conditionals SET updated_at = ? WHERE id = ?",
+                (now, conditional_id),
+            )
+        conditional = conditional_document(conn, conditional_id)
+        sale_items = [
+            item
+            for item in normalized
+            if item["purchaseQuantity"] > 0
+        ]
+        sale_draft = None
+        if sale_items:
+            by_document_id = {
+                str(item["id"]): item for item in conditional["items"]
+            }
+            sale_draft = {
+                "conditionalId": conditional_id,
+                "conditionalReturnId": return_id,
+                "customerId": conditional["customerId"],
+                "customerName": conditional["customerName"],
+                "items": [
+                    {
+                        "conditionalItemId": item["conditionalItemId"],
+                        "productId": item["productId"],
+                        "quantity": item["purchaseQuantity"],
+                        "practicedUnitPrice": by_document_id[
+                            item["conditionalItemId"]
+                        ]["unitPrice"],
+                        "unitDiscount": 0,
+                        "unitAddition": 0,
+                    }
+                    for item in sale_items
+                ],
+            }
+        result = {
+            "conditional": conditional,
+            "returnId": return_id,
+            "saleDraft": sale_draft,
+            "inventoryMovements": movements,
+        }
+        conn.execute(
+            """
+            UPDATE conditional_returns SET response_json = ? WHERE id = ?
+            """,
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                return_id,
+            ),
+        )
+        replace_conditional_in_state(state, conditional)
+        prepend_inventory_movements(state, movements)
+        persist_product_app_state(conn, state, now)
+        record_audit(
+            "return",
+            "conditional",
+            conditional_id,
+            {
+                "returnId": return_id,
+                "returnedQuantity": sum(
+                    item["returnedQuantity"] for item in normalized
+                ),
+                "purchaseQuantity": sum(
+                    item["purchaseQuantity"] for item in normalized
+                ),
+                "movementIds": [item["id"] for item in movements],
+            },
+            conn,
+        )
+    return result, False
+
+
+def persist_conditional_cancellation(
+    conditional_id: str,
+    reason: str,
+    store_id: str = "matriz",
+) -> dict:
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ConditionalOperationError(
+            "Informe o motivo do cancelamento."
+        )
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT status FROM conditionals
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, conditional_id),
+        ).fetchone()
+        if not row:
+            raise ConditionalOperationError("Condicional não encontrado.", 404)
+        if row["status"] == "cancelled":
+            raise ConditionalOperationError(
+                "Condicional já cancelado.",
+                409,
+                "CONDITIONAL_ALREADY_CANCELLED",
+            )
+        pending = conn.execute(
+            """
+            SELECT COALESCE(SUM(
+                original_quantity - returned_quantity - sold_quantity
+            ), 0) AS quantity
+            FROM conditional_items WHERE conditional_id = ?
+            """,
+            (conditional_id,),
+        ).fetchone()
+        if int(pending["quantity"] or 0) > 0:
+            raise ConditionalOperationError(
+                "Confirme o retorno físico de todas as peças antes de cancelar.",
+                409,
+                "CONDITIONAL_HAS_PENDING_ITEMS",
+            )
+        conn.execute(
+            """
+            UPDATE conditionals
+            SET status = 'cancelled', cancellation_reason = ?,
+                cancelled_at = ?, cancelled_by_user_id = ?,
+                cancelled_by_user_name = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                reason,
+                now,
+                user.get("id", "") or None,
+                user.get("name", "") or None,
+                now,
+                conditional_id,
+            ),
+        )
+        state = locked_app_state(conn)
+        conditional = conditional_document(conn, conditional_id)
+        replace_conditional_in_state(state, conditional)
+        persist_product_app_state(conn, state, now)
+        record_audit(
+            "cancel",
+            "conditional",
+            conditional_id,
+            {"reason": reason},
+            conn,
+        )
+    return conditional
 
 
 def parse_iso_datetime(value: str) -> datetime:
@@ -2527,8 +9939,5124 @@ def build_financial_from_sale(sale: dict, installments: int = 1) -> tuple[list[d
     return cash, receivables
 
 
-def sync_sale_to_state(sale: dict, updated_products: list[dict], cash: list[dict], receivables: list[dict]) -> None:
+class SaleOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def add_calendar_months(base: date, months: int) -> date:
+    month_index = base.month - 1 + months
+    year = base.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(base.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def store_credit_due_dates(first_due_date: str, installments: int) -> list[str]:
+    try:
+        first_due = date.fromisoformat(str(first_due_date or "")[:10])
+    except ValueError as error:
+        raise SaleOperationError(
+            "Data da primeira parcela inv\u00e1lida.",
+            400,
+            "STORE_CREDIT_DUE_DATE_INVALID",
+        ) from error
+    return [
+        add_calendar_months(first_due, index).isoformat()
+        for index in range(installments)
+    ]
+
+
+def sale_money(value, field: str, *, allow_zero: bool = True) -> float:
+    try:
+        amount = Decimal(str(value if value is not None else 0))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise SaleOperationError(f"{field} deve ser um valor v\u00e1lido.") from error
+    if not amount.is_finite():
+        raise SaleOperationError(f"{field} deve ser um valor v\u00e1lido.")
+    amount = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if amount < 0 or (not allow_zero and amount == 0):
+        qualifier = "maior que zero" if not allow_zero else "maior ou igual a zero"
+        raise SaleOperationError(f"{field} deve ser {qualifier}.")
+    return float(amount)
+
+
+def sale_request_hash(payload: dict) -> str:
+    canonical = {
+        "customerId": str(payload.get("customerId", "") or "").strip(),
+        "conditionalId": str(payload.get("conditionalId", "") or "").strip(),
+        "conditionalReturnId": str(
+            payload.get("conditionalReturnId", "") or ""
+        ).strip(),
+        "discount": payload.get("discount", 0),
+        "addition": payload.get("addition", 0),
+        "storeCreditInstallments": payload.get("storeCreditInstallments", 1),
+        "items": [
+            {
+                "productId": str(item.get("productId", "") or "").strip(),
+                "quantity": item.get("quantity", 0),
+                "practicedUnitPrice": item.get(
+                    "practicedUnitPrice",
+                    item.get("unitPrice"),
+                ),
+                "unitDiscount": item.get("unitDiscount", 0),
+                "unitAddition": item.get("unitAddition", 0),
+            }
+            for item in (payload.get("items") or [])
+            if isinstance(item, dict)
+        ],
+        "payments": [
+            {
+                "method": str(payment.get("method", "") or "").strip(),
+                "amount": payment.get("amount", 0),
+                "tenderedAmount": payment.get("tenderedAmount"),
+                "cardModalityId": str(
+                    payment.get("cardModalityId", "") or ""
+                ).strip(),
+                "installments": payment.get("installments"),
+            }
+            for payment in (payload.get("payments") or [])
+            if isinstance(payment, dict)
+        ],
+    }
+    return purchase_request_hash(canonical)
+
+
+def sale_lock_key(store_id: str, idempotency_key: str) -> int:
+    digest = hashlib.sha256(
+        f"sale:{store_id}:{idempotency_key}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+
+def next_sale_number(conn, store_id: str = "matriz") -> int:
+    existing_sequence = conn.execute(
+        "SELECT next_number FROM sale_sequences WHERE store_id = ?",
+        (store_id,),
+    ).fetchone()
+    if not existing_sequence:
+        highest = 0
+        for row in conn.execute(
+            "SELECT id, sale_number FROM sales WHERE store_id = ?",
+            (store_id,),
+        ).fetchall():
+            if row["sale_number"] is not None:
+                highest = max(highest, int(row["sale_number"]))
+                continue
+            sale_id = str(row["id"] or "")
+            if sale_id.upper().startswith("VENDA") and sale_id[5:].isdigit():
+                highest = max(highest, int(sale_id[5:]))
+        conn.execute(
+            """
+            INSERT INTO sale_sequences (store_id, next_number)
+            VALUES (?, ?)
+            ON CONFLICT(store_id) DO NOTHING
+            """,
+            (store_id, highest + 1),
+        )
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"SELECT next_number FROM sale_sequences WHERE store_id = ?{lock_clause}",
+        (store_id,),
+    ).fetchone()
+    if not row:
+        raise SaleOperationError(
+            "N\u00e3o foi poss\u00edvel gerar o n\u00famero da venda.",
+            500,
+            "SALE_SEQUENCE_ERROR",
+        )
+    number = int(row["next_number"])
+    conn.execute(
+        "UPDATE sale_sequences SET next_number = ? WHERE store_id = ?",
+        (number + 1, store_id),
+    )
+    return number
+
+
+def effective_card_modality(
+    conn,
+    card_modality_id: str,
+    at_timestamp: str,
+    store_id: str = "matriz",
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM (
+            SELECT id, card_modality_id, store_id, name, method, installments,
+                   status, tax_percent, receivable_days, valid_from,
+                   valid_until, created_at, updated_at
+            FROM card_modalities
+            WHERE store_id = ? AND card_modality_id = ?
+            UNION ALL
+            SELECT id, card_modality_id, store_id, name, method, installments,
+                   status, tax_percent, receivable_days, valid_from,
+                   valid_until, created_at, updated_at
+            FROM card_modality_history
+            WHERE store_id = ? AND card_modality_id = ?
+        ) versions
+        WHERE valid_from <= ?
+          AND (valid_until IS NULL OR valid_until = '' OR valid_until > ?)
+        ORDER BY valid_from DESC
+        LIMIT 1
+        """,
+        (
+            store_id,
+            card_modality_id,
+            store_id,
+            card_modality_id,
+            at_timestamp,
+            at_timestamp,
+        ),
+    ).fetchone()
+    return card_modality_from_row(row) if row else None
+
+
+def available_sale_card_modalities(
+    conn,
+    at_timestamp: str | None = None,
+    store_id: str = "matriz",
+) -> list[dict]:
+    at_timestamp = at_timestamp or utc_now()
+    rows = conn.execute(
+        """
+        SELECT card_modality_id
+        FROM card_modalities
+        WHERE store_id = ?
+        ORDER BY method, installments
+        """,
+        (store_id,),
+    ).fetchall()
+    modalities = []
+    for row in rows:
+        modality = effective_card_modality(
+            conn,
+            str(row["card_modality_id"]),
+            at_timestamp,
+            store_id,
+        )
+        if modality and modality["status"] == "active":
+            modalities.append({
+                "cardModalityId": modality["cardModalityId"],
+                "name": modality["name"],
+                "method": modality["method"],
+                "installments": modality["installments"],
+            })
+    return sorted(
+        modalities,
+        key=lambda item: (
+            0 if item["method"] == "debit" else 1,
+            item["installments"],
+        ),
+    )
+
+
+def allocate_sale_amount(amount: float, weights: list[float]) -> list[float]:
+    if not weights:
+        return []
+    cents = int(
+        (Decimal(str(amount)) * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    if cents == 0:
+        return [0.0 for _ in weights]
+    decimal_weights = [max(Decimal("0"), Decimal(str(value))) for value in weights]
+    total_weight = sum(decimal_weights)
+    if total_weight == 0:
+        decimal_weights = [Decimal("1") for _ in weights]
+        total_weight = Decimal(len(weights))
+    allocated_cents = []
+    remaining = cents
+    for index, weight in enumerate(decimal_weights):
+        if index == len(decimal_weights) - 1:
+            share = remaining
+        else:
+            share = int(
+                (Decimal(cents) * weight / total_weight).quantize(
+                    Decimal("1"),
+                    rounding=ROUND_HALF_UP,
+                )
+            )
+            share = min(remaining, max(0, share))
+        allocated_cents.append(share)
+        remaining -= share
+    return [value / 100 for value in allocated_cents]
+
+
+def build_transactional_sale_items(
+    payload: dict,
+    product_rows: dict[str, sqlite3.Row],
+    reserved_by_product: dict[str, int],
+) -> list[dict]:
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise SaleOperationError("Adicione produtos.")
+    items = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise SaleOperationError("Item de venda inv\u00e1lido.")
+        product_id = str(raw_item.get("productId", "") or "").strip()
+        if not product_id or product_id in seen:
+            message = (
+                "O mesmo produto n\u00e3o pode aparecer mais de uma vez na venda."
+                if product_id in seen
+                else "Item de venda inv\u00e1lido."
+            )
+            raise SaleOperationError(message)
+        seen.add(product_id)
+        try:
+            quantity_value = float(raw_item.get("quantity", 0))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise SaleOperationError("Quantidade do item \u00e9 inv\u00e1lida.") from error
+        if (
+            not math.isfinite(quantity_value)
+            or not quantity_value.is_integer()
+            or quantity_value <= 0
+        ):
+            raise SaleOperationError("Quantidade do item \u00e9 inv\u00e1lida.")
+        quantity = int(quantity_value)
+        row = product_rows.get(product_id)
+        if not row:
+            raise SaleOperationError("Produto n\u00e3o encontrado.", 404)
+        if not bool(row["active"]):
+            raise SaleOperationError(
+                f"{row['name']} est\u00e1 desativado e n\u00e3o pode ser vendido.",
+                409,
+                "PRODUCT_DEACTIVATED",
+            )
+        stock_before = int(row["stock"] or 0)
+        reserved = int(reserved_by_product.get(product_id, 0) or 0)
+        if stock_before - reserved < quantity:
+            raise SaleOperationError(
+                f"Estoque dispon\u00edvel insuficiente para {row['name']}.",
+                409,
+                "INSUFFICIENT_AVAILABLE_STOCK",
+            )
+        original = sale_money(row["price"], "Pre\u00e7o original")
+        practiced_input = raw_item.get(
+            "practicedUnitPrice",
+            raw_item.get("unitPrice", original),
+        )
+        practiced = sale_money(practiced_input, "Pre\u00e7o praticado")
+        unit_discount = sale_money(
+            raw_item.get("unitDiscount", 0),
+            "Desconto do item",
+        )
+        unit_addition = sale_money(
+            raw_item.get("unitAddition", 0),
+            "Acr\u00e9scimo do item",
+        )
+        final_unit = money_round(practiced - unit_discount + unit_addition)
+        if final_unit < 0:
+            raise SaleOperationError(
+                f"Os ajustes de {row['name']} resultam em valor negativo."
+            )
+        line_total = money_round(quantity * final_unit)
+        items.append({
+            "id": os.urandom(16).hex(),
+            "productId": product_id,
+            "barcode": str(row["barcode"] or ""),
+            "name": str(row["name"] or ""),
+            "brandId": str(row["brandId"] or ""),
+            "brand": str(row["brand"] or ""),
+            "categoryId": str(row["categoryId"] or ""),
+            "category": str(row["category"] or ""),
+            "sizeId": str(row["sizeId"] or ""),
+            "size": str(row["size"] or ""),
+            "colorId": str(row["colorId"] or ""),
+            "color": str(row["color"] or ""),
+            "gender": str(row["gender"] or ""),
+            "quantity": quantity,
+            "unitCost": sale_money(row["cost"], "Custo do produto"),
+            "originalUnitPrice": original,
+            "practicedUnitPrice": practiced,
+            "unitDiscount": unit_discount,
+            "unitAddition": unit_addition,
+            "finalUnitPrice": final_unit,
+            "unitPrice": final_unit,
+            "total": line_total,
+            "stockBefore": stock_before,
+            "stockAfter": stock_before - quantity,
+        })
+    return items
+
+
+def apply_sale_global_adjustments(
+    items: list[dict],
+    discount: float,
+    addition: float,
+) -> None:
+    additions = allocate_sale_amount(addition, [item["total"] for item in items])
+    bases = [
+        money_round(item["total"] + additions[index])
+        for index, item in enumerate(items)
+    ]
+    discounts = allocate_sale_amount(discount, bases)
+    for index, item in enumerate(items):
+        item["allocatedGlobalAddition"] = additions[index]
+        item["allocatedGlobalDiscount"] = discounts[index]
+        item["netTotal"] = money_round(
+            item["total"] + additions[index] - discounts[index]
+        )
+
+
+def build_transactional_sale_payments(
+    conn,
+    payload: dict,
+    total: float,
+    created_at: str,
+    store_id: str,
+) -> list[dict]:
+    raw_payments = payload.get("payments")
+    if not isinstance(raw_payments, list):
+        raise SaleOperationError("Informe as formas de pagamento.")
+    available_methods = payment_method_availability(conn, store_id)
+    payments = []
+    for raw_payment in raw_payments:
+        if not isinstance(raw_payment, dict):
+            raise SaleOperationError("Forma de pagamento inv\u00e1lida.")
+        amount = sale_money(
+            raw_payment.get("amount", 0),
+            "Valor do pagamento",
+            allow_zero=False,
+        )
+        method = str(raw_payment.get("method", "") or "").strip()
+        if method not in {"cash", "pix", "debit", "credit", "storeCredit"}:
+            raise SaleOperationError("Forma de pagamento inv\u00e1lida.")
+        if not available_methods.get(method, False):
+            raise SaleOperationError(
+                "Esta forma de pagamento esta desabilitada para novas vendas.",
+                409,
+                "PAYMENT_METHOD_DISABLED",
+            )
+        payment = {
+            "id": os.urandom(16).hex(),
+            "method": method,
+            "amount": amount,
+            "installments": 1,
+            "status": "registered",
+            "tenderedAmount": amount,
+            "changeAmount": 0.0,
+            "cardModalityId": "",
+            "cardModalityVersionId": "",
+            "modalityName": "",
+            "taxPercent": 0.0,
+            "receivableDays": 0,
+            "grossAmount": amount,
+            "feeAmount": 0.0,
+            "netAmount": amount,
+            "createdAt": created_at,
+        }
+        if method == "cash":
+            tendered = sale_money(
+                raw_payment.get("tenderedAmount", amount),
+                "Valor entregue",
+            )
+            if tendered < amount:
+                raise SaleOperationError(
+                    "O valor entregue em dinheiro n\u00e3o pode ser menor que o valor devido."
+                )
+            payment["tenderedAmount"] = tendered
+            payment["changeAmount"] = money_round(tendered - amount)
+        elif method in {"debit", "credit"}:
+            card_modality_id = str(
+                raw_payment.get("cardModalityId", "") or ""
+            ).strip()
+            if not card_modality_id:
+                raise SaleOperationError("Selecione uma modalidade de cart\u00e3o.")
+            modality = effective_card_modality(
+                conn,
+                card_modality_id,
+                created_at,
+                store_id,
+            )
+            if not modality or modality["status"] != "active":
+                raise SaleOperationError(
+                    "A modalidade de cart\u00e3o n\u00e3o est\u00e1 ativa ou vigente.",
+                    409,
+                    "CARD_MODALITY_UNAVAILABLE",
+                )
+            if modality["method"] != method:
+                raise SaleOperationError(
+                    "A modalidade selecionada n\u00e3o corresponde \u00e0 forma de pagamento."
+                )
+            fee = money_round(amount * modality["taxPercent"] / 100)
+            payment.update({
+                "installments": modality["installments"],
+                "cardModalityId": modality["cardModalityId"],
+                "cardModalityVersionId": modality["id"],
+                "modalityName": modality["name"],
+                "taxPercent": modality["taxPercent"],
+                "receivableDays": modality["receivableDays"],
+                "grossAmount": amount,
+                "feeAmount": fee,
+                "netAmount": money_round(amount - fee),
+            })
+        elif method == "storeCredit":
+            try:
+                installments_value = float(
+                    raw_payment.get(
+                        "installments",
+                        payload.get("storeCreditInstallments", 1),
+                    )
+                )
+            except (TypeError, ValueError, OverflowError) as error:
+                raise SaleOperationError(
+                    "Quantidade de parcelas do credi\u00e1rio \u00e9 inv\u00e1lida."
+                ) from error
+            if (
+                not math.isfinite(installments_value)
+                or not installments_value.is_integer()
+                or not 1 <= installments_value <= 3
+            ):
+                raise SaleOperationError(
+                    "Credi\u00e1rio permite no m\u00e1ximo 3 parcelas."
+                )
+            payment["installments"] = int(installments_value)
+        payments.append(payment)
+    if money_round(sum(item["amount"] for item in payments)) != total:
+        raise SaleOperationError("Pagamentos precisam fechar com o total.")
+    if total > 0 and not payments:
+        raise SaleOperationError("Informe as formas de pagamento.")
+    return payments
+
+
+def sale_operational_date(created_at: str) -> date:
+    normalized = created_at.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(STORE_TIMEZONE).date()
+
+
+def build_transactional_sale_financial(
+    sale: dict,
+    store_id: str,
+) -> tuple[list[dict], list[dict]]:
+    cash = []
+    receivables = []
+    sale_date = sale_operational_date(sale["createdAt"])
+    for payment in sale["payments"]:
+        if payment["method"] in {"cash", "pix"}:
+            cash.append({
+                "id": os.urandom(16).hex(),
+                "direction": "in",
+                "type": "sale",
+                "description": f"Venda {sale['id']}",
+                "method": payment["method"],
+                "amount": payment["amount"],
+                "refId": sale["id"],
+                "createdAt": sale["createdAt"],
+            })
+            continue
+        if payment["method"] in {"debit", "credit"}:
+            due_date = (
+                sale_date + timedelta(days=payment["receivableDays"])
+            ).isoformat()
+            receivables.append({
+                "id": os.urandom(16).hex(),
+                "salePaymentId": payment["id"],
+                "saleId": sale["id"],
+                "customerId": sale["customerId"],
+                "customerName": sale["customerName"],
+                "method": payment["method"],
+                "amount": payment["netAmount"],
+                "received": 0.0,
+                "status": "cardPending",
+                "dueDate": due_date,
+                "paidAt": "",
+                "lastPaymentAt": "",
+                "installment": "",
+                "cardModalityId": payment["cardModalityId"],
+                "cardModalityVersionId": payment["cardModalityVersionId"],
+                "modalityName": payment["modalityName"],
+                "cardInstallments": payment["installments"],
+                "taxPercent": payment["taxPercent"],
+                "receivableDays": payment["receivableDays"],
+                "grossAmount": payment["grossAmount"],
+                "feeAmount": payment["feeAmount"],
+                "netAmount": payment["netAmount"],
+                "originalDueDate": due_date,
+                "openAmount": payment["netAmount"],
+                "discountTotal": 0.0,
+                "interestTotal": 0.0,
+                "fineTotal": 0.0,
+                "additionTotal": 0.0,
+                "version": 0,
+                "createdAt": sale["createdAt"],
+                "updatedAt": sale["createdAt"],
+            })
+            continue
+        if payment["method"] == "storeCredit":
+            installments = payment["installments"]
+            due_dates = store_credit_due_dates(
+                sale["storeCreditFirstDueDate"],
+                installments,
+            )
+            part = money_round(payment["amount"] / installments)
+            for parcel in range(1, installments + 1):
+                amount = (
+                    money_round(
+                        payment["amount"] - part * (installments - 1)
+                    )
+                    if parcel == installments
+                    else part
+                )
+                receivables.append({
+                    "id": os.urandom(16).hex(),
+                    "salePaymentId": payment["id"],
+                    "saleId": sale["id"],
+                    "customerId": sale["customerId"],
+                    "customerName": sale["customerName"],
+                    "method": "storeCredit",
+                    "amount": amount,
+                    "received": 0.0,
+                    "status": "open",
+                    "dueDate": due_dates[parcel - 1],
+                    "paidAt": "",
+                    "lastPaymentAt": "",
+                    "installment": f"{parcel}/{installments}",
+                    "cardModalityId": "",
+                    "cardModalityVersionId": "",
+                    "modalityName": "",
+                    "cardInstallments": 1,
+                    "taxPercent": 0.0,
+                    "receivableDays": 0,
+                    "grossAmount": amount,
+                    "feeAmount": 0.0,
+                    "netAmount": amount,
+                    "originalDueDate": due_dates[parcel - 1],
+                    "openAmount": amount,
+                    "discountTotal": 0.0,
+                    "interestTotal": 0.0,
+                    "fineTotal": 0.0,
+                    "additionTotal": 0.0,
+                    "version": 0,
+                    "createdAt": sale["createdAt"],
+                    "updatedAt": sale["createdAt"],
+                })
+    return cash, receivables
+
+
+def conditional_sale_context(
+    conn,
+    payload: dict,
+    lock_clause: str,
+    store_id: str,
+) -> dict | None:
+    conditional_id = str(payload.get("conditionalId", "") or "").strip()
+    return_id = str(payload.get("conditionalReturnId", "") or "").strip()
+    if not conditional_id and not return_id:
+        return None
+    if not conditional_id or not return_id:
+        raise SaleOperationError(
+            "Informe a origem completa do condicional.",
+            400,
+            "CONDITIONAL_ORIGIN_INCOMPLETE",
+        )
+    header = conn.execute(
+        f"""
+        SELECT id, customer_id AS "customerId", status
+        FROM conditionals
+        WHERE store_id = ? AND id = ?{lock_clause}
+        """,
+        (store_id, conditional_id),
+    ).fetchone()
+    if not header:
+        raise SaleOperationError("Condicional não encontrado.", 404)
+    if header["status"] != "open":
+        raise SaleOperationError(
+            "O condicional não está disponível para conversão em venda.",
+            409,
+            "CONDITIONAL_NOT_OPEN",
+        )
+    event = conn.execute(
+        f"""
+        SELECT id, status
+        FROM conditional_returns
+        WHERE store_id = ? AND conditional_id = ? AND id = ?{lock_clause}
+        """,
+        (store_id, conditional_id, return_id),
+    ).fetchone()
+    if not event or event["status"] != "awaiting_sale":
+        raise SaleOperationError(
+            "A seleção do condicional não está aguardando venda.",
+            409,
+            "CONDITIONAL_RETURN_NOT_PENDING",
+        )
+    rows = conn.execute(
+        f"""
+        SELECT return_item.conditional_item_id AS "conditionalItemId",
+               return_item.product_id AS "productId",
+               return_item.purchase_quantity AS quantity,
+               item.pending_sale_quantity AS "pendingSaleQuantity"
+        FROM conditional_return_items return_item
+        JOIN conditional_items item ON item.id = return_item.conditional_item_id
+        WHERE return_item.return_id = ?
+          AND return_item.status = 'awaiting_sale'
+          AND return_item.purchase_quantity > 0{lock_clause}
+        """,
+        (return_id,),
+    ).fetchall()
+    if not rows:
+        raise SaleOperationError(
+            "O retorno não possui peças aguardando venda.",
+            409,
+            "CONDITIONAL_RETURN_EMPTY",
+        )
+    expected = {
+        str(row["productId"]): {
+            "quantity": int(row["quantity"] or 0),
+            "conditionalItemId": str(row["conditionalItemId"]),
+        }
+        for row in rows
+    }
+    submitted: dict[str, int] = {}
+    for item in payload.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        product_id = str(item.get("productId", "") or "").strip()
+        try:
+            quantity = int(float(item.get("quantity", 0) or 0))
+        except (TypeError, ValueError, OverflowError):
+            quantity = -1
+        submitted[product_id] = submitted.get(product_id, 0) + quantity
+    expected_quantities = {
+        product_id: item["quantity"] for product_id, item in expected.items()
+    }
+    if submitted != expected_quantities:
+        raise SaleOperationError(
+            "Os itens da venda divergem da seleção do condicional.",
+            409,
+            "CONDITIONAL_ITEMS_MISMATCH",
+        )
+    customer_id = str(payload.get("customerId", "") or "").strip()
+    if customer_id != str(header["customerId"]):
+        raise SaleOperationError(
+            "A venda deve permanecer vinculada ao cliente do condicional.",
+            409,
+            "CONDITIONAL_CUSTOMER_MISMATCH",
+        )
+    return {
+        "conditionalId": conditional_id,
+        "returnId": return_id,
+        "customerId": str(header["customerId"]),
+        "items": expected,
+    }
+
+
+def persist_sale_creation(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise SaleOperationError("Envie um JSON v\u00e1lido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise SaleOperationError(
+            "Informe uma chave de idempot\u00eancia v\u00e1lida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = sale_request_hash(payload)
+    created_at = utc_now()
+    user = session.get("user") or {}
+
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (sale_lock_key(store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM sales
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise SaleOperationError(
+                    "A chave de idempot\u00eancia j\u00e1 foi utilizada com dados diferentes.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                result = json.loads(replay["responseJson"])
+            except (json.JSONDecodeError, TypeError) as error:
+                raise SaleOperationError(
+                    "A venda j\u00e1 existe, mas sua resposta hist\u00f3rica est\u00e1 inconsistente.",
+                    409,
+                    "SALE_RESPONSE_INCONSISTENT",
+                ) from error
+            return result, True
+
+        state = locked_app_state(conn)
+        conditional_context = conditional_sale_context(
+            conn,
+            payload,
+            lock_clause,
+            store_id,
+        )
+        all_reserved_by_product = conditional_reserved_quantities(state)
+        reserved_by_product = dict(all_reserved_by_product)
+        if conditional_context:
+            for product_id, context_item in conditional_context["items"].items():
+                reserved_by_product[product_id] = max(
+                    0,
+                    int(reserved_by_product.get(product_id, 0) or 0)
+                    - int(context_item["quantity"]),
+                )
+        raw_items = payload.get("items") or []
+        product_ids = [
+            str(item.get("productId", "") or "").strip()
+            for item in raw_items
+            if isinstance(item, dict) and item.get("productId")
+        ]
+        if not product_ids:
+            raise SaleOperationError("Adicione produtos.")
+        placeholders = ",".join("?" for _ in product_ids)
+        product_rows = conn.execute(
+            f"""
+            {PRODUCT_SELECT}
+            WHERE store_id = ? AND id IN ({placeholders}){lock_clause}
+            """,
+            (store_id, *product_ids),
+        ).fetchall()
+        products_by_id = {str(row["id"]): row for row in product_rows}
+        items = build_transactional_sale_items(
+            payload,
+            products_by_id,
+            reserved_by_product,
+        )
+        subtotal = money_round(sum(item["total"] for item in items))
+        discount = sale_money(payload.get("discount", 0), "Desconto geral")
+        addition = sale_money(payload.get("addition", 0), "Acr\u00e9scimo geral")
+        if discount > money_round(subtotal + addition):
+            raise SaleOperationError(
+                "O desconto geral n\u00e3o pode tornar a venda negativa."
+            )
+        total = money_round(subtotal + addition - discount)
+        apply_sale_global_adjustments(items, discount, addition)
+        payments = build_transactional_sale_payments(
+            conn,
+            payload,
+            total,
+            created_at,
+            store_id,
+        )
+
+        customer_id = str(payload.get("customerId", "") or "").strip()
+        if customer_id:
+            customer = conn.execute(
+                f"""
+                SELECT id, name, credit_limit AS "limit", status,
+                       is_default AS "isDefault"
+                FROM customers
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, customer_id),
+            ).fetchone()
+        else:
+            customer = conn.execute(
+                f"""
+                SELECT id, name, credit_limit AS "limit", status,
+                       is_default AS "isDefault"
+                FROM customers
+                WHERE store_id = ? AND is_default = 1{lock_clause}
+                """,
+                (store_id,),
+            ).fetchone()
+        if not customer:
+            message = (
+                "Cliente n\u00e3o encontrado."
+                if customer_id
+                else "Cliente padr\u00e3o n\u00e3o configurado."
+            )
+            raise SaleOperationError(message, 400 if customer_id else 503)
+        if customer["status"] == "deactivated":
+            raise SaleOperationError(
+                "Cliente desativado n\u00e3o pode receber novas opera\u00e7\u00f5es.",
+                409,
+            )
+
+        store_credit = money_round(sum(
+            payment["amount"]
+            for payment in payments
+            if payment["method"] == "storeCredit"
+        ))
+        credit_override = False
+        overdue_installments = 0
+        required_credit_limit = float(customer["limit"] or 0)
+        first_due_date = ""
+        if store_credit > 0:
+            if bool(customer["isDefault"]):
+                raise SaleOperationError(
+                    "Credi\u00e1rio exige cliente cadastrado e identificado."
+                )
+            if customer["status"] == "blocked":
+                raise SaleOperationError(
+                    "Cliente bloqueado para credi\u00e1rio.",
+                    409,
+                )
+            debt_rows = conn.execute(
+                f"""
+                SELECT amount, received, open_amount AS "openAmount",
+                       discount_total AS "discountTotal", due_date AS "dueDate"
+                FROM receivables
+                WHERE store_id = ? AND customer_id = ?
+                  AND method = 'storeCredit' AND status <> 'cancelled'{lock_clause}
+                """,
+                (store_id, customer["id"]),
+            ).fetchall()
+            open_debt = money_round(sum(
+                max(
+                    0,
+                    float(row["openAmount"])
+                    if row["openAmount"] is not None
+                    else (
+                        float(row["amount"] or 0)
+                        - float(row["received"] or 0)
+                        - float(row["discountTotal"] or 0)
+                    ),
+                )
+                for row in debt_rows
+            ))
+            sale_day = sale_operational_date(created_at)
+            overdue_installments = sum(
+                1
+                for row in debt_rows
+                if (
+                    row["dueDate"]
+                    and str(row["dueDate"]) < sale_day.isoformat()
+                    and (
+                        float(row["openAmount"])
+                        if row["openAmount"] is not None
+                        else max(
+                            0,
+                            float(row["amount"] or 0)
+                            - float(row["received"] or 0)
+                            - float(row["discountTotal"] or 0),
+                        )
+                    ) > 0.01
+                )
+            )
+            required_credit_limit = money_round(open_debt + store_credit)
+            if required_credit_limit > float(customer["limit"] or 0):
+                if payload.get("authorizeCreditLimit") is not True:
+                    raise SaleOperationError(
+                        "Limite de cr\u00e9dito ultrapassado. Confirme a autoriza\u00e7\u00e3o para continuar.",
+                        409,
+                        "CREDIT_LIMIT_EXCEEDED",
+                    )
+                credit_override = True
+            default_first_due = (
+                sale_day + timedelta(days=30)
+            ).isoformat()
+            first_due_date = str(
+                payload.get("storeCreditFirstDueDate") or default_first_due
+            )[:10]
+            due_dates = store_credit_due_dates(
+                first_due_date,
+                max(
+                    payment["installments"]
+                    for payment in payments
+                    if payment["method"] == "storeCredit"
+                ),
+            )
+            if date.fromisoformat(due_dates[0]) < sale_day:
+                raise SaleOperationError(
+                    "A primeira parcela n\u00e3o pode vencer antes da venda.",
+                    400,
+                    "STORE_CREDIT_DUE_DATE_INVALID",
+                )
+
+        sale_number = next_sale_number(conn, store_id)
+        sale_id = f"VENDA{sale_number:03d}"
+        sale = {
+            "id": sale_id,
+            "saleNumber": sale_number,
+            "customerId": str(customer["id"]),
+            "customerName": str(customer["name"]),
+            "items": items,
+            "subtotal": subtotal,
+            "discount": discount,
+            "addition": addition,
+            "total": total,
+            "costTotal": money_round(sum(
+                item["quantity"] * item["unitCost"] for item in items
+            )),
+            "payments": payments,
+            "changeAmount": money_round(sum(
+                payment["changeAmount"] for payment in payments
+            )),
+            "storeCreditFirstDueDate": first_due_date,
+            "overdueInstallments": overdue_installments,
+            "status": "completed",
+            "userId": str(user.get("id", "") or ""),
+            "userName": str(user.get("name", "") or ""),
+            "conditionalId": (
+                conditional_context["conditionalId"]
+                if conditional_context
+                else ""
+            ),
+            "createdAt": created_at,
+            "updatedAt": created_at,
+        }
+        cash, receivables = build_transactional_sale_financial(sale, store_id)
+
+        if credit_override:
+            previous_limit = money_round(customer["limit"])
+            conn.execute(
+                """
+                UPDATE customers
+                SET credit_limit = ?, updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (
+                    required_credit_limit,
+                    created_at,
+                    store_id,
+                    customer["id"],
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO customer_credit_limit_history (
+                    id, store_id, customer_id, previous_limit, new_limit,
+                    user_id, user_name, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    store_id,
+                    customer["id"],
+                    previous_limit,
+                    required_credit_limit,
+                    user.get("id", ""),
+                    user.get("name", ""),
+                    created_at,
+                ),
+            )
+            state_customer = next(
+                (
+                    item
+                    for item in state.get("customers", [])
+                    if str(item.get("id", "")) == str(customer["id"])
+                ),
+                None,
+            )
+            if state_customer:
+                state_customer["limit"] = required_credit_limit
+                state_customer["updatedAt"] = created_at
+
+        conn.execute(
+            """
+            INSERT INTO sales (
+                id, store_id, customer_id, customer_name, subtotal, discount,
+                total, cost_total, status, created_at, updated_at, sale_number,
+                addition, change_amount, user_id, user_name, idempotency_key,
+                request_hash, response_json, conditional_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sale_id,
+                store_id,
+                sale["customerId"],
+                sale["customerName"],
+                subtotal,
+                discount,
+                total,
+                sale["costTotal"],
+                created_at,
+                created_at,
+                sale_number,
+                addition,
+                sale["changeAmount"],
+                sale["userId"] or None,
+                sale["userName"] or None,
+                key,
+                request_hash,
+                "{}",
+                sale["conditionalId"] or None,
+            ),
+        )
+
+        updated_products = []
+        inventory_movements = []
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO sale_items (
+                    id, sale_id, product_id, barcode, name, brand, quantity,
+                    unit_cost, unit_price, total, brand_id, category_id,
+                    category, size_id, size, color_id, color, gender,
+                    original_unit_price, practiced_unit_price, unit_discount,
+                    unit_addition, final_unit_price, allocated_global_discount,
+                    allocated_global_addition, net_total, stock_before, stock_after,
+                    conditional_item_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["id"],
+                    sale_id,
+                    item["productId"],
+                    item["barcode"],
+                    item["name"],
+                    item["brand"],
+                    item["quantity"],
+                    item["unitCost"],
+                    item["finalUnitPrice"],
+                    item["total"],
+                    item["brandId"] or None,
+                    item["categoryId"] or None,
+                    item["category"],
+                    item["sizeId"] or None,
+                    item["size"],
+                    item["colorId"] or None,
+                    item["color"],
+                    item["gender"],
+                    item["originalUnitPrice"],
+                    item["practicedUnitPrice"],
+                    item["unitDiscount"],
+                    item["unitAddition"],
+                    item["finalUnitPrice"],
+                    item["allocatedGlobalDiscount"],
+                    item["allocatedGlobalAddition"],
+                    item["netTotal"],
+                    item["stockBefore"],
+                    item["stockAfter"],
+                    (
+                        conditional_context["items"][item["productId"]][
+                            "conditionalItemId"
+                        ]
+                        if conditional_context
+                        else None
+                    ),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE products
+                SET stock = ?, updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (
+                    item["stockAfter"],
+                    created_at,
+                    store_id,
+                    item["productId"],
+                ),
+            )
+            reserved = int(
+                all_reserved_by_product.get(item["productId"], 0) or 0
+            )
+            reserved_after = reserved
+            if conditional_context:
+                reserved_after -= int(
+                    conditional_context["items"][item["productId"]]["quantity"]
+                )
+            inventory_movements.append(persist_inventory_movement(
+                conn,
+                product_id=item["productId"],
+                movement_type="sale",
+                real_before=item["stockBefore"],
+                real_after=item["stockAfter"],
+                reserved_before=reserved,
+                reserved_after=reserved_after,
+                reference_type="sale",
+                reference_id=sale_id,
+                source_key=f"sale:{sale_id}:{item['id']}",
+                created_at=created_at,
+                store_id=store_id,
+                user=user,
+            ))
+            product = product_from_row(products_by_id[item["productId"]])
+            product["stock"] = item["stockAfter"]
+            product["updatedAt"] = created_at
+            updated_products.append(product_with_availability(product, state))
+
+        for payment in payments:
+            conn.execute(
+                """
+                INSERT INTO sale_payments (
+                    id, sale_id, method, amount, installments, status, created_at,
+                    tendered_amount, change_amount, card_modality_id,
+                    card_modality_version_id, modality_name, tax_percent,
+                    receivable_days, gross_amount, fee_amount, net_amount
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment["id"],
+                    sale_id,
+                    payment["method"],
+                    payment["amount"],
+                    payment["installments"],
+                    payment["status"],
+                    created_at,
+                    payment["tenderedAmount"],
+                    payment["changeAmount"],
+                    payment["cardModalityId"] or None,
+                    payment["cardModalityVersionId"] or None,
+                    payment["modalityName"] or None,
+                    payment["taxPercent"],
+                    payment["receivableDays"],
+                    payment["grossAmount"],
+                    payment["feeAmount"],
+                    payment["netAmount"],
+                ),
+            )
+
+        for movement in cash:
+            conn.execute(
+                """
+                INSERT INTO cash_movements (
+                    id, store_id, direction, type, description, method, amount,
+                    ref_id, expense_category_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    movement["id"],
+                    store_id,
+                    movement["direction"],
+                    movement["type"],
+                    movement["description"],
+                    movement["method"],
+                    movement["amount"],
+                    movement["refId"],
+                    movement["createdAt"],
+                ),
+            )
+
+        for receivable in receivables:
+            conn.execute(
+                """
+                INSERT INTO receivables (
+                    id, store_id, sale_id, customer_id, customer_name, method,
+                    amount, received, status, due_date, paid_at, last_payment_at,
+                    installment, created_at, updated_at, sale_payment_id,
+                    card_modality_id, card_modality_version_id, modality_name,
+                    card_installments, tax_percent, receivable_days,
+                    gross_amount, fee_amount, net_amount, original_due_date,
+                    open_amount, discount_total, interest_total, fine_total,
+                    addition_total, version
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    receivable["id"],
+                    store_id,
+                    receivable["saleId"],
+                    receivable["customerId"],
+                    receivable["customerName"],
+                    receivable["method"],
+                    receivable["amount"],
+                    receivable["received"],
+                    receivable["status"],
+                    receivable["dueDate"],
+                    receivable["paidAt"] or None,
+                    receivable["lastPaymentAt"] or None,
+                    receivable["installment"],
+                    receivable["createdAt"],
+                    receivable["updatedAt"],
+                    receivable["salePaymentId"],
+                    receivable["cardModalityId"] or None,
+                    receivable["cardModalityVersionId"] or None,
+                    receivable["modalityName"] or None,
+                    receivable["cardInstallments"],
+                    receivable["taxPercent"],
+                    receivable["receivableDays"],
+                    receivable["grossAmount"],
+                    receivable["feeAmount"],
+                    receivable["netAmount"],
+                    receivable["originalDueDate"],
+                    receivable["openAmount"],
+                    receivable["discountTotal"],
+                    receivable["interestTotal"],
+                    receivable["fineTotal"],
+                    receivable["additionTotal"],
+                    receivable["version"],
+                ),
+            )
+
+        converted_conditional = None
+        if conditional_context:
+            for product_id, context_item in conditional_context["items"].items():
+                conn.execute(
+                    """
+                    UPDATE conditional_items
+                    SET pending_sale_quantity = pending_sale_quantity - ?,
+                        sold_quantity = sold_quantity + ?, updated_at = ?
+                    WHERE id = ? AND pending_sale_quantity >= ?
+                    """,
+                    (
+                        context_item["quantity"],
+                        context_item["quantity"],
+                        created_at,
+                        context_item["conditionalItemId"],
+                        context_item["quantity"],
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE conditional_return_items
+                SET status = 'completed', sale_id = ?
+                WHERE return_id = ? AND status = 'awaiting_sale'
+                """,
+                (sale_id, conditional_context["returnId"]),
+            )
+            conn.execute(
+                """
+                UPDATE conditional_returns
+                SET status = 'completed'
+                WHERE id = ? AND status = 'awaiting_sale'
+                """,
+                (conditional_context["returnId"],),
+            )
+            conn.execute(
+                """
+                INSERT INTO conditional_sale_links (
+                    id, store_id, conditional_id, return_id, sale_id, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    store_id,
+                    conditional_context["conditionalId"],
+                    conditional_context["returnId"],
+                    sale_id,
+                    created_at,
+                ),
+            )
+            remaining = conn.execute(
+                """
+                SELECT COALESCE(SUM(
+                    original_quantity - returned_quantity - sold_quantity
+                ), 0) AS quantity
+                FROM conditional_items WHERE conditional_id = ?
+                """,
+                (conditional_context["conditionalId"],),
+            ).fetchone()
+            if int(remaining["quantity"] or 0) == 0:
+                conn.execute(
+                    """
+                    UPDATE conditionals
+                    SET status = 'finalized', finalized_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        created_at,
+                        created_at,
+                        conditional_context["conditionalId"],
+                    ),
+                )
+            else:
+                conn.execute(
+                    "UPDATE conditionals SET updated_at = ? WHERE id = ?",
+                    (created_at, conditional_context["conditionalId"]),
+                )
+            converted_conditional = conditional_document(
+                conn,
+                conditional_context["conditionalId"],
+            )
+            replace_conditional_in_state(state, converted_conditional)
+            updated_products = [
+                product_with_availability(product, state)
+                for product in updated_products
+            ]
+
+        for product in updated_products:
+            replace_product_in_state(state, product)
+        state["sales"] = [
+            sale,
+            *[
+                item
+                for item in (state.get("sales") or [])
+                if str(item.get("id", "")) != sale_id
+            ],
+        ]
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        state["receivables"] = [
+            *receivables,
+            *(state.get("receivables") or []),
+        ]
+        prepend_inventory_movements(state, inventory_movements)
+        result = {
+            "sale": sale,
+            "products": updated_products,
+            "cash": cash,
+            "receivables": receivables,
+            "inventoryMovements": inventory_movements,
+            "conditional": converted_conditional,
+        }
+        conn.execute(
+            "UPDATE sales SET response_json = ? WHERE id = ?",
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                sale_id,
+            ),
+        )
+        persist_product_app_state(conn, state, created_at)
+        record_audit(
+            "create",
+            "sale",
+            sale_id,
+            {
+                "saleNumber": sale_number,
+                "total": total,
+                "productIds": [item["productId"] for item in items],
+                "paymentMethods": [item["method"] for item in payments],
+                "creditOverride": credit_override,
+                "conditionalId": sale["conditionalId"],
+            },
+            conn,
+        )
+    return result, False
+
+
+class ReturnExchangeWarrantyError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def operation_request_hash(payload: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload if isinstance(payload, dict) else {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def operation_lock_key(kind: str, store_id: str, key: str) -> int:
+    digest = hashlib.sha256(
+        f"{kind}:{store_id}:{key}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+
+def next_business_number(
+    conn,
+    *,
+    sequence_table: str,
+    operation_table: str,
+    number_column: str,
+    store_id: str,
+) -> int:
+    allowed = {
+        ("sale_return_sequences", "sale_returns", "return_number"),
+        ("exchange_sequences", "exchanges", "exchange_number"),
+        ("warranty_sequences", "warranties", "warranty_number"),
+    }
+    if (sequence_table, operation_table, number_column) not in allowed:
+        raise ReturnExchangeWarrantyError(
+            "Sequencia operacional invalida.",
+            500,
+            "OPERATION_SEQUENCE_INVALID",
+        )
+    highest = conn.execute(
+        f"""
+        SELECT COALESCE(MAX({number_column}), 0) AS highest
+        FROM {operation_table}
+        WHERE store_id = ?
+        """,
+        (store_id,),
+    ).fetchone()
+    conn.execute(
+        f"""
+        INSERT INTO {sequence_table} (store_id, next_number)
+        VALUES (?, ?)
+        ON CONFLICT(store_id) DO NOTHING
+        """,
+        (store_id, int(highest["highest"] or 0) + 1),
+    )
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"""
+        SELECT next_number
+        FROM {sequence_table}
+        WHERE store_id = ?{lock_clause}
+        """,
+        (store_id,),
+    ).fetchone()
+    if not row:
+        raise ReturnExchangeWarrantyError(
+            "Nao foi possivel gerar o numero da operacao.",
+            500,
+            "OPERATION_SEQUENCE_ERROR",
+        )
+    number = int(row["next_number"])
+    conn.execute(
+        f"UPDATE {sequence_table} SET next_number = ? WHERE store_id = ?",
+        (number + 1, store_id),
+    )
+    return number
+
+
+def sale_item_net_unit(row) -> float:
+    quantity = max(1, int(row["quantity"] or 0))
+    net_total = float(row["netTotal"] or 0)
+    if net_total <= 0:
+        net_total = float(row["total"] or 0)
+    return money_round(net_total / quantity)
+
+
+def returnable_sale_items(
+    conn,
+    sale_id: str,
+    *,
+    store_id: str = "matriz",
+    allowed_warranty_id: str = "",
+    lock: bool = False,
+) -> tuple[dict, list[dict]]:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES and lock else ""
+    sale = conn.execute(
+        f"""
+        SELECT id, sale_number AS "saleNumber", customer_id AS "customerId",
+               customer_name AS "customerName", status, created_at AS "createdAt"
+        FROM sales
+        WHERE store_id = ? AND id = ?{lock_clause}
+        """,
+        (store_id, sale_id),
+    ).fetchone()
+    if not sale:
+        raise ReturnExchangeWarrantyError("Venda nao encontrada.", 404)
+    if str(sale["status"]) == "cancelled":
+        raise ReturnExchangeWarrantyError(
+            "Venda cancelada nao pode receber devolucao, troca ou garantia.",
+            409,
+            "SALE_CANCELLED",
+        )
+    rows = conn.execute(
+        f"""
+        SELECT item.id, item.product_id AS "productId", item.barcode,
+               item.name, item.brand, item.size, item.color, item.quantity,
+               item.unit_cost AS "unitCost", item.unit_price AS "unitPrice",
+               item.total, item.net_total AS "netTotal"
+        FROM sale_items item
+        WHERE item.sale_id = ?
+        ORDER BY item.id{lock_clause}
+        """,
+        (sale_id,),
+    ).fetchall()
+    result = []
+    for row in rows:
+        returned = conn.execute(
+            """
+            SELECT COALESCE(SUM(item.quantity), 0) AS quantity
+            FROM sale_return_items item
+            JOIN sale_returns header ON header.id = item.return_id
+            WHERE item.sale_item_id = ?
+              AND item.action = 'return'
+              AND header.status = 'completed'
+            """,
+            (row["id"],),
+        ).fetchone()
+        exchanged = conn.execute(
+            """
+            SELECT COALESCE(SUM(item.quantity), 0) AS quantity
+            FROM exchange_return_items item
+            JOIN exchanges header ON header.id = item.exchange_id
+            WHERE item.sale_item_id = ? AND header.status = 'completed'
+            """,
+            (row["id"],),
+        ).fetchone()
+        warranty_params: list = [row["id"]]
+        warranty_condition = ""
+        if allowed_warranty_id:
+            warranty_condition = " AND warranty.id <> ?"
+            warranty_params.append(allowed_warranty_id)
+        warranted = conn.execute(
+            f"""
+            SELECT COALESCE(SUM(warranty.quantity), 0) AS quantity
+            FROM warranties warranty
+            WHERE warranty.sale_item_id = ?
+              AND warranty.status NOT IN ('rejected', 'resolved', 'cancelled')
+              {warranty_condition}
+            """,
+            tuple(warranty_params),
+        ).fetchone()
+        sold_quantity = int(row["quantity"] or 0)
+        unavailable = (
+            int(returned["quantity"] or 0)
+            + int(exchanged["quantity"] or 0)
+            + int(warranted["quantity"] or 0)
+        )
+        available = max(0, sold_quantity - unavailable)
+        result.append({
+            "id": str(row["id"]),
+            "saleItemId": str(row["id"]),
+            "productId": str(row["productId"] or ""),
+            "barcode": str(row["barcode"] or ""),
+            "name": str(row["name"] or ""),
+            "brand": str(row["brand"] or ""),
+            "size": str(row["size"] or ""),
+            "color": str(row["color"] or ""),
+            "soldQuantity": sold_quantity,
+            "availableQuantity": available,
+            "unitNet": sale_item_net_unit(row),
+            "unitCost": money_round(row["unitCost"] or 0),
+        })
+    return dict(sale), result
+
+
+def resolve_operation_items(
+    conn,
+    sale_id: str,
+    raw_items,
+    *,
+    store_id: str,
+    allowed_warranty_id: str = "",
+    physical_condition_required: bool = True,
+) -> tuple[dict, list[dict]]:
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ReturnExchangeWarrantyError("Informe ao menos um item.")
+    sale, eligible = returnable_sale_items(
+        conn,
+        sale_id,
+        store_id=store_id,
+        allowed_warranty_id=allowed_warranty_id,
+        lock=True,
+    )
+    by_id = {item["saleItemId"]: item for item in eligible}
+    by_product: dict[str, list[dict]] = {}
+    for item in eligible:
+        by_product.setdefault(item["productId"], []).append(item)
+    result = []
+    seen = set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ReturnExchangeWarrantyError("Item invalido.")
+        sale_item_id = str(raw.get("saleItemId", "") or "").strip()
+        if not sale_item_id:
+            product_id = str(raw.get("productId", "") or "").strip()
+            matches = by_product.get(product_id, [])
+            if len(matches) == 1:
+                sale_item_id = matches[0]["saleItemId"]
+        if not sale_item_id or sale_item_id in seen or sale_item_id not in by_id:
+            raise ReturnExchangeWarrantyError(
+                "Item da venda invalido ou ambiguo.",
+                409,
+                "SALE_ITEM_INVALID",
+            )
+        seen.add(sale_item_id)
+        try:
+            numeric = float(raw.get("quantity", 0))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ReturnExchangeWarrantyError("Quantidade invalida.") from error
+        if not math.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+            raise ReturnExchangeWarrantyError("Quantidade invalida.")
+        quantity = int(numeric)
+        source = by_id[sale_item_id]
+        if quantity > source["availableQuantity"]:
+            raise ReturnExchangeWarrantyError(
+                "A quantidade excede o saldo disponivel do item.",
+                409,
+                "RETURN_QUANTITY_EXCEEDED",
+            )
+        condition = str(
+            raw.get("physicalCondition", "resellable") or ""
+        ).strip()
+        if physical_condition_required and condition not in {
+            "resellable",
+            "damaged",
+        }:
+            raise ReturnExchangeWarrantyError(
+                "Informe a condicao fisica do produto."
+            )
+        result.append({
+            **source,
+            "quantity": quantity,
+            "physicalCondition": condition or "resellable",
+            "grossTotal": money_round(quantity * source["unitNet"]),
+            "allocatedDiscount": 0.0,
+            "netTotal": money_round(quantity * source["unitNet"]),
+            "costTotal": money_round(quantity * source["unitCost"]),
+            "restocked": condition == "resellable",
+        })
+    return sale, result
+
+
+def cash_movement_document(
+    *,
+    direction: str,
+    movement_type: str,
+    description: str,
+    method: str,
+    amount: float,
+    ref_id: str,
+    created_at: str,
+) -> dict:
+    user = session.get("user") or {}
+    return {
+        "id": os.urandom(16).hex(),
+        "direction": direction,
+        "type": movement_type,
+        "description": description,
+        "method": method,
+        "amount": money_round(amount),
+        "refId": ref_id,
+        "expenseCategoryId": "",
+        "originType": movement_type,
+        "originId": ref_id,
+        "userId": user.get("id") or "",
+        "userName": user.get("name") or "",
+        "resultingBalance": None,
+        "reversalOfId": "",
+        "reversedAt": "",
+        "idempotencyKey": "",
+        "createdAt": created_at,
+    }
+
+
+class FinancialOperationError(Exception):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        code: str = "",
+    ):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def current_cash_balance(conn, store_id: str = "matriz") -> float:
+    row = conn.execute(
+        """
+        SELECT COALESCE(SUM(
+            CASE WHEN direction = 'in' THEN amount ELSE -amount END
+        ), 0) AS balance
+        FROM cash_movements
+        WHERE store_id = ?
+        """,
+        (store_id,),
+    ).fetchone()
+    return money_round(row["balance"] if row else 0)
+
+
+def insert_cash_movement(
+    conn,
+    movement: dict,
+    store_id: str,
+    *,
+    enforce_non_negative: bool = True,
+) -> dict:
+    balance_before = current_cash_balance(conn, store_id)
+    signed_amount = (
+        float(movement["amount"])
+        if movement["direction"] == "in"
+        else -float(movement["amount"])
+    )
+    balance_after = money_round(balance_before + signed_amount)
+    if enforce_non_negative and balance_after < -0.009:
+        raise FinancialOperationError(
+            "Saldo insuficiente para concluir a saida.",
+            409,
+            "INSUFFICIENT_CASH_BALANCE",
+        )
+    user = session.get("user") or {}
+    movement["originType"] = str(
+        movement.get("originType") or movement.get("type") or "manual"
+    )
+    movement["originId"] = str(
+        movement.get("originId") or movement.get("refId") or movement["id"]
+    )
+    movement["userId"] = str(movement.get("userId") or user.get("id") or "")
+    movement["userName"] = str(
+        movement.get("userName") or user.get("name") or ""
+    )
+    movement["resultingBalance"] = max(0.0, balance_after)
+    movement["reversalOfId"] = str(movement.get("reversalOfId") or "")
+    movement["reversedAt"] = str(movement.get("reversedAt") or "")
+    movement["idempotencyKey"] = str(movement.get("idempotencyKey") or "")
+    movement["requestHash"] = str(movement.get("requestHash") or "")
+    movement["responseJson"] = str(movement.get("responseJson") or "")
+    conn.execute(
+        """
+        INSERT INTO cash_movements (
+            id, store_id, direction, type, description, method, amount,
+            ref_id, expense_category_id, created_at, origin_type, origin_id,
+            user_id, user_name, resulting_balance, reversal_of_id, reversed_at,
+            idempotency_key, request_hash, response_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            movement["id"],
+            store_id,
+            movement["direction"],
+            movement["type"],
+            movement["description"],
+            movement["method"],
+            movement["amount"],
+            movement["refId"],
+            movement.get("expenseCategoryId") or None,
+            movement["createdAt"],
+            movement["originType"],
+            movement["originId"] or None,
+            movement["userId"] or None,
+            movement["userName"] or None,
+            movement["resultingBalance"],
+            movement["reversalOfId"] or None,
+            movement["reversedAt"] or None,
+            movement["idempotencyKey"] or None,
+            movement["requestHash"] or None,
+            movement["responseJson"] or None,
+        ),
+    )
+    return movement
+
+
+def apply_return_financial(
+    conn,
+    *,
+    sale_id: str,
+    return_id: str,
+    amount: float,
+    created_at: str,
+    store_id: str,
+) -> tuple[list[dict], list[dict], list[dict], bool]:
+    if amount <= 0:
+        return [], [], [], False
+    payments = conn.execute(
+        """
+        SELECT id, method, amount, net_amount AS "netAmount"
+        FROM sale_payments
+        WHERE sale_id = ?
+        ORDER BY created_at, id
+        """,
+        (sale_id,),
+    ).fetchall()
+    if not payments:
+        allocation_id = os.urandom(16).hex()
+        conn.execute(
+            """
+            INSERT INTO sale_return_allocations (
+                id, store_id, return_id, method, gross_amount,
+                pending_reduction, refunded_amount, status,
+                reconciliation_required, created_at
+            ) VALUES (?, ?, ?, 'unknown', ?, 0, 0,
+                      'manual_reconciliation', 1, ?)
+            """,
+            (allocation_id, store_id, return_id, amount, created_at),
+        )
+        return [], [], [{
+            "id": allocation_id,
+            "method": "unknown",
+            "grossAmount": amount,
+            "pendingReduction": 0.0,
+            "refundedAmount": 0.0,
+            "status": "manual_reconciliation",
+            "reconciliationRequired": True,
+        }], True
+    weights = [float(row["amount"] or 0) for row in payments]
+    shares = allocate_sale_amount(amount, weights)
+    cash = []
+    changed_receivables = []
+    allocations = []
+    reconciliation_required = False
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    for payment, share in zip(payments, shares):
+        if share <= 0:
+            continue
+        method = str(payment["method"] or "")
+        pending_reduction = 0.0
+        refunded_amount = 0.0
+        remaining = share
+        movement_id = None
+        receivable_id = None
+        if method in {"cash", "pix"}:
+            movement = cash_movement_document(
+                direction="out",
+                movement_type="return",
+                description=f"Devolucao da venda {sale_id}",
+                method=method,
+                amount=share,
+                ref_id=return_id,
+                created_at=created_at,
+            )
+            insert_cash_movement(conn, movement, store_id)
+            cash.append(movement)
+            refunded_amount = share
+            remaining = 0.0
+            movement_id = movement["id"]
+        else:
+            receivable_rows = conn.execute(
+                f"""
+                SELECT id, method, amount, received, status,
+                       open_amount AS "openAmount",
+                       return_reduction_total AS "returnReductionTotal",
+                       version
+                FROM receivables
+                WHERE store_id = ? AND sale_payment_id = ?
+                  AND status <> 'cancelled'
+                ORDER BY due_date, created_at, id{lock_clause}
+                """,
+                (store_id, payment["id"]),
+            ).fetchall()
+            for receivable_row in receivable_rows:
+                if remaining <= 0.009:
+                    break
+                open_amount = max(0, float(receivable_row["openAmount"] or 0))
+                reduction = min(remaining, open_amount)
+                if reduction <= 0:
+                    continue
+                receivable_id = str(receivable_row["id"])
+                new_open = money_round(open_amount - reduction)
+                received = money_round(receivable_row["received"] or 0)
+                new_status = (
+                    ("paid" if received > 0 else "cancelled")
+                    if new_open <= 0.01
+                    else str(receivable_row["status"])
+                )
+                conn.execute(
+                    """
+                    UPDATE receivables
+                    SET open_amount = ?,
+                        return_reduction_total = return_reduction_total + ?,
+                        status = ?, updated_at = ?, version = version + 1
+                    WHERE store_id = ? AND id = ?
+                    """,
+                    (
+                        max(0, new_open),
+                        reduction,
+                        new_status,
+                        created_at,
+                        store_id,
+                        receivable_row["id"],
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO sale_return_receivable_reductions (
+                        id, store_id, return_id, sale_payment_id,
+                        receivable_id, amount, open_amount_before,
+                        open_amount_after, status_before, status_after,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        os.urandom(16).hex(),
+                        store_id,
+                        return_id,
+                        payment["id"],
+                        receivable_row["id"],
+                        reduction,
+                        open_amount,
+                        max(0, new_open),
+                        str(receivable_row["status"]),
+                        new_status,
+                        created_at,
+                    ),
+                )
+                pending_reduction = money_round(pending_reduction + reduction)
+                remaining = money_round(remaining - reduction)
+                changed_receivables.append({
+                    "id": receivable_id,
+                    "openAmount": max(0, new_open),
+                    "returnReductionTotal": money_round(
+                        float(receivable_row["returnReductionTotal"] or 0)
+                        + reduction
+                    ),
+                    "received": received,
+                    "status": new_status,
+                    "updatedAt": created_at,
+                    "version": int(receivable_row["version"] or 0) + 1,
+                })
+            if remaining > 0.009:
+                payment_rows = conn.execute(
+                    """
+                    SELECT payment.method,
+                           COALESCE(SUM(
+                               CASE
+                                   WHEN payment.principal_amount > 0
+                                   THEN payment.principal_amount
+                                   ELSE payment.amount
+                               END
+                           ), 0) AS amount
+                    FROM receivable_payments payment
+                    JOIN receivables receivable
+                      ON receivable.id = payment.receivable_id
+                    WHERE payment.store_id = ?
+                      AND receivable.sale_payment_id = ?
+                      AND COALESCE(payment.status, 'active') = 'active'
+                    GROUP BY payment.method
+                    ORDER BY payment.method
+                    """,
+                    (store_id, payment["id"]),
+                ).fetchall()
+                previous = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(refunded_amount), 0) AS amount
+                    FROM sale_return_allocations
+                    WHERE store_id = ? AND sale_payment_id = ?
+                    """,
+                    (store_id, payment["id"]),
+                ).fetchone()
+                available_paid = max(
+                    0,
+                    money_round(
+                        sum(float(row["amount"] or 0) for row in payment_rows)
+                        - float(previous["amount"] or 0)
+                    ),
+                )
+                refundable = min(remaining, available_paid)
+                if refundable > 0 and payment_rows:
+                    refund_shares = allocate_sale_amount(
+                        refundable,
+                        [float(row["amount"] or 0) for row in payment_rows],
+                    )
+                    for paid_row, refund_share in zip(
+                        payment_rows,
+                        refund_shares,
+                    ):
+                        if refund_share <= 0:
+                            continue
+                        refund_method = str(paid_row["method"] or "")
+                        movement = cash_movement_document(
+                            direction="out",
+                            movement_type="return",
+                            description=f"Devolucao da venda {sale_id}",
+                            method=refund_method,
+                            amount=refund_share,
+                            ref_id=return_id,
+                            created_at=created_at,
+                        )
+                        insert_cash_movement(conn, movement, store_id)
+                        cash.append(movement)
+                    refunded_amount = refundable
+                    remaining = money_round(remaining - refundable)
+            if remaining > 0.009:
+                reconciliation_required = True
+        status = (
+            "manual_reconciliation"
+            if remaining > 0.009
+            else (
+                "mixed"
+                if pending_reduction > 0 and refunded_amount > 0
+                else (
+                    "pending_reduced"
+                    if pending_reduction > 0
+                    else "refunded"
+                )
+            )
+        )
+        allocation = {
+            "id": os.urandom(16).hex(),
+            "salePaymentId": str(payment["id"]),
+            "receivableId": receivable_id or "",
+            "method": method,
+            "grossAmount": share,
+            "pendingReduction": pending_reduction,
+            "refundedAmount": refunded_amount,
+            "status": status,
+            "cashMovementId": movement_id or "",
+            "reconciliationRequired": remaining > 0.009,
+        }
+        conn.execute(
+            """
+            INSERT INTO sale_return_allocations (
+                id, store_id, return_id, sale_payment_id, receivable_id,
+                method, gross_amount, pending_reduction, refunded_amount,
+                status, cash_movement_id, reconciliation_required, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                allocation["id"],
+                store_id,
+                return_id,
+                allocation["salePaymentId"],
+                allocation["receivableId"] or None,
+                method,
+                share,
+                pending_reduction,
+                refunded_amount,
+                status,
+                allocation["cashMovementId"] or None,
+                1 if allocation["reconciliationRequired"] else 0,
+                created_at,
+            ),
+        )
+        allocations.append(allocation)
+    if changed_receivables:
+        changed_ids = [str(item["id"]) for item in changed_receivables]
+        placeholders = ",".join("?" for _ in changed_ids)
+        changed_receivables = [
+            receivable_from_row(row)
+            for row in conn.execute(
+                f"""
+                {RECEIVABLE_SELECT}
+                WHERE store_id = ? AND id IN ({placeholders})
+                ORDER BY due_date, created_at, id
+                """,
+                (store_id, *changed_ids),
+            ).fetchall()
+        ]
+    return cash, changed_receivables, allocations, reconciliation_required
+
+
+def return_document(conn, return_id: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT id, return_number AS "returnNumber", sale_id AS "saleId",
+               customer_id AS "customerId", customer_name AS "customerName",
+               status, origin, gross_total AS "grossTotal",
+               discount_total AS "discountTotal", net_total AS "netTotal",
+               cost_total AS "costTotal", total, reason, notes,
+               reconciliation_required AS "reconciliationRequired",
+               warranty_id AS "warrantyId", exchange_id AS "exchangeId",
+               user_id AS "userId", user_name AS "userName",
+               created_at AS "createdAt"
+        FROM sale_returns WHERE id = ?
+        """,
+        (return_id,),
+    ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["reconciliationRequired"] = bool(result["reconciliationRequired"])
+    item_rows = conn.execute(
+        """
+        SELECT id, sale_item_id AS "saleItemId", product_id AS "productId",
+               product_name AS "productName", barcode, brand, size, color,
+               action, quantity, unit_price AS "unitPrice", total,
+               gross_total AS "grossTotal",
+               allocated_discount AS "allocatedDiscount",
+               net_total AS "netTotal", unit_cost AS "unitCost",
+               cost_total AS "costTotal",
+               physical_condition AS "physicalCondition", restocked
+        FROM sale_return_items WHERE return_id = ? ORDER BY id
+        """,
+        (return_id,),
+    ).fetchall()
+    result["items"] = [
+        {**dict(item), "restocked": bool(item["restocked"])}
+        for item in item_rows
+    ]
+    result["allocations"] = [
+        {
+            **dict(item),
+            "reconciliationRequired": bool(item["reconciliationRequired"]),
+        }
+        for item in conn.execute(
+            """
+            SELECT id, sale_payment_id AS "salePaymentId",
+                   receivable_id AS "receivableId", method,
+                   gross_amount AS "grossAmount",
+                   pending_reduction AS "pendingReduction",
+                   refunded_amount AS "refundedAmount", status,
+                   cash_movement_id AS "cashMovementId",
+                   reconciliation_required AS "reconciliationRequired"
+            FROM sale_return_allocations
+            WHERE return_id = ? ORDER BY id
+            """,
+            (return_id,),
+        ).fetchall()
+    ]
+    result["receivableReductions"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT reduction.id,
+                   reduction.sale_payment_id AS "salePaymentId",
+                   reduction.receivable_id AS "receivableId",
+                   reduction.amount,
+                   reduction.open_amount_before AS "openAmountBefore",
+                   reduction.open_amount_after AS "openAmountAfter",
+                   reduction.status_before AS "statusBefore",
+                   reduction.status_after AS "statusAfter",
+                   reduction.created_at AS "createdAt"
+            FROM sale_return_receivable_reductions reduction
+            JOIN receivables receivable
+              ON receivable.id = reduction.receivable_id
+            WHERE reduction.return_id = ?
+            ORDER BY receivable.due_date, reduction.created_at, reduction.id
+            """,
+            (return_id,),
+        ).fetchall()
+    ]
+    return result
+
+
+def persist_sale_return(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ReturnExchangeWarrantyError("Envie um JSON valido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ReturnExchangeWarrantyError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    sale_id = str(payload.get("saleId", "") or "").strip()
+    if not sale_id:
+        raise ReturnExchangeWarrantyError("Informe a venda.")
+    cancel_sale = bool(payload.get("_cancelSale"))
+    request_hash = operation_request_hash(
+        {
+            "saleId": sale_id,
+            "reason": str(payload.get("reason", "") or "").strip(),
+            "notes": str(payload.get("notes", "") or "").strip(),
+            "_cancelSale": True,
+        }
+        if cancel_sale
+        else payload
+    )
+    created_at = utc_now()
+    user = session.get("user") or {}
+    allowed_warranty_id = str(payload.get("warrantyId", "") or "").strip()
+    origin = "warranty" if allowed_warranty_id else "commercial"
+    reason = str(payload.get("reason", "") or "").strip()
+    notes = str(payload.get("notes", "") or "").strip()
+    if not reason:
+        raise ReturnExchangeWarrantyError("Informe o motivo da devolucao.")
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (operation_lock_key("return", store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM sale_returns
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise ReturnExchangeWarrantyError(
+                    "A chave de idempotencia ja foi usada com outros dados.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+        sale, items = resolve_operation_items(
+            conn,
+            sale_id,
+            payload.get("items"),
+            store_id=store_id,
+            allowed_warranty_id=allowed_warranty_id,
+        )
+        number = next_business_number(
+            conn,
+            sequence_table="sale_return_sequences",
+            operation_table="sale_returns",
+            number_column="return_number",
+            store_id=store_id,
+        )
+        return_id = f"DEV{number:04d}"
+        net_total = money_round(sum(item["netTotal"] for item in items))
+        cost_total = money_round(sum(item["costTotal"] for item in items))
+        conn.execute(
+            """
+            INSERT INTO sale_returns (
+                id, store_id, sale_id, customer_name, total, reason, notes,
+                created_at, return_number, customer_id, status, origin,
+                gross_total, discount_total, net_total, cost_total,
+                user_id, user_name, idempotency_key, request_hash,
+                response_json, reconciliation_required, warranty_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, 0,
+                      ?, ?, ?, ?, ?, ?, '{}', 0, ?)
+            """,
+            (
+                return_id,
+                store_id,
+                sale_id,
+                sale["customerName"],
+                net_total,
+                reason,
+                notes or None,
+                created_at,
+                number,
+                sale["customerId"] or None,
+                origin,
+                net_total,
+                net_total,
+                cost_total,
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                allowed_warranty_id or None,
+            ),
+        )
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        inventory_movements = []
+        updated_products = []
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO sale_return_items (
+                    id, return_id, product_id, product_name, action, quantity,
+                    unit_price, total, sale_item_id, barcode, brand, size,
+                    color, gross_total, allocated_discount, net_total,
+                    unit_cost, cost_total, physical_condition, restocked
+                ) VALUES (?, ?, ?, ?, 'return', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          0, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    return_id,
+                    item["productId"] or None,
+                    item["name"],
+                    item["quantity"],
+                    item["unitNet"],
+                    item["netTotal"],
+                    item["saleItemId"],
+                    item["barcode"],
+                    item["brand"],
+                    item["size"],
+                    item["color"],
+                    item["grossTotal"],
+                    item["netTotal"],
+                    item["unitCost"],
+                    item["costTotal"],
+                    item["physicalCondition"],
+                    1 if item["restocked"] else 0,
+                ),
+            )
+            if not item["restocked"] or not item["productId"]:
+                continue
+            product_row = conn.execute(
+                f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?{lock_clause}",
+                (store_id, item["productId"]),
+            ).fetchone()
+            if not product_row:
+                raise ReturnExchangeWarrantyError(
+                    "Produto da devolucao nao foi encontrado.",
+                    409,
+                    "RETURN_PRODUCT_MISSING",
+                )
+            stock_before = int(product_row["stock"] or 0)
+            stock_after = stock_before + item["quantity"]
+            conn.execute(
+                """
+                UPDATE products SET stock = ?, updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (stock_after, created_at, store_id, item["productId"]),
+            )
+            reserved_quantity = int(reserved.get(item["productId"], 0) or 0)
+            inventory_movements.append(persist_inventory_movement(
+                conn,
+                product_id=item["productId"],
+                movement_type="customer_return",
+                real_before=stock_before,
+                real_after=stock_after,
+                reserved_before=reserved_quantity,
+                reserved_after=reserved_quantity,
+                reference_type="sale_return",
+                reference_id=return_id,
+                source_key=f"sale_return:{return_id}:{item['saleItemId']}",
+                created_at=created_at,
+                store_id=store_id,
+                user=user,
+                notes=reason,
+            ))
+            product = product_from_row(product_row)
+            product["stock"] = stock_after
+            product["updatedAt"] = created_at
+            updated_products.append(product_with_availability(product, state))
+        cash, receivables, allocations, reconciliation = apply_return_financial(
+            conn,
+            sale_id=sale_id,
+            return_id=return_id,
+            amount=net_total,
+            created_at=created_at,
+            store_id=store_id,
+        )
+        cancellation = None
+        cancelled_sale = None
+        if cancel_sale:
+            conn.execute(
+                """
+                UPDATE sales
+                SET status = 'cancelled', updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (created_at, store_id, sale_id),
+            )
+            cancellation_id = os.urandom(16).hex()
+            cancellation = {
+                "id": cancellation_id,
+                "saleId": sale_id,
+                "returnId": return_id,
+                "reason": reason,
+                "reconciliationRequired": reconciliation,
+                "userId": user.get("id", ""),
+                "userName": user.get("name", ""),
+                "createdAt": created_at,
+            }
+            conn.execute(
+                """
+                INSERT INTO sale_cancellations (
+                    id, store_id, sale_id, return_id, reason,
+                    reconciliation_required, user_id, user_name,
+                    idempotency_key, request_hash, response_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)
+                """,
+                (
+                    cancellation_id,
+                    store_id,
+                    sale_id,
+                    return_id,
+                    reason,
+                    1 if reconciliation else 0,
+                    user.get("id") or None,
+                    user.get("name") or None,
+                    key,
+                    request_hash,
+                    created_at,
+                ),
+            )
+            current_sales = state.get("sales")
+            current_sales = (
+                current_sales if isinstance(current_sales, list) else []
+            )
+            updated_sales = []
+            for state_sale in current_sales:
+                if str(state_sale.get("id", "")) == sale_id:
+                    state_sale = {
+                        **state_sale,
+                        "status": "cancelled",
+                        "updatedAt": created_at,
+                    }
+                    cancelled_sale = state_sale
+                updated_sales.append(state_sale)
+            state["sales"] = updated_sales
+            if cancelled_sale is None:
+                cancelled_sale = {
+                    **sale,
+                    "status": "cancelled",
+                    "updatedAt": created_at,
+                }
+        if reconciliation:
+            conn.execute(
+                """
+                UPDATE sale_returns
+                SET reconciliation_required = 1
+                WHERE id = ?
+                """,
+                (return_id,),
+            )
+        if allowed_warranty_id:
+            warranty = conn.execute(
+                f"""
+                SELECT id, status FROM warranties
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, allowed_warranty_id),
+            ).fetchone()
+            if not warranty or warranty["status"] != "approved":
+                raise ReturnExchangeWarrantyError(
+                    "Garantia nao esta aprovada para devolucao.",
+                    409,
+                    "WARRANTY_NOT_APPROVED",
+                )
+            conn.execute(
+                """
+                UPDATE warranties
+                SET status = 'resolved', solution_type = 'return',
+                    solution_reference_id = ?, resolved_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (return_id, created_at, created_at, allowed_warranty_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO warranty_events (
+                    id, warranty_id, store_id, event_type, previous_status,
+                    new_status, notes, user_id, user_name, created_at
+                ) VALUES (?, ?, ?, 'resolved_return', ?, 'resolved', ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    allowed_warranty_id,
+                    store_id,
+                    warranty["status"],
+                    notes or None,
+                    user.get("id") or None,
+                    user.get("name") or None,
+                    created_at,
+                ),
+            )
+        document = return_document(conn, return_id)
+        for product in updated_products:
+            replace_product_in_state(state, product)
+        state["returns"] = [
+            document,
+            *[
+                item
+                for item in (state.get("returns") or [])
+                if str(item.get("id", "")) != return_id
+            ],
+        ]
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        replace_receivables_in_state(state, receivables)
+        prepend_inventory_movements(state, inventory_movements)
+        result = {
+            "return": document,
+            "products": updated_products,
+            "cash": cash,
+            "receivables": receivables,
+            "allocations": allocations,
+            "inventoryMovements": inventory_movements,
+        }
+        if cancel_sale:
+            result["sale"] = cancelled_sale
+            result["cancellation"] = cancellation
+        conn.execute(
+            """
+            UPDATE sale_returns
+            SET response_json = ?, reconciliation_required = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                1 if reconciliation else 0,
+                return_id,
+            ),
+        )
+        if cancel_sale:
+            conn.execute(
+                """
+                UPDATE sale_cancellations
+                SET response_json = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(result, ensure_ascii=False, sort_keys=True),
+                    cancellation["id"],
+                ),
+            )
+            record_audit(
+                "cancel",
+                "sale",
+                sale_id,
+                {
+                    "returnId": return_id,
+                    "reason": reason,
+                    "reconciliationRequired": reconciliation,
+                },
+                conn,
+            )
+        record_audit(
+            "create",
+            "return",
+            return_id,
+            {
+                "saleId": sale_id,
+                "returnNumber": number,
+                "netTotal": net_total,
+                "itemIds": [item["saleItemId"] for item in items],
+                "reconciliationRequired": reconciliation,
+                "warrantyId": allowed_warranty_id,
+            },
+            conn,
+        )
+        persist_product_app_state(conn, state, created_at)
+    return result, False
+
+
+def build_exchange_new_items(
+    raw_items,
+    product_rows: dict[str, object],
+    reserved: dict[str, int],
+    incoming_restock: dict[str, int],
+) -> list[dict]:
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ReturnExchangeWarrantyError(
+            "Informe ao menos um produto substituto."
+        )
+    result = []
+    seen = set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ReturnExchangeWarrantyError("Produto substituto invalido.")
+        product_id = str(raw.get("productId", "") or "").strip()
+        if not product_id or product_id in seen or product_id not in product_rows:
+            raise ReturnExchangeWarrantyError(
+                "Produto substituto invalido ou repetido."
+            )
+        seen.add(product_id)
+        try:
+            numeric = float(raw.get("quantity", 0))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ReturnExchangeWarrantyError(
+                "Quantidade do produto substituto invalida."
+            ) from error
+        if not math.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+            raise ReturnExchangeWarrantyError(
+                "Quantidade do produto substituto invalida."
+            )
+        quantity = int(numeric)
+        row = product_rows[product_id]
+        if not bool(row["active"]):
+            raise ReturnExchangeWarrantyError(
+                f"{row['name']} esta desativado.",
+                409,
+                "PRODUCT_DEACTIVATED",
+            )
+        stock_before = int(row["stock"] or 0) + int(
+            incoming_restock.get(product_id, 0) or 0
+        )
+        available = stock_before - int(reserved.get(product_id, 0) or 0)
+        if available < quantity:
+            raise ReturnExchangeWarrantyError(
+                f"Estoque disponivel insuficiente para {row['name']}.",
+                409,
+                "INSUFFICIENT_AVAILABLE_STOCK",
+            )
+        original = sale_money(row["price"], "Preco original")
+        practiced = sale_money(
+            raw.get("practicedUnitPrice", original),
+            "Preco praticado",
+        )
+        unit_discount = sale_money(
+            raw.get("unitDiscount", 0),
+            "Desconto do item",
+        )
+        unit_addition = sale_money(
+            raw.get("unitAddition", 0),
+            "Acrescimo do item",
+        )
+        final_unit = money_round(practiced - unit_discount + unit_addition)
+        if final_unit < 0:
+            raise ReturnExchangeWarrantyError(
+                "O ajuste do produto substituto resulta em valor negativo."
+            )
+        result.append({
+            "id": os.urandom(16).hex(),
+            "productId": product_id,
+            "barcode": str(row["barcode"] or ""),
+            "name": str(row["name"] or ""),
+            "brand": str(row["brand"] or ""),
+            "brandId": str(row["brandId"] or ""),
+            "category": str(row["category"] or ""),
+            "categoryId": str(row["categoryId"] or ""),
+            "size": str(row["size"] or ""),
+            "sizeId": str(row["sizeId"] or ""),
+            "color": str(row["color"] or ""),
+            "colorId": str(row["colorId"] or ""),
+            "gender": str(row["gender"] or ""),
+            "quantity": quantity,
+            "unitCost": money_round(row["cost"] or 0),
+            "originalUnitPrice": original,
+            "practicedUnitPrice": practiced,
+            "unitDiscount": unit_discount,
+            "unitAddition": unit_addition,
+            "finalUnitPrice": final_unit,
+            "netTotal": money_round(quantity * final_unit),
+            "costTotal": money_round(quantity * float(row["cost"] or 0)),
+            "stockBefore": stock_before,
+            "stockAfter": stock_before - quantity,
+        })
+    return result
+
+
+def exchange_document(
+    conn,
+    exchange_id: str,
+    store_id: str = "matriz",
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT id, exchange_number AS "exchangeNumber", sale_id AS "saleId",
+               customer_id AS "customerId", customer_name AS "customerName",
+               status, origin, warranty_id AS "warrantyId", reason, notes,
+               credit_total AS "creditTotal",
+               new_items_total AS "newItemsTotal",
+               difference_amount AS "differenceAmount",
+               difference_direction AS "differenceDirection",
+               linked_sale_id AS "linkedSaleId",
+               reconciliation_required AS "reconciliationRequired",
+               user_id AS "userId", user_name AS "userName",
+               created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM exchanges WHERE store_id = ? AND id = ?
+        """,
+        (store_id, exchange_id),
+    ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["reconciliationRequired"] = bool(result["reconciliationRequired"])
+    result["returnedItems"] = [
+        {**dict(item), "restocked": bool(item["restocked"])}
+        for item in conn.execute(
+            """
+            SELECT id, sale_item_id AS "saleItemId",
+                   product_id AS "productId", barcode, name, brand, size,
+                   color, quantity, unit_credit AS "unitCredit",
+                   credit_total AS "creditTotal", unit_cost AS "unitCost",
+                   cost_total AS "costTotal",
+                   physical_condition AS "physicalCondition", restocked
+            FROM exchange_return_items
+            WHERE exchange_id = ? ORDER BY id
+            """,
+            (exchange_id,),
+        ).fetchall()
+    ]
+    result["newItems"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT id, product_id AS "productId", barcode, name, brand, size,
+                   color, quantity,
+                   original_unit_price AS "originalUnitPrice",
+                   practiced_unit_price AS "practicedUnitPrice",
+                   unit_discount AS "unitDiscount",
+                   unit_addition AS "unitAddition",
+                   net_total AS "netTotal", unit_cost AS "unitCost",
+                   cost_total AS "costTotal", stock_before AS "stockBefore",
+                   stock_after AS "stockAfter"
+            FROM exchange_new_items
+            WHERE exchange_id = ? ORDER BY id
+            """,
+            (exchange_id,),
+        ).fetchall()
+    ]
+    result["payments"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT id, method, amount, direction,
+                   sale_payment_id AS "salePaymentId",
+                   cash_movement_id AS "cashMovementId",
+                   receivable_id AS "receivableId"
+            FROM exchange_payments
+            WHERE exchange_id = ? ORDER BY id
+            """,
+            (exchange_id,),
+        ).fetchall()
+    ]
+    return result
+
+
+def persist_exchange(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ReturnExchangeWarrantyError("Envie um JSON valido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ReturnExchangeWarrantyError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    sale_id = str(payload.get("saleId", "") or "").strip()
+    reason = str(payload.get("reason", "") or "").strip()
+    notes = str(payload.get("notes", "") or "").strip()
+    warranty_id = str(payload.get("warrantyId", "") or "").strip()
+    allowed_reasons = {
+        "Tamanho",
+        "Cor",
+        "Modelo",
+        "Defeito",
+        "Presente",
+        "Outro",
+    }
+    if not sale_id or reason not in allowed_reasons:
+        raise ReturnExchangeWarrantyError("Informe a venda e o motivo da troca.")
+    if reason == "Outro" and not notes:
+        raise ReturnExchangeWarrantyError(
+            "Descreva o motivo da troca quando selecionar Outro."
+        )
+    request_hash = operation_request_hash(payload)
+    created_at = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (operation_lock_key("exchange", store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM exchanges
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise ReturnExchangeWarrantyError(
+                    "A chave de idempotencia ja foi usada com outros dados.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+        sale, returned_items = resolve_operation_items(
+            conn,
+            sale_id,
+            payload.get("returnedItems"),
+            store_id=store_id,
+            allowed_warranty_id=warranty_id,
+        )
+        if not warranty_id:
+            sold_day = sale_operational_date(sale["createdAt"])
+            current_day = sale_operational_date(created_at)
+            if (current_day - sold_day).days > 30:
+                raise ReturnExchangeWarrantyError(
+                    "O prazo comercial de troca de 30 dias foi ultrapassado.",
+                    409,
+                    "EXCHANGE_DEADLINE_EXCEEDED",
+                )
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        incoming_restock: dict[str, int] = {}
+        for item in returned_items:
+            if item["restocked"] and item["productId"]:
+                incoming_restock[item["productId"]] = (
+                    incoming_restock.get(item["productId"], 0)
+                    + item["quantity"]
+                )
+        raw_new_items = payload.get("newItems")
+        product_ids = [
+            str(item.get("productId", "") or "").strip()
+            for item in (raw_new_items or [])
+            if isinstance(item, dict)
+        ]
+        if not product_ids:
+            raise ReturnExchangeWarrantyError(
+                "Informe ao menos um produto substituto."
+            )
+        placeholders = ",".join("?" for _ in product_ids)
+        product_rows = conn.execute(
+            f"""
+            {PRODUCT_SELECT}
+            WHERE store_id = ? AND id IN ({placeholders}){lock_clause}
+            """,
+            (store_id, *product_ids),
+        ).fetchall()
+        products_by_id = {str(row["id"]): row for row in product_rows}
+        new_items = build_exchange_new_items(
+            raw_new_items,
+            products_by_id,
+            reserved,
+            incoming_restock,
+        )
+        credit_total = money_round(
+            sum(item["netTotal"] for item in returned_items)
+        )
+        new_total = money_round(sum(item["netTotal"] for item in new_items))
+        difference = money_round(abs(new_total - credit_total))
+        direction = (
+            "pay"
+            if new_total > credit_total
+            else ("refund" if credit_total > new_total else "none")
+        )
+        actual_payments = []
+        if direction == "pay":
+            actual_payments = build_transactional_sale_payments(
+                conn,
+                {"payments": payload.get("payments") or []},
+                difference,
+                created_at,
+                store_id,
+            )
+        elif payload.get("payments"):
+            raise ReturnExchangeWarrantyError(
+                "Pagamentos so devem ser informados quando houver diferenca a pagar."
+            )
+        number = next_business_number(
+            conn,
+            sequence_table="exchange_sequences",
+            operation_table="exchanges",
+            number_column="exchange_number",
+            store_id=store_id,
+        )
+        exchange_id = f"TROCA{number:04d}"
+        return_number = next_business_number(
+            conn,
+            sequence_table="sale_return_sequences",
+            operation_table="sale_returns",
+            number_column="return_number",
+            store_id=store_id,
+        )
+        return_id = f"DEV{return_number:04d}"
+        linked_sale_number = next_sale_number(conn, store_id)
+        linked_sale_id = f"VENDA{linked_sale_number:03d}"
+        conn.execute(
+            """
+            INSERT INTO exchanges (
+                id, store_id, exchange_number, sale_id, customer_id,
+                customer_name, status, origin, warranty_id, reason, notes,
+                credit_total, new_items_total, difference_amount,
+                difference_direction, linked_sale_id, user_id, user_name,
+                idempotency_key, request_hash, response_json,
+                reconciliation_required, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, '{}', 0, ?, ?)
+            """,
+            (
+                exchange_id,
+                store_id,
+                number,
+                sale_id,
+                sale["customerId"] or None,
+                sale["customerName"],
+                "warranty" if warranty_id else "commercial",
+                warranty_id or None,
+                reason,
+                notes or None,
+                credit_total,
+                new_total,
+                difference,
+                direction,
+                linked_sale_id,
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                created_at,
+                created_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sale_returns (
+                id, store_id, sale_id, customer_name, total, reason, notes,
+                created_at, return_number, customer_id, status, origin,
+                gross_total, discount_total, net_total, cost_total,
+                user_id, user_name, response_json, reconciliation_required,
+                warranty_id, exchange_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, 0, ?,
+                      ?, ?, ?, '{}', 0, ?, ?)
+            """,
+            (
+                return_id,
+                store_id,
+                sale_id,
+                sale["customerName"],
+                credit_total,
+                reason,
+                notes or None,
+                created_at,
+                return_number,
+                sale["customerId"] or None,
+                "warranty" if warranty_id else "commercial",
+                credit_total,
+                credit_total,
+                money_round(sum(item["costTotal"] for item in returned_items)),
+                user.get("id") or None,
+                user.get("name") or None,
+                warranty_id or None,
+                exchange_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO sales (
+                id, store_id, customer_id, customer_name, subtotal, discount,
+                total, cost_total, status, created_at, updated_at, sale_number,
+                addition, change_amount, user_id, user_name, response_json,
+                exchange_id, warranty_id
+            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'completed', ?, ?, ?, 0, 0, ?, ?,
+                      '{}', ?, ?)
+            """,
+            (
+                linked_sale_id,
+                store_id,
+                sale["customerId"] or None,
+                sale["customerName"],
+                new_total,
+                new_total,
+                money_round(sum(item["costTotal"] for item in new_items)),
+                created_at,
+                created_at,
+                linked_sale_number,
+                user.get("id") or None,
+                user.get("name") or None,
+                exchange_id,
+                warranty_id or None,
+            ),
+        )
+        updated_products_by_id: dict[str, dict] = {}
+        inventory_movements = []
+        current_stock = {
+            str(row["id"]): int(row["stock"] or 0)
+            for row in {
+                **products_by_id,
+                **{
+                    item["productId"]: conn.execute(
+                        f"""
+                        {PRODUCT_SELECT}
+                        WHERE store_id = ? AND id = ?{lock_clause}
+                        """,
+                        (store_id, item["productId"]),
+                    ).fetchone()
+                    for item in returned_items
+                    if item["productId"] and item["productId"] not in products_by_id
+                },
+            }.values()
+            if row
+        }
+        for item in returned_items:
+            return_item_id = os.urandom(16).hex()
+            conn.execute(
+                """
+                INSERT INTO exchange_return_items (
+                    id, exchange_id, sale_item_id, product_id, barcode, name,
+                    brand, size, color, quantity, unit_credit, credit_total,
+                    unit_cost, cost_total, physical_condition, restocked
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    return_item_id,
+                    exchange_id,
+                    item["saleItemId"],
+                    item["productId"],
+                    item["barcode"],
+                    item["name"],
+                    item["brand"],
+                    item["size"],
+                    item["color"],
+                    item["quantity"],
+                    item["unitNet"],
+                    item["netTotal"],
+                    item["unitCost"],
+                    item["costTotal"],
+                    item["physicalCondition"],
+                    1 if item["restocked"] else 0,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO sale_return_items (
+                    id, return_id, product_id, product_name, action, quantity,
+                    unit_price, total, sale_item_id, barcode, brand, size,
+                    color, gross_total, allocated_discount, net_total,
+                    unit_cost, cost_total, physical_condition, restocked
+                ) VALUES (?, ?, ?, ?, 'exchange', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          0, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    return_id,
+                    item["productId"],
+                    item["name"],
+                    item["quantity"],
+                    item["unitNet"],
+                    item["netTotal"],
+                    item["saleItemId"],
+                    item["barcode"],
+                    item["brand"],
+                    item["size"],
+                    item["color"],
+                    item["grossTotal"],
+                    item["netTotal"],
+                    item["unitCost"],
+                    item["costTotal"],
+                    item["physicalCondition"],
+                    1 if item["restocked"] else 0,
+                ),
+            )
+            if item["restocked"] and item["productId"]:
+                before = current_stock[item["productId"]]
+                after = before + item["quantity"]
+                current_stock[item["productId"]] = after
+                inventory_movements.append(persist_inventory_movement(
+                    conn,
+                    product_id=item["productId"],
+                    movement_type="exchange_return",
+                    real_before=before,
+                    real_after=after,
+                    reserved_before=int(reserved.get(item["productId"], 0) or 0),
+                    reserved_after=int(reserved.get(item["productId"], 0) or 0),
+                    reference_type="exchange",
+                    reference_id=exchange_id,
+                    source_key=f"exchange_return:{exchange_id}:{item['saleItemId']}",
+                    created_at=created_at,
+                    store_id=store_id,
+                    user=user,
+                    notes=reason,
+                ))
+        for item in new_items:
+            before = current_stock[item["productId"]]
+            after = before - item["quantity"]
+            current_stock[item["productId"]] = after
+            conn.execute(
+                """
+                INSERT INTO exchange_new_items (
+                    id, exchange_id, product_id, barcode, name, brand, size,
+                    color, quantity, original_unit_price,
+                    practiced_unit_price, unit_discount, unit_addition,
+                    net_total, unit_cost, cost_total, stock_before, stock_after
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item["id"],
+                    exchange_id,
+                    item["productId"],
+                    item["barcode"],
+                    item["name"],
+                    item["brand"],
+                    item["size"],
+                    item["color"],
+                    item["quantity"],
+                    item["originalUnitPrice"],
+                    item["practicedUnitPrice"],
+                    item["unitDiscount"],
+                    item["unitAddition"],
+                    item["netTotal"],
+                    item["unitCost"],
+                    item["costTotal"],
+                    before,
+                    after,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO sale_items (
+                    id, sale_id, product_id, barcode, name, brand, quantity,
+                    unit_cost, unit_price, total, brand_id, category_id,
+                    category, size_id, size, color_id, color, gender,
+                    original_unit_price, practiced_unit_price, unit_discount,
+                    unit_addition, final_unit_price,
+                    allocated_global_discount, allocated_global_addition,
+                    net_total, stock_before, stock_after, exchange_item_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    linked_sale_id,
+                    item["productId"],
+                    item["barcode"],
+                    item["name"],
+                    item["brand"],
+                    item["quantity"],
+                    item["unitCost"],
+                    item["finalUnitPrice"],
+                    item["netTotal"],
+                    item["brandId"] or None,
+                    item["categoryId"] or None,
+                    item["category"],
+                    item["sizeId"] or None,
+                    item["size"],
+                    item["colorId"] or None,
+                    item["color"],
+                    item["gender"],
+                    item["originalUnitPrice"],
+                    item["practicedUnitPrice"],
+                    item["unitDiscount"],
+                    item["unitAddition"],
+                    item["finalUnitPrice"],
+                    item["netTotal"],
+                    before,
+                    after,
+                    item["id"],
+                ),
+            )
+            inventory_movements.append(persist_inventory_movement(
+                conn,
+                product_id=item["productId"],
+                movement_type="exchange_sale",
+                real_before=before,
+                real_after=after,
+                reserved_before=int(reserved.get(item["productId"], 0) or 0),
+                reserved_after=int(reserved.get(item["productId"], 0) or 0),
+                reference_type="exchange",
+                reference_id=exchange_id,
+                source_key=f"exchange_sale:{exchange_id}:{item['id']}",
+                created_at=created_at,
+                store_id=store_id,
+                user=user,
+            ))
+        for product_id, stock in current_stock.items():
+            conn.execute(
+                """
+                UPDATE products SET stock = ?, updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (stock, created_at, store_id, product_id),
+            )
+            row = conn.execute(
+                f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?",
+                (store_id, product_id),
+            ).fetchone()
+            product = product_from_row(row)
+            updated_products_by_id[product_id] = product_with_availability(
+                product,
+                state,
+            )
+        credit_payment_id = os.urandom(16).hex()
+        exchange_credit = min(credit_total, new_total)
+        conn.execute(
+            """
+            INSERT INTO sale_payments (
+                id, sale_id, method, amount, installments, status, created_at,
+                tendered_amount, change_amount, gross_amount, fee_amount,
+                net_amount
+            ) VALUES (?, ?, 'exchangeCredit', ?, 1, 'registered', ?, ?, 0, ?, 0, ?)
+            """,
+            (
+                credit_payment_id,
+                linked_sale_id,
+                exchange_credit,
+                created_at,
+                exchange_credit,
+                exchange_credit,
+                exchange_credit,
+            ),
+        )
+        payment_documents = [{
+            "id": credit_payment_id,
+            "method": "exchangeCredit",
+            "amount": exchange_credit,
+            "createdAt": created_at,
+        }]
+        for payment in actual_payments:
+            conn.execute(
+                """
+                INSERT INTO sale_payments (
+                    id, sale_id, method, amount, installments, status,
+                    created_at, tendered_amount, change_amount,
+                    card_modality_id, card_modality_version_id, modality_name,
+                    tax_percent, receivable_days, gross_amount, fee_amount,
+                    net_amount
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment["id"],
+                    linked_sale_id,
+                    payment["method"],
+                    payment["amount"],
+                    payment["installments"],
+                    payment["status"],
+                    created_at,
+                    payment["tenderedAmount"],
+                    payment["changeAmount"],
+                    payment["cardModalityId"] or None,
+                    payment["cardModalityVersionId"] or None,
+                    payment["modalityName"] or None,
+                    payment["taxPercent"],
+                    payment["receivableDays"],
+                    payment["grossAmount"],
+                    payment["feeAmount"],
+                    payment["netAmount"],
+                ),
+            )
+            payment_documents.append(payment)
+        cash = []
+        receivables = []
+        if actual_payments:
+            financial_sale = {
+                "id": linked_sale_id,
+                "customerId": sale["customerId"],
+                "customerName": sale["customerName"],
+                "payments": actual_payments,
+                "storeCreditFirstDueDate": str(
+                    payload.get("storeCreditFirstDueDate", "") or ""
+                ),
+                "createdAt": created_at,
+            }
+            if any(
+                payment["method"] == "storeCredit"
+                for payment in actual_payments
+            ):
+                if not financial_sale["customerId"]:
+                    raise ReturnExchangeWarrantyError(
+                        "Crediario exige cliente identificado."
+                    )
+                if not financial_sale["storeCreditFirstDueDate"]:
+                    financial_sale["storeCreditFirstDueDate"] = (
+                        sale_operational_date(created_at) + timedelta(days=30)
+                    ).isoformat()
+            cash, receivables = build_transactional_sale_financial(
+                financial_sale,
+                store_id,
+            )
+            for movement in cash:
+                insert_cash_movement(conn, movement, store_id)
+            for receivable in receivables:
+                conn.execute(
+                    """
+                    INSERT INTO receivables (
+                        id, store_id, sale_id, customer_id, customer_name,
+                        method, amount, received, status, due_date, paid_at,
+                        last_payment_at, installment, created_at, updated_at,
+                        sale_payment_id, card_modality_id,
+                        card_modality_version_id, modality_name,
+                        card_installments, tax_percent, receivable_days,
+                        gross_amount, fee_amount, net_amount,
+                        original_due_date, open_amount, discount_total,
+                        interest_total, fine_total, addition_total, version,
+                        return_reduction_total
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        receivable["id"],
+                        store_id,
+                        receivable["saleId"],
+                        receivable["customerId"],
+                        receivable["customerName"],
+                        receivable["method"],
+                        receivable["amount"],
+                        receivable["received"],
+                        receivable["status"],
+                        receivable["dueDate"],
+                        receivable["paidAt"] or None,
+                        receivable["lastPaymentAt"] or None,
+                        receivable["installment"],
+                        receivable["createdAt"],
+                        receivable["updatedAt"],
+                        receivable["salePaymentId"],
+                        receivable["cardModalityId"] or None,
+                        receivable["cardModalityVersionId"] or None,
+                        receivable["modalityName"] or None,
+                        receivable["cardInstallments"],
+                        receivable["taxPercent"],
+                        receivable["receivableDays"],
+                        receivable["grossAmount"],
+                        receivable["feeAmount"],
+                        receivable["netAmount"],
+                        receivable["originalDueDate"],
+                        receivable["openAmount"],
+                        receivable["discountTotal"],
+                        receivable["interestTotal"],
+                        receivable["fineTotal"],
+                        receivable["additionTotal"],
+                        receivable["version"],
+                    ),
+                )
+        refund_allocations = []
+        reconciliation = False
+        if direction == "refund":
+            (
+                refund_cash,
+                changed_receivables,
+                refund_allocations,
+                reconciliation,
+            ) = apply_return_financial(
+                conn,
+                sale_id=sale_id,
+                return_id=return_id,
+                amount=difference,
+                created_at=created_at,
+                store_id=store_id,
+            )
+            cash.extend(refund_cash)
+            receivables.extend(changed_receivables)
+        for payment in actual_payments:
+            related_cash = next(
+                (
+                    item
+                    for item in cash
+                    if item["refId"] == linked_sale_id
+                    and item["method"] == payment["method"]
+                ),
+                None,
+            )
+            related_receivable = next(
+                (
+                    item
+                    for item in receivables
+                    if item.get("salePaymentId") == payment["id"]
+                ),
+                None,
+            )
+            conn.execute(
+                """
+                INSERT INTO exchange_payments (
+                    id, exchange_id, method, amount, direction,
+                    sale_payment_id, cash_movement_id, receivable_id
+                ) VALUES (?, ?, ?, ?, 'in', ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    exchange_id,
+                    payment["method"],
+                    payment["amount"],
+                    payment["id"],
+                    related_cash["id"] if related_cash else None,
+                    related_receivable["id"] if related_receivable else None,
+                ),
+            )
+        if direction == "refund":
+            for allocation in refund_allocations:
+                conn.execute(
+                    """
+                    INSERT INTO exchange_payments (
+                        id, exchange_id, method, amount, direction,
+                        sale_payment_id, cash_movement_id, receivable_id
+                    ) VALUES (?, ?, ?, ?, 'out', ?, ?, ?)
+                    """,
+                    (
+                        os.urandom(16).hex(),
+                        exchange_id,
+                        allocation["method"],
+                        allocation["grossAmount"],
+                        allocation["salePaymentId"] or None,
+                        allocation["cashMovementId"] or None,
+                        allocation["receivableId"] or None,
+                    ),
+                )
+        if warranty_id:
+            warranty = conn.execute(
+                f"""
+                SELECT status FROM warranties
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, warranty_id),
+            ).fetchone()
+            if not warranty or warranty["status"] != "approved":
+                raise ReturnExchangeWarrantyError(
+                    "Garantia nao esta aprovada para troca.",
+                    409,
+                    "WARRANTY_NOT_APPROVED",
+                )
+            conn.execute(
+                """
+                UPDATE warranties
+                SET status = 'resolved', solution_type = 'exchange',
+                    solution_reference_id = ?, resolved_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (exchange_id, created_at, created_at, warranty_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO warranty_events (
+                    id, warranty_id, store_id, event_type, previous_status,
+                    new_status, notes, user_id, user_name, created_at
+                ) VALUES (?, ?, ?, 'resolved_exchange', ?, 'resolved', ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    warranty_id,
+                    store_id,
+                    warranty["status"],
+                    notes or None,
+                    user.get("id") or None,
+                    user.get("name") or None,
+                    created_at,
+                ),
+            )
+        if reconciliation:
+            conn.execute(
+                """
+                UPDATE exchanges SET reconciliation_required = 1 WHERE id = ?
+                """,
+                (exchange_id,),
+            )
+            conn.execute(
+                """
+                UPDATE sale_returns
+                SET reconciliation_required = 1 WHERE id = ?
+                """,
+                (return_id,),
+            )
+        exchange = exchange_document(conn, exchange_id)
+        return_doc = return_document(conn, return_id)
+        linked_sale = {
+            "id": linked_sale_id,
+            "saleNumber": linked_sale_number,
+            "customerId": sale["customerId"],
+            "customerName": sale["customerName"],
+            "items": [
+                {
+                    **item,
+                    "unitPrice": item["finalUnitPrice"],
+                    "total": item["netTotal"],
+                }
+                for item in new_items
+            ],
+            "subtotal": new_total,
+            "discount": 0.0,
+            "addition": 0.0,
+            "total": new_total,
+            "costTotal": money_round(
+                sum(item["costTotal"] for item in new_items)
+            ),
+            "payments": payment_documents,
+            "status": "completed",
+            "exchangeId": exchange_id,
+            "warrantyId": warranty_id,
+            "createdAt": created_at,
+            "updatedAt": created_at,
+        }
+        for product in updated_products_by_id.values():
+            replace_product_in_state(state, product)
+        state["returns"] = [
+            return_doc,
+            *[
+                item
+                for item in (state.get("returns") or [])
+                if str(item.get("id", "")) != return_id
+            ],
+        ]
+        state["exchanges"] = [
+            exchange,
+            *[
+                item
+                for item in (state.get("exchanges") or [])
+                if str(item.get("id", "")) != exchange_id
+            ],
+        ]
+        state["sales"] = [
+            linked_sale,
+            *[
+                item
+                for item in (state.get("sales") or [])
+                if str(item.get("id", "")) != linked_sale_id
+            ],
+        ]
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        replace_receivables_in_state(state, receivables)
+        prepend_inventory_movements(state, inventory_movements)
+        result = {
+            "exchange": exchange,
+            "return": return_doc,
+            "sale": linked_sale,
+            "products": list(updated_products_by_id.values()),
+            "cash": cash,
+            "receivables": receivables,
+            "inventoryMovements": inventory_movements,
+        }
+        conn.execute(
+            "UPDATE exchanges SET response_json = ? WHERE id = ?",
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                exchange_id,
+            ),
+        )
+        record_audit(
+            "create",
+            "exchange",
+            exchange_id,
+            {
+                "saleId": sale_id,
+                "exchangeNumber": number,
+                "linkedSaleId": linked_sale_id,
+                "differenceDirection": direction,
+                "differenceAmount": difference,
+                "warrantyId": warranty_id,
+            },
+            conn,
+        )
+        persist_product_app_state(conn, state, created_at)
+    return result, False
+
+
+def persist_exchange_cancellation(
+    exchange_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ReturnExchangeWarrantyError("Envie um JSON valido.")
+    key = str(idempotency_key or "").strip()
+    reason = str(payload.get("reason", "") or "").strip()
+    if not key or len(key) > 160:
+        raise ReturnExchangeWarrantyError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    if not reason:
+        raise ReturnExchangeWarrantyError(
+            "Informe o motivo do cancelamento da troca."
+        )
+    request_hash = operation_request_hash({
+        "exchangeId": exchange_id,
+        "reason": reason,
+    })
+    created_at = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (operation_lock_key("exchange_cancel", store_id, exchange_id),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT exchange_id AS "exchangeId",
+                   request_hash AS "requestHash",
+                   response_json AS "responseJson"
+            FROM exchange_cancellations
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if (
+                str(replay["exchangeId"]) != exchange_id
+                or str(replay["requestHash"]) != request_hash
+            ):
+                raise ReturnExchangeWarrantyError(
+                    "A chave de idempotencia ja foi usada com outros dados.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+        exchange = conn.execute(
+            f"""
+            SELECT id, sale_id AS "saleId", status, origin,
+                   warranty_id AS "warrantyId",
+                   linked_sale_id AS "linkedSaleId",
+                   reconciliation_required AS "reconciliationRequired"
+            FROM exchanges
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, exchange_id),
+        ).fetchone()
+        if not exchange:
+            raise ReturnExchangeWarrantyError("Troca nao encontrada.", 404)
+        if exchange["status"] == "cancelled":
+            raise ReturnExchangeWarrantyError(
+                "Troca ja cancelada.",
+                409,
+                "EXCHANGE_ALREADY_CANCELLED",
+            )
+        if bool(exchange["reconciliationRequired"]):
+            raise ReturnExchangeWarrantyError(
+                "A troca exige conciliacao manual antes do cancelamento.",
+                409,
+                "EXCHANGE_RECONCILIATION_REQUIRED",
+            )
+        linked_sale_id = str(exchange["linkedSaleId"] or "")
+        linked_sale = conn.execute(
+            f"""
+            SELECT id, status FROM sales
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, linked_sale_id),
+        ).fetchone()
+        if not linked_sale or linked_sale["status"] != "completed":
+            raise ReturnExchangeWarrantyError(
+                "A venda vinculada da troca nao pode ser revertida com seguranca.",
+                409,
+                "EXCHANGE_LINKED_SALE_CONFLICT",
+            )
+        linked_conflict = conn.execute(
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1 FROM sale_returns
+                    WHERE store_id = ? AND sale_id = ? AND status = 'completed'
+                ) AS has_return,
+                EXISTS(
+                    SELECT 1 FROM exchanges
+                    WHERE store_id = ? AND sale_id = ? AND status = 'completed'
+                ) AS has_exchange,
+                EXISTS(
+                    SELECT 1 FROM warranties
+                    WHERE store_id = ? AND sale_id = ?
+                      AND status NOT IN ('resolved', 'cancelled')
+                ) AS has_warranty
+            """,
+            (
+                store_id,
+                linked_sale_id,
+                store_id,
+                linked_sale_id,
+                store_id,
+                linked_sale_id,
+            ),
+        ).fetchone()
+        if any(bool(linked_conflict[key]) for key in linked_conflict.keys()):
+            raise ReturnExchangeWarrantyError(
+                "A venda vinculada possui outro pos-venda ativo.",
+                409,
+                "EXCHANGE_LINKED_SALE_AFTER_SALES_CONFLICT",
+            )
+        state = locked_app_state(conn)
+        reserved = conditional_reserved_quantities(state)
+        stock_deltas: dict[str, int] = {}
+        for row in conn.execute(
+            """
+            SELECT product_id AS "productId", quantity, restocked
+            FROM exchange_return_items WHERE exchange_id = ?
+            """,
+            (exchange_id,),
+        ).fetchall():
+            if bool(row["restocked"]):
+                product_id = str(row["productId"])
+                stock_deltas[product_id] = (
+                    stock_deltas.get(product_id, 0)
+                    - int(row["quantity"] or 0)
+                )
+        for row in conn.execute(
+            """
+            SELECT product_id AS "productId", quantity
+            FROM exchange_new_items WHERE exchange_id = ?
+            """,
+            (exchange_id,),
+        ).fetchall():
+            product_id = str(row["productId"])
+            stock_deltas[product_id] = (
+                stock_deltas.get(product_id, 0)
+                + int(row["quantity"] or 0)
+            )
+        product_rows: dict[str, object] = {}
+        if stock_deltas:
+            product_ids = list(stock_deltas)
+            placeholders = ",".join("?" for _ in product_ids)
+            rows = conn.execute(
+                f"""
+                {PRODUCT_SELECT}
+                WHERE store_id = ? AND id IN ({placeholders}){lock_clause}
+                """,
+                (store_id, *product_ids),
+            ).fetchall()
+            product_rows = {str(row["id"]): row for row in rows}
+            if len(product_rows) != len(product_ids):
+                raise ReturnExchangeWarrantyError(
+                    "Um produto da troca nao foi encontrado.",
+                    409,
+                    "EXCHANGE_PRODUCT_CONFLICT",
+                )
+            for product_id, delta in stock_deltas.items():
+                current = int(product_rows[product_id]["stock"] or 0)
+                after = current + delta
+                if after < int(reserved.get(product_id, 0) or 0):
+                    raise ReturnExchangeWarrantyError(
+                        "O estoque atual nao permite cancelar esta troca.",
+                        409,
+                        "EXCHANGE_CANCELLATION_STOCK_CONFLICT",
+                    )
+        cancellation_id = os.urandom(16).hex()
+        conn.execute(
+            """
+            INSERT INTO exchange_cancellations (
+                id, store_id, exchange_id, reason, idempotency_key,
+                request_hash, response_json, user_id, user_name, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?)
+            """,
+            (
+                cancellation_id,
+                store_id,
+                exchange_id,
+                reason,
+                key,
+                request_hash,
+                user.get("id") or None,
+                user.get("name") or None,
+                created_at,
+            ),
+        )
+        cash = []
+        changed_receivable_ids: set[str] = set()
+        exchange_payments = conn.execute(
+            """
+            SELECT method, amount, direction,
+                   cash_movement_id AS "cashMovementId",
+                   receivable_id AS "receivableId"
+            FROM exchange_payments
+            WHERE exchange_id = ? ORDER BY id
+            """,
+            (exchange_id,),
+        ).fetchall()
+        for payment in exchange_payments:
+            if payment["direction"] != "in":
+                continue
+            cash_movement_id = str(payment["cashMovementId"] or "")
+            receivable_id = str(payment["receivableId"] or "")
+            if cash_movement_id:
+                original = conn.execute(
+                    """
+                    SELECT method, amount FROM cash_movements
+                    WHERE store_id = ? AND id = ? AND direction = 'in'
+                    """,
+                    (store_id, cash_movement_id),
+                ).fetchone()
+                if not original:
+                    raise ReturnExchangeWarrantyError(
+                        "A entrada financeira da troca nao foi encontrada.",
+                        409,
+                        "EXCHANGE_FINANCIAL_CONFLICT",
+                    )
+                movement = cash_movement_document(
+                    direction="out",
+                    movement_type="exchange_cancellation",
+                    description=f"Cancelamento da troca {exchange_id}",
+                    method=str(original["method"]),
+                    amount=float(original["amount"] or 0),
+                    ref_id=cancellation_id,
+                    created_at=created_at,
+                )
+                insert_cash_movement(conn, movement, store_id)
+                cash.append(movement)
+            elif receivable_id:
+                receivable = conn.execute(
+                    f"""
+                    SELECT id, received, open_amount AS "openAmount", status
+                    FROM receivables
+                    WHERE store_id = ? AND id = ?{lock_clause}
+                    """,
+                    (store_id, receivable_id),
+                ).fetchone()
+                if not receivable or receivable["status"] == "cancelled":
+                    raise ReturnExchangeWarrantyError(
+                        "O recebivel da troca nao pode ser revertido.",
+                        409,
+                        "EXCHANGE_RECEIVABLE_CONFLICT",
+                    )
+                paid_rows = conn.execute(
+                    """
+                    SELECT method,
+                           COALESCE(SUM(amount), 0) AS amount
+                    FROM receivable_payments
+                    WHERE store_id = ? AND receivable_id = ?
+                      AND COALESCE(status, 'active') = 'active'
+                    GROUP BY method ORDER BY method
+                    """,
+                    (store_id, receivable_id),
+                ).fetchall()
+                traceable_paid = money_round(
+                    sum(float(row["amount"] or 0) for row in paid_rows)
+                )
+                if (
+                    float(receivable["received"] or 0) > traceable_paid + 0.009
+                ):
+                    raise ReturnExchangeWarrantyError(
+                        "O recebivel possui pagamento antigo sem vinculo seguro.",
+                        409,
+                        "EXCHANGE_MANUAL_RECONCILIATION_REQUIRED",
+                    )
+                for paid_row in paid_rows:
+                    paid_amount = money_round(paid_row["amount"] or 0)
+                    if paid_amount <= 0:
+                        continue
+                    movement = cash_movement_document(
+                        direction="out",
+                        movement_type="exchange_cancellation",
+                        description=f"Cancelamento da troca {exchange_id}",
+                        method=str(paid_row["method"] or payment["method"]),
+                        amount=paid_amount,
+                        ref_id=cancellation_id,
+                        created_at=created_at,
+                    )
+                    insert_cash_movement(conn, movement, store_id)
+                    cash.append(movement)
+                conn.execute(
+                    """
+                    UPDATE receivables
+                    SET open_amount = 0, status = 'cancelled',
+                        updated_at = ?, version = version + 1
+                    WHERE store_id = ? AND id = ?
+                    """,
+                    (created_at, store_id, receivable_id),
+                )
+                changed_receivable_ids.add(receivable_id)
+        return_row = conn.execute(
+            f"""
+            SELECT id FROM sale_returns
+            WHERE store_id = ? AND exchange_id = ? AND status = 'completed'
+            {lock_clause}
+            """,
+            (store_id, exchange_id),
+        ).fetchone()
+        if not return_row:
+            raise ReturnExchangeWarrantyError(
+                "O documento de retorno da troca nao foi encontrado.",
+                409,
+                "EXCHANGE_RETURN_CONFLICT",
+            )
+        return_id = str(return_row["id"])
+        reductions = conn.execute(
+            """
+            SELECT id, receivable_id AS "receivableId", amount,
+                   open_amount_before AS "openBefore",
+                   open_amount_after AS "openAfter",
+                   status_before AS "statusBefore",
+                   status_after AS "statusAfter"
+            FROM sale_return_receivable_reductions
+            WHERE store_id = ? AND return_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (store_id, return_id),
+        ).fetchall()
+        for reduction in reductions:
+            receivable_id = str(reduction["receivableId"])
+            receivable = conn.execute(
+                f"""
+                SELECT open_amount AS "openAmount", status
+                FROM receivables
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, receivable_id),
+            ).fetchone()
+            if (
+                not receivable
+                or abs(
+                    float(receivable["openAmount"] or 0)
+                    - float(reduction["openAfter"] or 0)
+                ) > 0.009
+                or str(receivable["status"]) != str(reduction["statusAfter"])
+            ):
+                raise ReturnExchangeWarrantyError(
+                    "Um recebivel original mudou apos a troca.",
+                    409,
+                    "EXCHANGE_RECEIVABLE_REVERSAL_CONFLICT",
+                )
+            conn.execute(
+                """
+                UPDATE receivables
+                SET open_amount = ?,
+                    return_reduction_total = CASE
+                        WHEN return_reduction_total - ? < 0 THEN 0
+                        ELSE return_reduction_total - ?
+                    END,
+                    status = ?, updated_at = ?, version = version + 1
+                WHERE store_id = ? AND id = ?
+                """,
+                (
+                    reduction["openBefore"],
+                    reduction["amount"],
+                    reduction["amount"],
+                    reduction["statusBefore"],
+                    created_at,
+                    store_id,
+                    receivable_id,
+                ),
+            )
+            changed_receivable_ids.add(receivable_id)
+        refund_movements = conn.execute(
+            """
+            SELECT method, amount FROM cash_movements
+            WHERE store_id = ? AND ref_id = ?
+              AND direction = 'out' AND type = 'return'
+            ORDER BY created_at, id
+            """,
+            (store_id, return_id),
+        ).fetchall()
+        for refunded in refund_movements:
+            movement = cash_movement_document(
+                direction="in",
+                movement_type="exchange_cancellation",
+                description=f"Cancelamento da troca {exchange_id}",
+                method=str(refunded["method"]),
+                amount=float(refunded["amount"] or 0),
+                ref_id=cancellation_id,
+                created_at=created_at,
+            )
+            insert_cash_movement(conn, movement, store_id)
+            cash.append(movement)
+        inventory_movements = []
+        updated_products = []
+        for product_id, delta in stock_deltas.items():
+            row = product_rows[product_id]
+            before = int(row["stock"] or 0)
+            after = before + delta
+            conn.execute(
+                """
+                UPDATE products SET stock = ?, updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (after, created_at, store_id, product_id),
+            )
+            inventory_movements.append(persist_inventory_movement(
+                conn,
+                product_id=product_id,
+                movement_type="exchange_cancellation",
+                real_before=before,
+                real_after=after,
+                reserved_before=int(reserved.get(product_id, 0) or 0),
+                reserved_after=int(reserved.get(product_id, 0) or 0),
+                reference_type="exchange_cancellation",
+                reference_id=cancellation_id,
+                source_key=f"exchange_cancellation:{exchange_id}:{product_id}",
+                created_at=created_at,
+                store_id=store_id,
+                user=user,
+                notes=reason,
+            ))
+            product_row = conn.execute(
+                f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?",
+                (store_id, product_id),
+            ).fetchone()
+            product = product_with_availability(
+                product_from_row(product_row),
+                state,
+            )
+            updated_products.append(product)
+            replace_product_in_state(state, product)
+        conn.execute(
+            """
+            UPDATE sales SET status = 'cancelled', updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (created_at, store_id, linked_sale_id),
+        )
+        conn.execute(
+            """
+            UPDATE sale_returns SET status = 'cancelled'
+            WHERE store_id = ? AND id = ?
+            """,
+            (store_id, return_id),
+        )
+        conn.execute(
+            """
+            UPDATE exchanges SET status = 'cancelled', updated_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (created_at, store_id, exchange_id),
+        )
+        warranty_document_result = None
+        warranty_id = str(exchange["warrantyId"] or "")
+        if warranty_id:
+            warranty = conn.execute(
+                f"""
+                SELECT status, solution_type AS "solutionType",
+                       solution_reference_id AS "solutionReferenceId"
+                FROM warranties
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, warranty_id),
+            ).fetchone()
+            if (
+                not warranty
+                or warranty["status"] != "resolved"
+                or warranty["solutionType"] != "exchange"
+                or str(warranty["solutionReferenceId"] or "") != exchange_id
+            ):
+                raise ReturnExchangeWarrantyError(
+                    "A garantia vinculada mudou apos a troca.",
+                    409,
+                    "EXCHANGE_WARRANTY_CONFLICT",
+                )
+            conn.execute(
+                """
+                UPDATE warranties
+                SET status = 'approved', solution_type = NULL,
+                    solution_reference_id = NULL, resolved_at = NULL,
+                    updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (created_at, store_id, warranty_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO warranty_events (
+                    id, warranty_id, store_id, event_type, previous_status,
+                    new_status, notes, user_id, user_name, created_at
+                ) VALUES (?, ?, ?, 'exchange_cancelled', 'resolved',
+                          'approved', ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    warranty_id,
+                    store_id,
+                    reason,
+                    user.get("id") or None,
+                    user.get("name") or None,
+                    created_at,
+                ),
+            )
+            warranty_document_result = warranty_document(conn, warranty_id)
+        changed_receivables = []
+        if changed_receivable_ids:
+            identifiers = sorted(changed_receivable_ids)
+            placeholders = ",".join("?" for _ in identifiers)
+            changed_receivables = [
+                receivable_from_row(row)
+                for row in conn.execute(
+                    f"""
+                    {RECEIVABLE_SELECT}
+                    WHERE store_id = ? AND id IN ({placeholders})
+                    ORDER BY due_date, created_at, id
+                    """,
+                    (store_id, *identifiers),
+                ).fetchall()
+            ]
+            replace_receivables_in_state(state, changed_receivables)
+        exchange_document_result = exchange_document(conn, exchange_id)
+        return_document_result = return_document(conn, return_id)
+        for sale in state.get("sales", []):
+            if str(sale.get("id", "")) == linked_sale_id:
+                sale["status"] = "cancelled"
+                sale["updatedAt"] = created_at
+        state["returns"] = [
+            return_document_result
+            if str(item.get("id", "")) == return_id
+            else item
+            for item in (state.get("returns") or [])
+        ]
+        state["exchanges"] = [
+            exchange_document_result
+            if str(item.get("id", "")) == exchange_id
+            else item
+            for item in (state.get("exchanges") or [])
+        ]
+        if warranty_document_result:
+            state["warranties"] = [
+                warranty_document_result
+                if str(item.get("id", "")) == warranty_id
+                else item
+                for item in (state.get("warranties") or [])
+            ]
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        prepend_inventory_movements(state, inventory_movements)
+        result = {
+            "cancellation": {
+                "id": cancellation_id,
+                "exchangeId": exchange_id,
+                "reason": reason,
+                "userId": str(user.get("id", "") or ""),
+                "userName": str(user.get("name", "") or ""),
+                "createdAt": created_at,
+            },
+            "exchange": exchange_document_result,
+            "return": return_document_result,
+            "warranty": warranty_document_result,
+            "products": updated_products,
+            "cash": cash,
+            "receivables": changed_receivables,
+            "inventoryMovements": inventory_movements,
+        }
+        response_json = json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        conn.execute(
+            """
+            UPDATE exchange_cancellations SET response_json = ?
+            WHERE id = ?
+            """,
+            (response_json, cancellation_id),
+        )
+        record_audit(
+            "cancel",
+            "exchange",
+            exchange_id,
+            {
+                "reason": reason,
+                "linkedSaleId": linked_sale_id,
+                "cashMovementCount": len(cash),
+                "receivableCount": len(changed_receivables),
+            },
+            conn,
+        )
+        persist_product_app_state(conn, state, created_at)
+    return result, False
+
+
+WARRANTY_DEFECT_CATEGORIES = {
+    "Costura",
+    "Cola",
+    "Solado",
+    "Tecido",
+    "Ziper",
+    "Estampa",
+    "Acessorio",
+    "Outro",
+}
+
+
+def warranty_document(conn, warranty_id: str) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT id, warranty_number AS "warrantyNumber",
+               sale_id AS "saleId", sale_item_id AS "saleItemId",
+               customer_id AS "customerId", customer_name AS "customerName",
+               contact_name AS "contactName", contact_phone AS "contactPhone",
+               product_id AS "productId", barcode,
+               product_name AS "productName", brand, size, color, quantity,
+               defect_category AS "defectCategory",
+               defect_description AS "defectDescription",
+               physical_location AS "physicalLocation", status,
+               supplier_id AS "supplierId", supplier_name AS "supplierName",
+               supplier_protocol AS "supplierProtocol",
+               solution_type AS "solutionType",
+               solution_reference_id AS "solutionReferenceId",
+               awaiting_customer_delivery AS "awaitingCustomerDelivery",
+               opened_by_user_id AS "openedByUserId",
+               opened_by_user_name AS "openedByUserName",
+               created_at AS "createdAt", updated_at AS "updatedAt",
+               resolved_at AS "resolvedAt", cancelled_at AS "cancelledAt"
+        FROM warranties WHERE id = ?
+        """,
+        (warranty_id,),
+    ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["awaitingCustomerDelivery"] = bool(
+        result["awaitingCustomerDelivery"]
+    )
+    result["photos"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT id, url, storage, created_at AS "createdAt"
+            FROM warranty_photos WHERE warranty_id = ? ORDER BY created_at, id
+            """,
+            (warranty_id,),
+        ).fetchall()
+    ]
+    result["events"] = [
+        dict(item)
+        for item in conn.execute(
+            """
+            SELECT id, event_type AS "eventType",
+                   previous_status AS "previousStatus",
+                   new_status AS "newStatus", notes,
+                   supplier_id AS "supplierId",
+                   supplier_name AS "supplierName", protocol,
+                   replacement_product_id AS "replacementProductId",
+                   replacement_product_name AS "replacementProductName",
+                   replacement_quantity AS "replacementQuantity",
+                   replacement_unit_cost AS "replacementUnitCost",
+                   replacement_destination AS "replacementDestination",
+                   stock_entry_id AS "stockEntryId",
+                   user_id AS "userId", user_name AS "userName",
+                   created_at AS "createdAt"
+            FROM warranty_events
+            WHERE warranty_id = ? ORDER BY created_at, id
+            """,
+            (warranty_id,),
+        ).fetchall()
+    ]
+    sale = conn.execute(
+        "SELECT created_at AS \"createdAt\" FROM sales WHERE id = ?",
+        (result["saleId"],),
+    ).fetchone()
+    result["daysSinceSale"] = (
+        max(
+            0,
+            (
+                sale_operational_date(result["createdAt"])
+                - sale_operational_date(sale["createdAt"])
+            ).days,
+        )
+        if sale
+        else None
+    )
+    return result
+
+
+def persist_warranty_creation(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ReturnExchangeWarrantyError("Envie um JSON valido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ReturnExchangeWarrantyError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    sale_id = str(payload.get("saleId", "") or "").strip()
+    defect_category = str(
+        payload.get("defectCategory", "") or ""
+    ).strip()
+    defect_description = str(
+        payload.get("defectDescription", "") or ""
+    ).strip()
+    physical_location = str(
+        payload.get("physicalLocation", "") or ""
+    ).strip()
+    if defect_category not in WARRANTY_DEFECT_CATEGORIES:
+        raise ReturnExchangeWarrantyError("Categoria de defeito invalida.")
+    if not defect_description:
+        raise ReturnExchangeWarrantyError("Descreva o defeito apresentado.")
+    if physical_location not in {"customer", "store"}:
+        raise ReturnExchangeWarrantyError(
+            "Informe onde o produto esta fisicamente."
+        )
+    photos = payload.get("photos") or []
+    if not isinstance(photos, list) or len(photos) > 5:
+        raise ReturnExchangeWarrantyError(
+            "A garantia permite no maximo 5 fotos."
+        )
+    normalized_photos = []
+    for photo in photos:
+        if isinstance(photo, dict):
+            url = str(photo.get("url", "") or "").strip()
+            storage = str(photo.get("storage", "") or "").strip()
+        else:
+            url = str(photo or "").strip()
+            storage = ""
+        if not url or len(url) > 2048:
+            raise ReturnExchangeWarrantyError("Foto da garantia invalida.")
+        normalized_photos.append({"url": url, "storage": storage})
+    request_hash = operation_request_hash(payload)
+    created_at = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (operation_lock_key("warranty", store_id, key),),
+            )
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM warranties
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise ReturnExchangeWarrantyError(
+                    "A chave de idempotencia ja foi usada com outros dados.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+        sale, items = resolve_operation_items(
+            conn,
+            sale_id,
+            [{
+                "saleItemId": payload.get("saleItemId"),
+                "productId": payload.get("productId"),
+                "quantity": payload.get("quantity", 1),
+                "physicalCondition": "damaged",
+            }],
+            store_id=store_id,
+            physical_condition_required=False,
+        )
+        item = items[0]
+        number = next_business_number(
+            conn,
+            sequence_table="warranty_sequences",
+            operation_table="warranties",
+            number_column="warranty_number",
+            store_id=store_id,
+        )
+        warranty_id = f"GAR{number:04d}"
+        contact_name = str(
+            payload.get("contactName", sale["customerName"]) or ""
+        ).strip()
+        contact_phone = str(payload.get("contactPhone", "") or "").strip()
+        conn.execute(
+            """
+            INSERT INTO warranties (
+                id, store_id, warranty_number, sale_id, sale_item_id,
+                customer_id, customer_name, contact_name, contact_phone,
+                product_id, barcode, product_name, brand, size, color,
+                quantity, defect_category, defect_description,
+                physical_location, status, opened_by_user_id,
+                opened_by_user_name, idempotency_key, request_hash,
+                response_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, 'open', ?, ?, ?, ?, '{}', ?, ?)
+            """,
+            (
+                warranty_id,
+                store_id,
+                number,
+                sale_id,
+                item["saleItemId"],
+                sale["customerId"] or None,
+                sale["customerName"],
+                contact_name or None,
+                contact_phone or None,
+                item["productId"],
+                item["barcode"],
+                item["name"],
+                item["brand"],
+                item["size"],
+                item["color"],
+                item["quantity"],
+                defect_category,
+                defect_description,
+                physical_location,
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                created_at,
+                created_at,
+            ),
+        )
+        for photo in normalized_photos:
+            conn.execute(
+                """
+                INSERT INTO warranty_photos (
+                    id, warranty_id, url, storage, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    warranty_id,
+                    photo["url"],
+                    photo["storage"] or None,
+                    created_at,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO warranty_events (
+                id, warranty_id, store_id, event_type, previous_status,
+                new_status, notes, user_id, user_name, created_at
+            ) VALUES (?, ?, ?, 'opened', NULL, 'open', ?, ?, ?, ?)
+            """,
+            (
+                os.urandom(16).hex(),
+                warranty_id,
+                store_id,
+                defect_description,
+                user.get("id") or None,
+                user.get("name") or None,
+                created_at,
+            ),
+        )
+        document = warranty_document(conn, warranty_id)
+        state = locked_app_state(conn)
+        state["warranties"] = [
+            document,
+            *[
+                item
+                for item in (state.get("warranties") or [])
+                if str(item.get("id", "")) != warranty_id
+            ],
+        ]
+        result = {"warranty": document}
+        conn.execute(
+            "UPDATE warranties SET response_json = ? WHERE id = ?",
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                warranty_id,
+            ),
+        )
+        record_audit(
+            "create",
+            "warranty",
+            warranty_id,
+            {
+                "warrantyNumber": number,
+                "saleId": sale_id,
+                "saleItemId": item["saleItemId"],
+                "defectCategory": defect_category,
+                "physicalLocation": physical_location,
+                "photoCount": len(normalized_photos),
+            },
+            conn,
+        )
+        persist_product_app_state(conn, state, created_at)
+    return result, False
+
+
+def persist_warranty_replacement_stock_entry(
+    conn,
+    *,
+    warranty_row,
+    payload: dict,
+    created_at: str,
+    store_id: str,
+    user: dict,
+    state: dict,
+) -> tuple[dict, dict, dict, dict]:
+    product_id = str(payload.get("replacementProductId", "") or "").strip()
+    try:
+        quantity = int(payload.get("replacementQuantity", 1) or 0)
+        unit_cost = money_round(payload.get("replacementUnitCost", 0))
+    except (TypeError, ValueError) as error:
+        raise ReturnExchangeWarrantyError(
+            "Informe quantidade e custo validos para a entrada."
+        ) from error
+    if not product_id or quantity <= 0 or unit_cost <= 0:
+        raise ReturnExchangeWarrantyError(
+            "Informe produto, quantidade e custo da substituicao."
+        )
+    supplier_id = str(warranty_row["supplier_id"] or "")
+    supplier_name = str(warranty_row["supplier_name"] or "")
+    if not supplier_id or not supplier_name:
+        raise ReturnExchangeWarrantyError(
+            "A garantia precisa estar vinculada ao fornecedor responsavel.",
+            409,
+            "WARRANTY_SUPPLIER_REQUIRED",
+        )
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    product_row = conn.execute(
+        f"""
+        {PRODUCT_SELECT}
+        WHERE store_id = ? AND id = ?{lock_clause}
+        """,
+        (store_id, product_id),
+    ).fetchone()
+    if not product_row or not bool(product_row["active"]):
+        raise ReturnExchangeWarrantyError(
+            "Selecione um produto ativo para a entrada da substituicao."
+        )
+    stock_before = int(product_row["stock"] or 0)
+    stock_after = stock_before + quantity
+    total_cost = money_round(unit_cost * quantity)
+    entry_id = os.urandom(16).hex()
+    item_id = os.urandom(16).hex()
+    entry_number = next_stock_entry_number(conn, store_id)
+    entry = {
+        "id": entry_id,
+        "entryNumber": entry_number,
+        "code": f"ENTRADA{entry_number:06d}",
+        "supplierId": supplier_id,
+        "supplier": supplier_name,
+        "status": "confirmed",
+        "origin": "warranty_replacement",
+        "warrantyId": str(warranty_row["id"]),
+        "totalQuantity": quantity,
+        "totalCost": total_cost,
+        "userId": str(user.get("id", "") or ""),
+        "userName": str(user.get("name", "") or ""),
+        "createdAt": created_at,
+        "updatedAt": created_at,
+        "items": [],
+    }
+    product = product_from_row(product_row)
+    item = {
+        "id": item_id,
+        "entryId": entry_id,
+        "productId": product_id,
+        "barcode": product["barcode"],
+        "productName": product["name"],
+        "brandId": product["brandId"],
+        "brand": product["brand"],
+        "categoryId": product["categoryId"],
+        "category": product["category"],
+        "sizeId": product["sizeId"],
+        "size": product["size"],
+        "colorId": product["colorId"],
+        "color": product["color"],
+        "supplierId": supplier_id,
+        "supplier": supplier_name,
+        "quantity": quantity,
+        "unitCost": unit_cost,
+        "totalCost": total_cost,
+        "salePrice": product["price"],
+        "stockBefore": stock_before,
+        "stockAfter": stock_after,
+    }
+    entry["items"] = [item]
+    movement = {
+        "id": os.urandom(16).hex(),
+        "productId": product_id,
+        "movementType": "entry",
+        "direction": "in",
+        "quantity": quantity,
+        "balanceBefore": stock_before,
+        "balanceAfter": stock_after,
+        "referenceType": "warranty",
+        "referenceId": str(warranty_row["id"]),
+        "userId": entry["userId"],
+        "userName": entry["userName"],
+        "createdAt": created_at,
+    }
+    conn.execute(
+        """
+        UPDATE products
+        SET stock = ?, cost = ?,
+            stock_entered_at = CASE
+                WHEN stock_entered_at IS NULL OR stock_entered_at = ''
+                THEN ?
+                ELSE stock_entered_at
+            END,
+            updated_at = ?
+        WHERE store_id = ? AND id = ?
+        """,
+        (
+            stock_after,
+            unit_cost,
+            created_at,
+            created_at,
+            store_id,
+            product_id,
+        ),
+    )
+    reserved = int(
+        conditional_reserved_quantities(state).get(product_id, 0) or 0
+    )
+    inventory_movement = persist_inventory_movement(
+        conn,
+        product_id=product_id,
+        movement_type="warranty_replacement",
+        real_before=stock_before,
+        real_after=stock_after,
+        reserved_before=reserved,
+        reserved_after=reserved,
+        reference_type="warranty",
+        reference_id=str(warranty_row["id"]),
+        source_key=f"warranty_replacement:{warranty_row['id']}:{item_id}",
+        created_at=created_at,
+        store_id=store_id,
+        user=user,
+        notes="Substituicao de garantia pelo fornecedor",
+    )
+    response = {
+        "entry": entry,
+        "movement": movement,
+        "inventoryMovement": inventory_movement,
+    }
+    conn.execute(
+        """
+        INSERT INTO stock_entries (
+            id, store_id, entry_number, supplier_id, supplier_name, status,
+            total_quantity, total_cost, idempotency_key, request_hash,
+            response_json, user_id, user_name, created_at, updated_at,
+            origin, warranty_id
+        ) VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  'warranty_replacement', ?)
+        """,
+        (
+            entry_id,
+            store_id,
+            entry_number,
+            supplier_id,
+            supplier_name,
+            quantity,
+            total_cost,
+            f"warranty-replacement:{warranty_row['id']}",
+            operation_request_hash({
+                "warrantyId": str(warranty_row["id"]),
+                "productId": product_id,
+                "quantity": quantity,
+                "unitCost": unit_cost,
+            }),
+            json.dumps(response, ensure_ascii=False, sort_keys=True),
+            entry["userId"] or None,
+            entry["userName"] or None,
+            created_at,
+            created_at,
+            str(warranty_row["id"]),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO stock_entry_items (
+            id, entry_id, product_id, barcode, product_name, brand_id,
+            brand_name, category_id, category_name, size_id, size_name,
+            color_id, color_name, supplier_id, supplier_name, quantity,
+            unit_cost, total_cost, sale_price, stock_before, stock_after
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?)
+        """,
+        (
+            item_id,
+            entry_id,
+            product_id,
+            item["barcode"],
+            item["productName"],
+            item["brandId"] or None,
+            item["brand"],
+            item["categoryId"] or None,
+            item["category"],
+            item["sizeId"] or None,
+            item["size"],
+            item["colorId"] or None,
+            item["color"],
+            supplier_id,
+            supplier_name,
+            quantity,
+            unit_cost,
+            total_cost,
+            item["salePrice"],
+            stock_before,
+            stock_after,
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO stock_movements (
+            id, store_id, product_id, movement_type, direction, quantity,
+            balance_before, balance_after, reference_type, reference_id,
+            user_id, user_name, created_at
+        ) VALUES (?, ?, ?, 'entry', 'in', ?, ?, ?, 'warranty', ?, ?, ?, ?)
+        """,
+        (
+            movement["id"],
+            store_id,
+            product_id,
+            quantity,
+            stock_before,
+            stock_after,
+            str(warranty_row["id"]),
+            entry["userId"] or None,
+            entry["userName"] or None,
+            created_at,
+        ),
+    )
+    updated_row = conn.execute(
+        f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?",
+        (store_id, product_id),
+    ).fetchone()
+    updated_product = product_with_availability(
+        product_from_row(updated_row),
+        state,
+    )
+    return entry, movement, inventory_movement, updated_product
+
+
+def persist_warranty_event(
+    warranty_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> dict:
+    if not isinstance(payload, dict):
+        raise ReturnExchangeWarrantyError("Envie um JSON valido.")
+    action = str(payload.get("action", "") or "").strip()
+    notes = str(payload.get("notes", "") or "").strip()
+    transitions = {
+        "start_analysis": ({"open"}, "analysis"),
+        "approve": ({"open", "analysis", "supplier"}, "approved"),
+        "reject": ({"open", "analysis", "supplier"}, "rejected"),
+        "cancel": (
+            {"open", "analysis", "supplier", "approved", "rejected"},
+            "cancelled",
+        ),
+    }
+    created_at = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT * FROM warranties
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, warranty_id),
+        ).fetchone()
+        if not row:
+            raise ReturnExchangeWarrantyError("Garantia nao encontrada.", 404)
+        previous = str(row["status"])
+        supplier_id = ""
+        supplier_name = ""
+        protocol = ""
+        solution_type = ""
+        replacement_product_id = ""
+        replacement_product_name = ""
+        replacement_quantity = None
+        replacement_unit_cost = None
+        replacement_destination = ""
+        replacement_entry = None
+        replacement_movement = None
+        replacement_inventory_movement = None
+        replacement_product = None
+        awaiting_delivery = bool(row["awaiting_customer_delivery"])
+        new_status = previous
+        new_location = str(row["physical_location"])
+        if action == "receive_at_store":
+            if previous in {"resolved", "cancelled"}:
+                raise ReturnExchangeWarrantyError(
+                    "Garantia encerrada nao pode receber novos eventos.",
+                    409,
+                )
+            new_location = "store"
+        elif action == "send_supplier":
+            if previous not in {"open", "analysis"}:
+                raise ReturnExchangeWarrantyError(
+                    "Garantia nao pode ser enviada ao fornecedor neste estado.",
+                    409,
+                )
+            if str(row["physical_location"]) != "store":
+                raise ReturnExchangeWarrantyError(
+                    "O produto deve estar na loja antes do envio ao fornecedor.",
+                    409,
+                    "WARRANTY_PRODUCT_NOT_AT_STORE",
+                )
+            supplier_id = str(payload.get("supplierId", "") or "").strip()
+            protocol = str(payload.get("protocol", "") or "").strip()
+            supplier = conn.execute(
+                f"""
+                SELECT id, name, status FROM suppliers
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, supplier_id),
+            ).fetchone()
+            if not supplier or supplier["status"] != "active":
+                raise ReturnExchangeWarrantyError(
+                    "Selecione um fornecedor ativo."
+                )
+            supplier_name = str(supplier["name"])
+            new_status = "supplier"
+            new_location = "supplier"
+        elif action in transitions:
+            allowed, new_status = transitions[action]
+            if previous not in allowed:
+                raise ReturnExchangeWarrantyError(
+                    "Transicao de garantia invalida.",
+                    409,
+                    "WARRANTY_TRANSITION_INVALID",
+                )
+            if action in {"reject", "cancel"} and not notes:
+                raise ReturnExchangeWarrantyError(
+                    "Informe o motivo desta decisao."
+                )
+            if action == "reject" and new_location == "store":
+                awaiting_delivery = True
+            if action == "cancel" and user.get("role") != "admin":
+                raise ReturnExchangeWarrantyError(
+                    "Apenas administrador pode cancelar garantia.",
+                    403,
+                    "ADMIN_REQUIRED",
+                )
+            if action == "cancel" and (
+                str(row["physical_location"]) == "supplier"
+                or str(row["solution_reference_id"] or "")
+            ):
+                raise ReturnExchangeWarrantyError(
+                    "A garantia possui operacao vinculada e nao pode ser cancelada.",
+                    409,
+                    "WARRANTY_CANCELLATION_CONFLICT",
+                )
+        elif action == "resolve_repair":
+            if previous != "approved":
+                raise ReturnExchangeWarrantyError(
+                    "A garantia deve estar aprovada antes da solucao.",
+                    409,
+                )
+            solution_type = "repair"
+            awaiting_delivery = bool(
+                payload.get("awaitingCustomerDelivery", True)
+            )
+            new_status = "approved" if awaiting_delivery else "resolved"
+            if not notes:
+                raise ReturnExchangeWarrantyError(
+                    "Descreva a solucao aplicada."
+                )
+        elif action == "resolve_substitution":
+            if previous != "approved":
+                raise ReturnExchangeWarrantyError(
+                    "A garantia deve estar aprovada antes da solucao.",
+                    409,
+                )
+            replacement_destination = str(
+                payload.get("replacementDestination", "") or ""
+            ).strip()
+            replacement_product_id = str(
+                payload.get("replacementProductId", "") or ""
+            ).strip()
+            try:
+                replacement_quantity = int(
+                    payload.get("replacementQuantity", 1) or 0
+                )
+            except (TypeError, ValueError) as error:
+                raise ReturnExchangeWarrantyError(
+                    "Informe uma quantidade valida para a substituicao."
+                ) from error
+            if (
+                replacement_destination not in {"customer", "stock"}
+                or not replacement_product_id
+                or replacement_quantity <= 0
+            ):
+                raise ReturnExchangeWarrantyError(
+                    "Informe produto, quantidade e destino da substituicao."
+                )
+            replacement_row = conn.execute(
+                f"""
+                SELECT name FROM products
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, replacement_product_id),
+            ).fetchone()
+            if not replacement_row:
+                raise ReturnExchangeWarrantyError(
+                    "Produto substituto nao encontrado."
+                )
+            replacement_product_name = str(replacement_row["name"])
+            solution_type = "substitution"
+            if not notes:
+                raise ReturnExchangeWarrantyError(
+                    "Descreva a substituicao aplicada."
+                )
+            if replacement_destination == "customer":
+                awaiting_delivery = bool(
+                    payload.get("awaitingCustomerDelivery", True)
+                )
+                new_status = "approved" if awaiting_delivery else "resolved"
+                new_location = "store" if awaiting_delivery else "customer"
+            else:
+                try:
+                    replacement_unit_cost = money_round(
+                        payload.get("replacementUnitCost", 0)
+                    )
+                except (TypeError, ValueError) as error:
+                    raise ReturnExchangeWarrantyError(
+                        "Informe um custo valido para o produto substituto."
+                    ) from error
+                if replacement_unit_cost <= 0:
+                    raise ReturnExchangeWarrantyError(
+                        "Confirme o custo do produto substituto para a entrada."
+                    )
+                awaiting_delivery = False
+                new_status = "resolved"
+        elif action == "deliver_customer":
+            if previous not in {"approved", "rejected"} or not bool(
+                row["awaiting_customer_delivery"]
+            ):
+                raise ReturnExchangeWarrantyError(
+                    "Nao existe entrega ao cliente pendente.",
+                    409,
+                )
+            new_status = "resolved"
+            awaiting_delivery = False
+            new_location = "customer"
+            solution_type = str(row["solution_type"] or "")
+        elif action == "close_rejection":
+            if previous != "rejected" or str(row["physical_location"]) != "customer":
+                raise ReturnExchangeWarrantyError(
+                    "A recusa nao pode ser encerrada neste estado.",
+                    409,
+                )
+            new_status = "resolved"
+            solution_type = "rejection"
+        else:
+            raise ReturnExchangeWarrantyError("Acao de garantia invalida.")
+        resolved_at = (
+            created_at if new_status == "resolved" else row["resolved_at"]
+        )
+        cancelled_at = (
+            created_at if new_status == "cancelled" else row["cancelled_at"]
+        )
+        state = locked_app_state(conn)
+        if (
+            action == "resolve_substitution"
+            and replacement_destination == "stock"
+        ):
+            (
+                replacement_entry,
+                replacement_movement,
+                replacement_inventory_movement,
+                replacement_product,
+            ) = persist_warranty_replacement_stock_entry(
+                conn,
+                warranty_row=row,
+                payload=payload,
+                created_at=created_at,
+                store_id=store_id,
+                user=user,
+                state=state,
+            )
+            replacement_unit_cost = replacement_entry["items"][0]["unitCost"]
+        conn.execute(
+            """
+            UPDATE warranties
+            SET status = ?, physical_location = ?,
+                supplier_id = COALESCE(?, supplier_id),
+                supplier_name = COALESCE(?, supplier_name),
+                supplier_protocol = COALESCE(?, supplier_protocol),
+                solution_type = COALESCE(?, solution_type),
+                awaiting_customer_delivery = ?, resolved_at = ?,
+                cancelled_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                new_status,
+                new_location,
+                supplier_id or None,
+                supplier_name or None,
+                protocol or None,
+                solution_type or None,
+                1 if awaiting_delivery else 0,
+                resolved_at,
+                cancelled_at,
+                created_at,
+                warranty_id,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO warranty_events (
+                id, warranty_id, store_id, event_type, previous_status,
+                new_status, notes, supplier_id, supplier_name, protocol,
+                replacement_product_id, replacement_product_name,
+                replacement_quantity, replacement_unit_cost,
+                replacement_destination, stock_entry_id,
+                user_id, user_name, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?)
+            """,
+            (
+                os.urandom(16).hex(),
+                warranty_id,
+                store_id,
+                action,
+                previous,
+                new_status,
+                notes or None,
+                supplier_id or None,
+                supplier_name or None,
+                protocol or None,
+                replacement_product_id or None,
+                replacement_product_name or None,
+                replacement_quantity,
+                replacement_unit_cost,
+                replacement_destination or None,
+                replacement_entry["id"] if replacement_entry else None,
+                user.get("id") or None,
+                user.get("name") or None,
+                created_at,
+            ),
+        )
+        document = warranty_document(conn, warranty_id)
+        if replacement_product:
+            replace_product_in_state(state, replacement_product)
+            state["stockEntries"] = [
+                replacement_entry,
+                *[
+                    item
+                    for item in (state.get("stockEntries") or [])
+                    if str(item.get("id", "")) != replacement_entry["id"]
+                ],
+            ]
+            state["stockMovements"] = [
+                replacement_movement,
+                *(state.get("stockMovements") or []),
+            ]
+            prepend_inventory_movements(
+                state,
+                [replacement_inventory_movement],
+            )
+        state["warranties"] = [
+            document,
+            *[
+                item
+                for item in (state.get("warranties") or [])
+                if str(item.get("id", "")) != warranty_id
+            ],
+        ]
+        record_audit(
+            action,
+            "warranty",
+            warranty_id,
+            {
+                "previousStatus": previous,
+                "newStatus": new_status,
+                "supplierId": supplier_id,
+                "solutionType": solution_type,
+                "replacementDestination": replacement_destination,
+                "stockEntryId": (
+                    replacement_entry["id"] if replacement_entry else ""
+                ),
+            },
+            conn,
+        )
+        persist_product_app_state(conn, state, created_at)
+    return document
+
+
+def persist_state_with_inventory_specs(
+    state: dict,
+    movement_specs: list[dict],
+    *,
+    store_id: str = "matriz",
+) -> list[dict]:
+    updated_at = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        current_state = locked_app_state(conn)
+        current_reserved = conditional_reserved_quantities(current_state)
+        for spec in movement_specs:
+            product_id = str(spec["product_id"])
+            product_row = conn.execute(
+                f"""
+                SELECT stock
+                FROM products
+                WHERE store_id = ? AND id = ?{lock_clause}
+                """,
+                (store_id, product_id),
+            ).fetchone()
+            if not product_row:
+                raise InventoryOperationError(
+                    "Produto da movimentação não encontrado.",
+                    409,
+                    "INVENTORY_CONFLICT",
+                )
+            if (
+                int(product_row["stock"] or 0) != int(spec["real_before"])
+                or int(current_reserved.get(product_id, 0) or 0)
+                != int(spec["reserved_before"])
+            ):
+                raise InventoryOperationError(
+                    "O estoque foi alterado por outra operação. Atualize os dados e tente novamente.",
+                    409,
+                    "INVENTORY_CONFLICT",
+                )
+        movements = [
+            persist_inventory_movement(
+                conn,
+                store_id=store_id,
+                **spec,
+            )
+            for spec in movement_specs
+        ]
+        prepend_inventory_movements(state, movements)
+        state_to_store = prepare_state_for_storage(conn, state, store_id)
+        conn.execute(
+            """
+            INSERT INTO app_state (id, data, updated_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                data = excluded.data,
+                updated_at = excluded.updated_at
+            """,
+            (json.dumps(state_to_store, ensure_ascii=False), updated_at),
+        )
+        sync_business_tables(conn, state_to_store, store_id)
+    return movements
+
+
+def sync_sale_to_state(
+    sale: dict,
+    updated_products: list[dict],
+    cash: list[dict],
+    receivables: list[dict],
+) -> list[dict]:
     state, _ = read_state()
+    reserved = conditional_reserved_quantities(state)
     updated_by_id = {product["id"]: product for product in updated_products}
     state["products"] = [updated_by_id.get(product.get("id"), product) for product in state.get("products", [])]
     known_product_ids = {product.get("id") for product in state["products"]}
@@ -2536,11 +15064,42 @@ def sync_sale_to_state(sale: dict, updated_products: list[dict], cash: list[dict
     state["sales"] = [sale, *[item for item in state.get("sales", []) if item.get("id") != sale["id"]]]
     state["cash"] = [*cash, *state.get("cash", [])]
     state["receivables"] = [*receivables, *state.get("receivables", [])]
-    write_state(state)
+    quantities: dict[str, int] = {}
+    for item in sale.get("items", []) or []:
+        product_id = str(item.get("productId", "") or "")
+        quantities[product_id] = quantities.get(product_id, 0) + int(
+            item.get("quantity", 0) or 0
+        )
+    user = session.get("user") or {}
+    specs = []
+    for product_id, quantity in quantities.items():
+        product = updated_by_id[product_id]
+        after = int(product.get("stock", 0) or 0)
+        reserved_quantity = int(reserved.get(product_id, 0) or 0)
+        specs.append({
+            "product_id": product_id,
+            "movement_type": "sale",
+            "real_before": after + quantity,
+            "real_after": after,
+            "reserved_before": reserved_quantity,
+            "reserved_after": reserved_quantity,
+            "reference_type": "sale",
+            "reference_id": sale["id"],
+            "source_key": f"sale:{sale['id']}:{product_id}",
+            "created_at": sale["createdAt"],
+            "user": user,
+        })
+    return persist_state_with_inventory_specs(state, specs)
 
 
-def sync_cancel_sale_to_state(sale_id: str, updated_products: list[dict], cash: list[dict]) -> tuple[dict | None, list[dict]]:
+def sync_cancel_sale_to_state(
+    sale_id: str,
+    updated_products: list[dict],
+    cash: list[dict],
+    sale_items: list[dict] | None = None,
+) -> tuple[dict | None, list[dict], list[dict]]:
     state, _ = read_state()
+    reserved = conditional_reserved_quantities(state)
     sale = None
     for item in state.get("sales", []):
         if item.get("id") == sale_id:
@@ -2557,18 +15116,34 @@ def sync_cancel_sale_to_state(sale_id: str, updated_products: list[dict], cash: 
             receivable["updatedAt"] = utc_now()
             changed_receivables.append(receivable)
     state["cash"] = [*cash, *state.get("cash", [])]
-    write_state(state)
-    return sale, changed_receivables
-
-
-def sync_return_to_state(return_doc: dict, updated_products: list[dict]) -> None:
-    state, _ = read_state()
-    updated_by_id = {product["id"]: product for product in updated_products}
-    state["products"] = [updated_by_id.get(product.get("id"), product) for product in state.get("products", [])]
-    known_product_ids = {product.get("id") for product in state["products"]}
-    state["products"].extend(product for product in updated_products if product["id"] not in known_product_ids)
-    state["returns"] = [return_doc, *[item for item in state.get("returns", []) if item.get("id") != return_doc["id"]]]
-    write_state(state)
+    quantities: dict[str, int] = {}
+    source_items = (sale or {}).get("items", []) or sale_items or []
+    for item in source_items:
+        product_id = str(item.get("productId", "") or "")
+        quantities[product_id] = quantities.get(product_id, 0) + int(
+            item.get("quantity", 0) or 0
+        )
+    user = session.get("user") or {}
+    specs = []
+    for product_id, quantity in quantities.items():
+        product = updated_by_id[product_id]
+        after = int(product.get("stock", 0) or 0)
+        reserved_quantity = int(reserved.get(product_id, 0) or 0)
+        specs.append({
+            "product_id": product_id,
+            "movement_type": "sale_cancellation",
+            "real_before": after - quantity,
+            "real_after": after,
+            "reserved_before": reserved_quantity,
+            "reserved_after": reserved_quantity,
+            "reference_type": "sale_cancellation",
+            "reference_id": sale_id,
+            "source_key": f"sale_cancellation:{sale_id}:{product_id}",
+            "created_at": utc_now(),
+            "user": user,
+        })
+    movements = persist_state_with_inventory_specs(state, specs)
+    return sale, changed_receivables, movements
 
 
 def normalize_cash_movement_payload(payload: dict) -> dict:
@@ -2580,15 +15155,37 @@ def normalize_cash_movement_payload(payload: dict) -> dict:
         "method": str(payload.get("method", "") or "").strip(),
         "amount": money_round(payload.get("amount", 0)),
         "refId": str(payload.get("refId", "") or "").strip(),
+        "expenseCategoryId": str(payload.get("expenseCategoryId", "") or "").strip(),
+        "originType": str(
+            payload.get("originType") or payload.get("type") or "manual"
+        ).strip(),
+        "originId": str(
+            payload.get("originId") or payload.get("refId") or ""
+        ).strip(),
+        "userId": str(payload.get("userId", "") or "").strip(),
+        "userName": str(payload.get("userName", "") or "").strip(),
+        "resultingBalance": payload.get("resultingBalance"),
+        "reversalOfId": str(payload.get("reversalOfId", "") or "").strip(),
+        "reversedAt": str(payload.get("reversedAt", "") or "").strip(),
+        "idempotencyKey": str(
+            payload.get("idempotencyKey", "") or ""
+        ).strip(),
+        "requestHash": str(payload.get("requestHash", "") or "").strip(),
+        "responseJson": str(payload.get("responseJson", "") or "").strip(),
         "createdAt": str(payload.get("createdAt") or utc_now()),
     }
 
 
 def payable_from_row(row: sqlite3.Row | dict) -> dict:
+    keys = row.keys()
     return {
         "id": row["id"],
         "supplier": row["supplier"] or "",
+        "supplierId": row["supplierId"] or "" if "supplierId" in keys else "",
         "category": row["category"] or "",
+        "expenseCategoryId": (
+            row["expenseCategoryId"] or "" if "expenseCategoryId" in keys else ""
+        ),
         "amount": money_round(row["amount"]),
         "issueDate": row["issueDate"] or "",
         "dueDate": row["dueDate"] or "",
@@ -2596,6 +15193,39 @@ def payable_from_row(row: sqlite3.Row | dict) -> dict:
         "paidAmount": money_round(row["paidAmount"]),
         "fee": money_round(row["fee"]),
         "discount": money_round(row["discount"] if "discount" in row.keys() else 0),
+        "interest": money_round(row["interest"] if "interest" in keys else 0),
+        "fine": money_round(row["fine"] if "fine" in keys else 0),
+        "openAmount": (
+            money_round(row["openAmount"])
+            if "openAmount" in keys and row["openAmount"] is not None
+            else None
+        ),
+        "recurring": bool(row["recurring"]) if "recurring" in keys else False,
+        "recurringDay": (
+            int(row["recurringDay"])
+            if "recurringDay" in keys and row["recurringDay"] is not None
+            else None
+        ),
+        "recurringSeriesId": (
+            row["recurringSeriesId"] or ""
+            if "recurringSeriesId" in keys
+            else ""
+        ),
+        "recurrenceMonth": (
+            row["recurrenceMonth"] or "" if "recurrenceMonth" in keys else ""
+        ),
+        "generatedFromId": (
+            row["generatedFromId"] or "" if "generatedFromId" in keys else ""
+        ),
+        "version": int(row["version"] or 0) if "version" in keys else 0,
+        "cancelledAt": (
+            row["cancelledAt"] or "" if "cancelledAt" in keys else ""
+        ),
+        "cancellationReason": (
+            row["cancellationReason"] or ""
+            if "cancellationReason" in keys
+            else ""
+        ),
         "status": row["status"] or "pending",
         "paidAt": row["paidAt"] or "",
         "createdAt": row["createdAt"] or utc_now(),
@@ -2606,10 +15236,24 @@ def payable_from_row(row: sqlite3.Row | dict) -> dict:
 def normalize_payable_payload(payload: dict, existing: dict | None = None) -> dict:
     now = utc_now()
     existing = existing or {}
+    legacy_fee = money_round(payload.get("fee", existing.get("fee", 0)))
+    interest_value = payload.get("interest")
+    if interest_value is None:
+        interest_value = (
+            legacy_fee
+            if "fee" in payload
+            else existing.get("interest", legacy_fee)
+        )
     return {
         "id": str(payload.get("id") or existing.get("id") or os.urandom(16).hex()).strip(),
         "supplier": str(payload.get("supplier", existing.get("supplier", "")) or "").strip(),
+        "supplierId": str(
+            payload.get("supplierId", existing.get("supplierId", "")) or ""
+        ).strip(),
         "category": str(payload.get("category", existing.get("category", "")) or "").strip(),
+        "expenseCategoryId": str(
+            payload.get("expenseCategoryId", existing.get("expenseCategoryId", "")) or ""
+        ).strip(),
         "amount": money_round(payload.get("amount", existing.get("amount", 0))),
         "issueDate": str(payload.get("issueDate", existing.get("issueDate", "")) or "").strip(),
         "dueDate": str(payload.get("dueDate", existing.get("dueDate", "")) or "").strip(),
@@ -2617,6 +15261,36 @@ def normalize_payable_payload(payload: dict, existing: dict | None = None) -> di
         "paidAmount": money_round(payload.get("paidAmount", existing.get("paidAmount", 0))),
         "fee": money_round(payload.get("fee", existing.get("fee", 0))),
         "discount": money_round(payload.get("discount", existing.get("discount", 0))),
+        "interest": money_round(interest_value),
+        "fine": money_round(payload.get("fine", existing.get("fine", 0))),
+        "openAmount": payload.get(
+            "openAmount", existing.get("openAmount")
+        ),
+        "recurring": bool(
+            payload.get("recurring", existing.get("recurring", False))
+        ),
+        "recurringDay": payload.get(
+            "recurringDay", existing.get("recurringDay")
+        ),
+        "recurringSeriesId": str(
+            payload.get(
+                "recurringSeriesId", existing.get("recurringSeriesId", "")
+            )
+            or ""
+        ).strip(),
+        "recurrenceMonth": str(
+            payload.get(
+                "recurrenceMonth", existing.get("recurrenceMonth", "")
+            )
+            or ""
+        ).strip(),
+        "generatedFromId": str(
+            payload.get(
+                "generatedFromId", existing.get("generatedFromId", "")
+            )
+            or ""
+        ).strip(),
+        "version": int(existing.get("version", 0) or 0),
         "status": str(payload.get("status", existing.get("status", "pending")) or "pending").strip(),
         "paidAt": str(payload.get("paidAt", existing.get("paidAt", "")) or "").strip(),
         "createdAt": str(payload.get("createdAt", existing.get("createdAt", now)) or now),
@@ -2625,7 +15299,7 @@ def normalize_payable_payload(payload: dict, existing: dict | None = None) -> di
 
 
 def validate_payable(payable: dict) -> str | None:
-    if not payable["category"]:
+    if not payable["category"] and not payable["expenseCategoryId"]:
         return "Categoria é obrigatória."
     if payable["amount"] <= 0:
         return "Valor deve ser maior que zero."
@@ -2634,6 +15308,29 @@ def validate_payable(payable: dict) -> str | None:
     if payable["status"] not in {"pending", "paid", "cancelled"}:
         return "Status inválido."
     return None
+
+
+def resolve_payable_catalog_links(conn, payable: dict, store_id: str = "matriz") -> dict:
+    if payable.get("supplierId"):
+        supplier = conn.execute(
+            "SELECT id, name, status FROM suppliers WHERE store_id = ? AND id = ?",
+            (store_id, payable["supplierId"]),
+        ).fetchone()
+        if not supplier:
+            raise CatalogOperationError("Fornecedor não encontrado.")
+        if supplier["status"] != "active":
+            raise CatalogOperationError("Fornecedor desativado não pode ser utilizado em nova conta.")
+        payable["supplier"] = supplier["name"]
+    if payable.get("expenseCategoryId"):
+        category = catalog_item_reference(
+            conn, "expense-categories", payable["expenseCategoryId"], store_id
+        )
+        if not category:
+            raise CatalogOperationError("Categoria de despesa não encontrada.")
+        if category["status"] != "active":
+            raise CatalogOperationError("Categoria de despesa desativada não pode ser utilizada.")
+        payable["category"] = category["name"]
+    return payable
 
 
 def payable_total_due(payable: dict) -> float:
@@ -2664,7 +15361,976 @@ def date_span(end_date: str, days: int) -> list[str]:
 def receivable_open_amount(receivable: dict) -> float:
     if receivable.get("status") == "cancelled":
         return 0
-    return max(0, money_round(float(receivable.get("amount") or 0) - float(receivable.get("received") or 0)))
+    if receivable.get("openAmount") is not None:
+        return max(0, money_round(receivable.get("openAmount")))
+    return max(
+        0,
+        money_round(
+            float(receivable.get("amount") or 0)
+            - float(receivable.get("received") or 0)
+            - float(receivable.get("discountTotal") or 0)
+        ),
+    )
+
+
+class ReceivableOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def receivable_operation_money(value, label: str) -> float:
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ReceivableOperationError(f"{label} inválido.") from error
+    if not math.isfinite(parsed) or parsed < 0:
+        raise ReceivableOperationError(f"{label} inválido.")
+    return money_round(parsed)
+
+
+def receivable_request_hash(payload: dict) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def receivable_from_row(row) -> dict:
+    open_amount = (
+        float(row["openAmount"])
+        if row["openAmount"] is not None
+        else max(
+            0,
+            float(row["amount"] or 0)
+            - float(row["received"] or 0)
+            - float(row["discountTotal"] or 0),
+        )
+    )
+    return {
+        "id": row["id"],
+        "saleId": row["saleId"] or "",
+        "salePaymentId": row["salePaymentId"] or "",
+        "customerId": row["customerId"] or "",
+        "customerName": row["customerName"] or "",
+        "method": row["method"] or "",
+        "amount": money_round(row["amount"]),
+        "received": money_round(row["received"]),
+        "openAmount": money_round(open_amount),
+        "returnReductionTotal": money_round(
+            row["returnReductionTotal"]
+            if "returnReductionTotal" in row.keys()
+            else 0
+        ),
+        "differenceAmount": money_round(
+            row["differenceAmount"] if "differenceAmount" in row.keys() else 0
+        ),
+        "discountTotal": money_round(row["discountTotal"]),
+        "interestTotal": money_round(row["interestTotal"]),
+        "fineTotal": money_round(row["fineTotal"]),
+        "additionTotal": money_round(row["additionTotal"]),
+        "status": row["status"] or "open",
+        "dueDate": row["dueDate"] or "",
+        "originalDueDate": row["originalDueDate"] or row["dueDate"] or "",
+        "paidAt": row["paidAt"] or "",
+        "lastPaymentAt": row["lastPaymentAt"] or "",
+        "installment": row["installment"] or "",
+        "cardModalityId": row["cardModalityId"] or "",
+        "cardModalityVersionId": row["cardModalityVersionId"] or "",
+        "modalityName": row["modalityName"] or "",
+        "cardInstallments": int(row["cardInstallments"] or 1),
+        "taxPercent": money_round(row["taxPercent"]),
+        "receivableDays": int(row["receivableDays"] or 0),
+        "grossAmount": money_round(row["grossAmount"]),
+        "feeAmount": money_round(row["feeAmount"]),
+        "netAmount": money_round(row["netAmount"]),
+        "version": int(row["version"] or 0),
+        "createdAt": row["createdAt"],
+        "updatedAt": row["updatedAt"],
+    }
+
+
+RECEIVABLE_SELECT = """
+    SELECT id, sale_id AS "saleId", sale_payment_id AS "salePaymentId",
+           customer_id AS "customerId", customer_name AS "customerName",
+           method, amount, received, open_amount AS "openAmount",
+           return_reduction_total AS "returnReductionTotal",
+           difference_amount AS "differenceAmount",
+           discount_total AS "discountTotal",
+           interest_total AS "interestTotal", fine_total AS "fineTotal",
+           addition_total AS "additionTotal", status,
+           due_date AS "dueDate", original_due_date AS "originalDueDate",
+           paid_at AS "paidAt", last_payment_at AS "lastPaymentAt",
+           installment, card_modality_id AS "cardModalityId",
+           card_modality_version_id AS "cardModalityVersionId",
+           modality_name AS "modalityName",
+           card_installments AS "cardInstallments",
+           tax_percent AS "taxPercent", receivable_days AS "receivableDays",
+           gross_amount AS "grossAmount", fee_amount AS "feeAmount",
+           net_amount AS "netAmount", version,
+           created_at AS "createdAt", updated_at AS "updatedAt"
+    FROM receivables
+"""
+
+
+def replace_receivables_in_state(
+    state: dict,
+    changed: list[dict],
+    created: list[dict] | None = None,
+) -> None:
+    changed_by_id = {str(item["id"]): item for item in changed}
+    current = [
+        changed_by_id.pop(str(item.get("id", "")), item)
+        for item in (state.get("receivables") or [])
+    ]
+    current.extend(changed_by_id.values())
+    state["receivables"] = [*(created or []), *current]
+
+
+def create_credit_card_receivable(
+    conn,
+    *,
+    source: dict,
+    method: str,
+    gross_amount: float,
+    modality: dict,
+    created_at: str,
+    store_id: str,
+) -> dict | None:
+    if gross_amount <= 0:
+        return None
+    fee = money_round(gross_amount * modality["taxPercent"] / 100)
+    net = money_round(gross_amount - fee)
+    operation_day = sale_operational_date(created_at)
+    due_date = (
+        operation_day + timedelta(days=modality["receivableDays"])
+    ).isoformat()
+    receivable = {
+        "id": os.urandom(16).hex(),
+        "salePaymentId": "",
+        "saleId": source.get("saleId", ""),
+        "customerId": source.get("customerId", ""),
+        "customerName": source.get("customerName", ""),
+        "method": method,
+        "amount": net,
+        "received": 0.0,
+        "openAmount": net,
+        "discountTotal": 0.0,
+        "interestTotal": 0.0,
+        "fineTotal": 0.0,
+        "additionTotal": 0.0,
+        "status": "cardPending",
+        "dueDate": due_date,
+        "originalDueDate": due_date,
+        "paidAt": "",
+        "lastPaymentAt": "",
+        "installment": f"origin:{source.get('id', '')}",
+        "cardModalityId": modality["cardModalityId"],
+        "cardModalityVersionId": modality["id"],
+        "modalityName": modality["name"],
+        "cardInstallments": modality["installments"],
+        "taxPercent": modality["taxPercent"],
+        "receivableDays": modality["receivableDays"],
+        "grossAmount": gross_amount,
+        "feeAmount": fee,
+        "netAmount": net,
+        "version": 0,
+        "createdAt": created_at,
+        "updatedAt": created_at,
+    }
+    conn.execute(
+        """
+        INSERT INTO receivables (
+            id, store_id, sale_id, customer_id, customer_name, method,
+            amount, received, status, due_date, paid_at, last_payment_at,
+            installment, created_at, updated_at, sale_payment_id,
+            card_modality_id, card_modality_version_id, modality_name,
+            card_installments, tax_percent, receivable_days, gross_amount,
+            fee_amount, net_amount, original_due_date, open_amount,
+            discount_total, interest_total, fine_total, addition_total, version
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'cardPending', ?, NULL, NULL, ?, ?, ?,
+                NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0)
+        """,
+        (
+            receivable["id"],
+            store_id,
+            receivable["saleId"] or None,
+            receivable["customerId"] or None,
+            receivable["customerName"],
+            method,
+            net,
+            due_date,
+            receivable["installment"],
+            created_at,
+            created_at,
+            receivable["cardModalityId"],
+            receivable["cardModalityVersionId"],
+            receivable["modalityName"],
+            receivable["cardInstallments"],
+            receivable["taxPercent"],
+            receivable["receivableDays"],
+            gross_amount,
+            fee,
+            net,
+            due_date,
+            net,
+        ),
+    )
+    return receivable
+
+
+def persist_receivable_payment(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ReceivableOperationError("Envie um JSON válido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ReceivableOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    customer_id = str(payload.get("customerId", "") or "").strip()
+    method = str(payload.get("method", "") or "").strip()
+    if method not in {"cash", "pix", "debit", "credit"}:
+        raise ReceivableOperationError("Forma de pagamento inválida.")
+    raw_rows = payload.get("payments")
+    if not customer_id or not isinstance(raw_rows, list) or not raw_rows:
+        raise ReceivableOperationError("Informe cliente e parcelas.")
+    selections = []
+    seen = set()
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            raise ReceivableOperationError("Parcela inválida.")
+        receivable_id = str(raw.get("receivableId", "") or "").strip()
+        amount = receivable_operation_money(raw.get("amount"), "Valor da parcela")
+        if not receivable_id or receivable_id in seen or amount <= 0:
+            raise ReceivableOperationError("Parcela inválida.")
+        seen.add(receivable_id)
+        selections.append((receivable_id, amount))
+
+    settlement_total = money_round(sum(amount for _, amount in selections))
+    discount_type = str(payload.get("discountType", "value") or "value").strip()
+    discount_input = receivable_operation_money(
+        payload.get("discountValue", 0),
+        "Desconto",
+    )
+    if discount_type == "percent":
+        if discount_input > 100:
+            raise ReceivableOperationError("Percentual de desconto inválido.")
+        discount_total = money_round(settlement_total * discount_input / 100)
+    elif discount_type == "value":
+        discount_total = discount_input
+    else:
+        raise ReceivableOperationError("Tipo de desconto inválido.")
+    interest = receivable_operation_money(payload.get("interest", 0), "Juros")
+    fine = receivable_operation_money(payload.get("fine", 0), "Multa")
+    addition = receivable_operation_money(
+        payload.get("addition", 0),
+        "Acréscimo",
+    )
+    if discount_total > settlement_total:
+        raise ReceivableOperationError(
+            "O desconto não pode tornar o recebimento negativo.",
+            409,
+            "DISCOUNT_EXCEEDS_BALANCE",
+        )
+    actual_total = money_round(
+        settlement_total - discount_total + interest + fine + addition
+    )
+    request_hash = receivable_request_hash(payload)
+    created_at = utc_now()
+    note = str(payload.get("description", "") or "").strip()
+    user = session.get("user") or {}
+
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM receivable_payments
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise ReceivableOperationError(
+                    "A chave de idempotência já foi utilizada com dados diferentes.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                return json.loads(replay["responseJson"]), True
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ReceivableOperationError(
+                    "O recebimento histórico está inconsistente.",
+                    409,
+                    "PAYMENT_RESPONSE_INCONSISTENT",
+                ) from error
+
+        customer = conn.execute(
+            f"""
+            SELECT id, name
+            FROM customers
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, customer_id),
+        ).fetchone()
+        if not customer:
+            raise ReceivableOperationError("Cliente não encontrado.", 404)
+        placeholders = ",".join("?" for _ in selections)
+        rows = conn.execute(
+            f"""
+            {RECEIVABLE_SELECT}
+            WHERE store_id = ? AND id IN ({placeholders}){lock_clause}
+            """,
+            (store_id, *(item[0] for item in selections)),
+        ).fetchall()
+        rows_by_id = {str(row["id"]): row for row in rows}
+        if len(rows_by_id) != len(selections):
+            raise ReceivableOperationError(
+                "Uma ou mais parcelas não foram encontradas.",
+                404,
+            )
+        receivables = []
+        for receivable_id, settlement in selections:
+            receivable = receivable_from_row(rows_by_id[receivable_id])
+            if (
+                receivable["customerId"] != customer_id
+                or receivable["method"] != "storeCredit"
+                or receivable["status"] == "cancelled"
+            ):
+                raise ReceivableOperationError(
+                    "Parcela inválida para este cliente."
+                )
+            if settlement > receivable["openAmount"] + 0.01:
+                raise ReceivableOperationError(
+                    "Valor informado maior que o saldo da parcela.",
+                    409,
+                    "PAYMENT_EXCEEDS_BALANCE",
+                )
+            receivables.append(receivable)
+
+        weights = [amount for _, amount in selections]
+        discounts = allocate_sale_amount(discount_total, weights)
+        interests = allocate_sale_amount(interest, weights)
+        fines = allocate_sale_amount(fine, weights)
+        additions = allocate_sale_amount(addition, weights)
+        modality = None
+        if method in {"debit", "credit"} and actual_total > 0:
+            modality_id = str(payload.get("cardModalityId", "") or "").strip()
+            modality = effective_card_modality(
+                conn,
+                modality_id,
+                created_at,
+                store_id,
+            )
+            if (
+                not modality
+                or modality["status"] != "active"
+                or modality["method"] != method
+            ):
+                raise ReceivableOperationError(
+                    "Selecione uma modalidade de cartão ativa e compatível.",
+                    409,
+                    "CARD_MODALITY_UNAVAILABLE",
+                )
+
+        changed = []
+        payment_entries = []
+        first_payment_id = ""
+        for index, receivable in enumerate(receivables):
+            settlement = selections[index][1]
+            discount = discounts[index]
+            principal = money_round(settlement - discount)
+            payment_amount = money_round(
+                principal + interests[index] + fines[index] + additions[index]
+            )
+            new_open = money_round(receivable["openAmount"] - settlement)
+            new_received = money_round(receivable["received"] + principal)
+            status = "paid" if new_open <= 0.01 else "open"
+            payment_id = os.urandom(16).hex()
+            if index == 0:
+                first_payment_id = payment_id
+            payment = {
+                "id": payment_id,
+                "receivableId": receivable["id"],
+                "saleId": receivable["saleId"],
+                "customerId": customer_id,
+                "method": method,
+                "amount": payment_amount,
+                "principalAmount": principal,
+                "settledAmount": settlement,
+                "interestAmount": interests[index],
+                "fineAmount": fines[index],
+                "additionAmount": additions[index],
+                "discountAmount": discount,
+                "userId": str(user.get("id", "") or ""),
+                "userName": str(user.get("name", "") or ""),
+                "createdAt": created_at,
+                "note": note,
+            }
+            conn.execute(
+                """
+                INSERT INTO receivable_payments (
+                    id, store_id, receivable_id, sale_id, customer_id, method,
+                    amount, created_at, note, principal_amount, settled_amount,
+                    interest_amount, fine_amount, addition_amount,
+                    discount_amount, user_id, user_name, idempotency_key,
+                    request_hash, response_json, card_modality_id,
+                    card_modality_version_id, modality_name, tax_percent,
+                    receivable_days, gross_amount, fee_amount, net_amount
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment_id,
+                    store_id,
+                    receivable["id"],
+                    receivable["saleId"] or None,
+                    customer_id,
+                    method,
+                    payment_amount,
+                    created_at,
+                    note or None,
+                    principal,
+                    settlement,
+                    interests[index],
+                    fines[index],
+                    additions[index],
+                    discount,
+                    payment["userId"] or None,
+                    payment["userName"] or None,
+                    key if index == 0 else None,
+                    request_hash if index == 0 else None,
+                    "{}" if index == 0 else None,
+                    modality["cardModalityId"] if modality else None,
+                    modality["id"] if modality else None,
+                    modality["name"] if modality else None,
+                    modality["taxPercent"] if modality else 0,
+                    modality["receivableDays"] if modality else 0,
+                    payment_amount if modality else 0,
+                    money_round(
+                        payment_amount * modality["taxPercent"] / 100
+                    ) if modality else 0,
+                    money_round(
+                        payment_amount
+                        - payment_amount * modality["taxPercent"] / 100
+                    ) if modality else payment_amount,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE receivables
+                SET received = ?, open_amount = ?, discount_total = ?,
+                    interest_total = ?, fine_total = ?, addition_total = ?,
+                    status = ?, paid_at = ?, last_payment_at = ?,
+                    updated_at = ?, version = version + 1
+                WHERE store_id = ? AND id = ?
+                """,
+                (
+                    new_received,
+                    max(0, new_open),
+                    money_round(receivable["discountTotal"] + discount),
+                    money_round(receivable["interestTotal"] + interests[index]),
+                    money_round(receivable["fineTotal"] + fines[index]),
+                    money_round(receivable["additionTotal"] + additions[index]),
+                    status,
+                    created_at if status == "paid" else None,
+                    created_at,
+                    created_at,
+                    store_id,
+                    receivable["id"],
+                ),
+            )
+            updated = {
+                **receivable,
+                "received": new_received,
+                "openAmount": max(0, new_open),
+                "discountTotal": money_round(
+                    receivable["discountTotal"] + discount
+                ),
+                "interestTotal": money_round(
+                    receivable["interestTotal"] + interests[index]
+                ),
+                "fineTotal": money_round(receivable["fineTotal"] + fines[index]),
+                "additionTotal": money_round(
+                    receivable["additionTotal"] + additions[index]
+                ),
+                "status": status,
+                "paidAt": created_at if status == "paid" else "",
+                "lastPaymentAt": created_at,
+                "updatedAt": created_at,
+                "version": receivable["version"] + 1,
+                "payments": [*(receivable.get("payments") or []), payment],
+            }
+            changed.append(updated)
+            payment_entries.append(payment)
+
+        cash = []
+        if method in {"cash", "pix"} and actual_total > 0:
+            source = changed[0]
+            movement = {
+                "id": os.urandom(16).hex(),
+                "direction": "in",
+                "type": "crediario",
+                "description": (
+                    f"Crediário - {customer['name']} - Venda "
+                    f"{source['saleId']} - Parcela {source['installment']} - "
+                    f"{method.upper()}"
+                ),
+                "method": method,
+                "amount": actual_total,
+                "refId": source["id"],
+                "expenseCategoryId": "",
+                "createdAt": created_at,
+            }
+            conn.execute(
+                """
+                INSERT INTO cash_movements (
+                    id, store_id, direction, type, description, method, amount,
+                    ref_id, expense_category_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    movement["id"],
+                    store_id,
+                    movement["direction"],
+                    movement["type"],
+                    movement["description"],
+                    movement["method"],
+                    movement["amount"],
+                    movement["refId"],
+                    created_at,
+                ),
+            )
+            cash.append(movement)
+
+        card_receivables = []
+        if modality and actual_total > 0:
+            card_receivable = create_credit_card_receivable(
+                conn,
+                source=changed[0],
+                method=method,
+                gross_amount=actual_total,
+                modality=modality,
+                created_at=created_at,
+                store_id=store_id,
+            )
+            if card_receivable:
+                card_receivables.append(card_receivable)
+
+        state = locked_app_state(conn)
+        replace_receivables_in_state(state, changed, card_receivables)
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        result = {
+            "receivables": [*changed, *card_receivables],
+            "payments": payment_entries,
+            "cash": cash,
+            "totalReceived": actual_total,
+            "discount": discount_total,
+            "interest": interest,
+            "fine": fine,
+            "addition": addition,
+        }
+        record_audit(
+            "pay",
+            "receivable",
+            customer_id,
+            {
+                "receivableIds": [item["id"] for item in changed],
+                "method": method,
+                "totalReceived": actual_total,
+                "discount": discount_total,
+                "interest": interest,
+                "fine": fine,
+                "addition": addition,
+            },
+            conn,
+        )
+        conn.execute(
+            "UPDATE receivable_payments SET response_json = ? WHERE id = ?",
+            (
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                first_payment_id,
+            ),
+        )
+        persist_product_app_state(conn, state, created_at)
+    return result, False
+
+
+def persist_receivable_renegotiation(
+    receivable_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if not isinstance(payload, dict):
+        raise ReceivableOperationError("Envie um JSON válido.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ReceivableOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    new_due_date = str(payload.get("newDueDate", "") or "").strip()[:10]
+    reason = str(payload.get("reason", "") or "").strip()
+    try:
+        parsed_due_date = date.fromisoformat(new_due_date)
+    except ValueError as error:
+        raise ReceivableOperationError("Novo vencimento inválido.") from error
+    if not reason:
+        raise ReceivableOperationError("Informe o motivo da renegociação.")
+    payment_amount = receivable_operation_money(
+        payload.get("paymentAmount", 0),
+        "Valor pago",
+    )
+    discount = receivable_operation_money(payload.get("discount", 0), "Desconto")
+    interest = receivable_operation_money(payload.get("interest", 0), "Juros")
+    fine = receivable_operation_money(payload.get("fine", 0), "Multa")
+    addition = receivable_operation_money(
+        payload.get("addition", 0),
+        "Acréscimo",
+    )
+    method = str(payload.get("method", "") or "").strip()
+    if payment_amount > 0 and method not in {"cash", "pix", "debit", "credit"}:
+        raise ReceivableOperationError("Forma de pagamento inválida.")
+    request_hash = receivable_request_hash(payload)
+    created_at = utc_now()
+    user = session.get("user") or {}
+
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash", response_json AS "responseJson"
+            FROM receivable_renegotiations
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise ReceivableOperationError(
+                    "A chave de idempotência já foi utilizada com dados diferentes.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            return json.loads(replay["responseJson"]), True
+
+        row = conn.execute(
+            f"""
+            {RECEIVABLE_SELECT}
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, receivable_id),
+        ).fetchone()
+        if not row:
+            raise ReceivableOperationError("Parcela não encontrada.", 404)
+        receivable = receivable_from_row(row)
+        if receivable["method"] != "storeCredit" or receivable["status"] == "cancelled":
+            raise ReceivableOperationError("Parcela não pode ser renegociada.", 409)
+        if receivable["openAmount"] <= 0.01:
+            raise ReceivableOperationError("Parcela já está quitada.", 409)
+        settled = money_round(payment_amount + discount)
+        if settled > receivable["openAmount"] + 0.01:
+            raise ReceivableOperationError(
+                "Pagamento e desconto ultrapassam o saldo da parcela.",
+                409,
+                "RENEGOTIATION_EXCEEDS_BALANCE",
+            )
+        new_open = money_round(
+            receivable["openAmount"] - settled + interest + fine + addition
+        )
+        if new_open < 0:
+            raise ReceivableOperationError(
+                "A renegociação não pode gerar saldo negativo."
+            )
+        if parsed_due_date < sale_operational_date(created_at):
+            raise ReceivableOperationError(
+                "O novo vencimento não pode estar no passado."
+            )
+        modality = None
+        if payment_amount > 0 and method in {"debit", "credit"}:
+            modality = effective_card_modality(
+                conn,
+                str(payload.get("cardModalityId", "") or "").strip(),
+                created_at,
+                store_id,
+            )
+            if (
+                not modality
+                or modality["status"] != "active"
+                or modality["method"] != method
+            ):
+                raise ReceivableOperationError(
+                    "Selecione uma modalidade de cartão ativa e compatível.",
+                    409,
+                    "CARD_MODALITY_UNAVAILABLE",
+                )
+
+        payment = None
+        if payment_amount > 0:
+            payment = {
+                "id": os.urandom(16).hex(),
+                "receivableId": receivable_id,
+                "saleId": receivable["saleId"],
+                "customerId": receivable["customerId"],
+                "method": method,
+                "amount": payment_amount,
+                "principalAmount": payment_amount,
+                "settledAmount": payment_amount,
+                "interestAmount": 0.0,
+                "fineAmount": 0.0,
+                "additionAmount": 0.0,
+                "discountAmount": 0.0,
+                "userId": str(user.get("id", "") or ""),
+                "userName": str(user.get("name", "") or ""),
+                "createdAt": created_at,
+                "note": reason,
+            }
+            conn.execute(
+                """
+                INSERT INTO receivable_payments (
+                    id, store_id, receivable_id, sale_id, customer_id, method,
+                    amount, created_at, note, principal_amount, settled_amount,
+                    interest_amount, fine_amount, addition_amount,
+                    discount_amount, user_id, user_name, card_modality_id,
+                    card_modality_version_id, modality_name, tax_percent,
+                    receivable_days, gross_amount, fee_amount, net_amount
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payment["id"],
+                    store_id,
+                    receivable_id,
+                    receivable["saleId"] or None,
+                    receivable["customerId"] or None,
+                    method,
+                    payment_amount,
+                    created_at,
+                    reason,
+                    payment_amount,
+                    payment_amount,
+                    payment["userId"] or None,
+                    payment["userName"] or None,
+                    modality["cardModalityId"] if modality else None,
+                    modality["id"] if modality else None,
+                    modality["name"] if modality else None,
+                    modality["taxPercent"] if modality else 0,
+                    modality["receivableDays"] if modality else 0,
+                    payment_amount if modality else 0,
+                    money_round(
+                        payment_amount * modality["taxPercent"] / 100
+                    ) if modality else 0,
+                    money_round(
+                        payment_amount
+                        - payment_amount * modality["taxPercent"] / 100
+                    ) if modality else payment_amount,
+                ),
+            )
+
+        status = "paid" if new_open <= 0.01 else "open"
+        conn.execute(
+            """
+            UPDATE receivables
+            SET received = ?, open_amount = ?, discount_total = ?,
+                interest_total = ?, fine_total = ?, addition_total = ?,
+                due_date = ?, original_due_date = COALESCE(original_due_date, due_date),
+                status = ?, paid_at = ?, last_payment_at = ?,
+                updated_at = ?, version = version + 1
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                money_round(receivable["received"] + payment_amount),
+                max(0, new_open),
+                money_round(receivable["discountTotal"] + discount),
+                money_round(receivable["interestTotal"] + interest),
+                money_round(receivable["fineTotal"] + fine),
+                money_round(receivable["additionTotal"] + addition),
+                new_due_date,
+                status,
+                created_at if status == "paid" else None,
+                created_at if payment_amount > 0 else receivable["lastPaymentAt"] or None,
+                created_at,
+                store_id,
+                receivable_id,
+            ),
+        )
+        updated = {
+            **receivable,
+            "received": money_round(receivable["received"] + payment_amount),
+            "openAmount": max(0, new_open),
+            "discountTotal": money_round(receivable["discountTotal"] + discount),
+            "interestTotal": money_round(receivable["interestTotal"] + interest),
+            "fineTotal": money_round(receivable["fineTotal"] + fine),
+            "additionTotal": money_round(receivable["additionTotal"] + addition),
+            "dueDate": new_due_date,
+            "status": status,
+            "paidAt": created_at if status == "paid" else "",
+            "lastPaymentAt": (
+                created_at if payment_amount > 0 else receivable["lastPaymentAt"]
+            ),
+            "updatedAt": created_at,
+            "version": receivable["version"] + 1,
+        }
+        if payment:
+            updated["payments"] = [*(receivable.get("payments") or []), payment]
+
+        cash = []
+        if payment_amount > 0 and method in {"cash", "pix"}:
+            movement = {
+                "id": os.urandom(16).hex(),
+                "direction": "in",
+                "type": "crediario",
+                "description": (
+                    f"Renegociação - {receivable['customerName']} - Venda "
+                    f"{receivable['saleId']} - Parcela {receivable['installment']}"
+                ),
+                "method": method,
+                "amount": payment_amount,
+                "refId": receivable_id,
+                "expenseCategoryId": "",
+                "createdAt": created_at,
+            }
+            conn.execute(
+                """
+                INSERT INTO cash_movements (
+                    id, store_id, direction, type, description, method, amount,
+                    ref_id, expense_category_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                """,
+                (
+                    movement["id"],
+                    store_id,
+                    "in",
+                    "crediario",
+                    movement["description"],
+                    method,
+                    payment_amount,
+                    receivable_id,
+                    created_at,
+                ),
+            )
+            cash.append(movement)
+        card_receivables = []
+        if payment_amount > 0 and modality:
+            card_receivable = create_credit_card_receivable(
+                conn,
+                source=receivable,
+                method=method,
+                gross_amount=payment_amount,
+                modality=modality,
+                created_at=created_at,
+                store_id=store_id,
+            )
+            if card_receivable:
+                card_receivables.append(card_receivable)
+
+        renegotiation_id = os.urandom(16).hex()
+        result = {
+            "receivable": updated,
+            "payment": payment,
+            "cash": cash,
+            "cardReceivables": card_receivables,
+            "renegotiation": {
+                "id": renegotiation_id,
+                "receivableId": receivable_id,
+                "saleId": receivable["saleId"],
+                "customerId": receivable["customerId"],
+                "previousDueDate": receivable["dueDate"],
+                "newDueDate": new_due_date,
+                "previousOpenAmount": receivable["openAmount"],
+                "newOpenAmount": max(0, new_open),
+                "paymentAmount": payment_amount,
+                "settledAmount": settled,
+                "interestAmount": interest,
+                "fineAmount": fine,
+                "additionAmount": addition,
+                "discountAmount": discount,
+                "method": method,
+                "paymentId": payment["id"] if payment else "",
+                "reason": reason,
+                "userId": str(user.get("id", "") or ""),
+                "userName": str(user.get("name", "") or ""),
+                "createdAt": created_at,
+            },
+        }
+        conn.execute(
+            """
+            INSERT INTO receivable_renegotiations (
+                id, store_id, receivable_id, sale_id, customer_id,
+                previous_due_date, new_due_date, previous_open_amount,
+                new_open_amount, payment_amount, settled_amount,
+                interest_amount, fine_amount, addition_amount, discount_amount,
+                method, payment_id, reason, user_id, user_name,
+                idempotency_key, request_hash, response_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?)
+            """,
+            (
+                renegotiation_id,
+                store_id,
+                receivable_id,
+                receivable["saleId"] or None,
+                receivable["customerId"] or None,
+                receivable["dueDate"],
+                new_due_date,
+                receivable["openAmount"],
+                max(0, new_open),
+                payment_amount,
+                settled,
+                interest,
+                fine,
+                addition,
+                discount,
+                method or None,
+                payment["id"] if payment else None,
+                reason,
+                user.get("id", "") or None,
+                user.get("name", "") or None,
+                key,
+                request_hash,
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                created_at,
+            ),
+        )
+        state = locked_app_state(conn)
+        replace_receivables_in_state(state, [updated], card_receivables)
+        state["cash"] = [*cash, *(state.get("cash") or [])]
+        record_audit(
+            "renegotiate",
+            "receivable",
+            receivable_id,
+            {
+                "previousDueDate": receivable["dueDate"],
+                "newDueDate": new_due_date,
+                "previousOpenAmount": receivable["openAmount"],
+                "newOpenAmount": max(0, new_open),
+            },
+            conn,
+        )
+        persist_product_app_state(conn, state, created_at)
+    return result, False
 
 
 def payable_dashboard_status(payable: dict, today: str) -> str:
@@ -2676,6 +16342,1123 @@ def payable_dashboard_status(payable: dict, today: str) -> str:
     if due_date and due_date < today:
         return "overdue"
     return "pending"
+
+
+ALERT_PRIORITY_ORDER = {"critical": 0, "attention": 1, "informational": 2}
+ALERT_MODULE_LABELS = {
+    "store_credit": "Crediário",
+    "conditional": "Condicionais",
+    "payable": "Contas a pagar",
+    "inventory": "Estoque",
+}
+
+
+class DashboardOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def operational_today() -> date:
+    return datetime.now(STORE_TIMEZONE).date()
+
+
+def alert_public_id(logical_key: str) -> str:
+    return hashlib.sha256(logical_key.encode("utf-8")).hexdigest()[:32]
+
+
+def active_operational_alerts(conn, store_id: str = "matriz") -> list[dict]:
+    today = operational_today()
+    alerts: list[dict] = []
+
+    overdue_credit_rows = conn.execute(
+        """
+        SELECT customer_id AS "customerId",
+               MAX(customer_name) AS "customerName",
+               COUNT(*) AS installments,
+               SUM(open_amount) AS balance,
+               MIN(due_date) AS "oldestDueDate"
+        FROM receivables
+        WHERE store_id = ?
+          AND method = 'storeCredit'
+          AND status <> 'cancelled'
+          AND COALESCE(open_amount, amount - received - discount_total) > 0.01
+          AND due_date IS NOT NULL
+          AND due_date < ?
+          AND customer_id IS NOT NULL
+        GROUP BY customer_id
+        """,
+        (store_id, today.isoformat()),
+    ).fetchall()
+    for row in overdue_credit_rows:
+        customer_id = str(row["customerId"])
+        oldest_due = report_date_of(row["oldestDueDate"])
+        if not oldest_due:
+            continue
+        days = max(1, (today - oldest_due).days)
+        logical_key = f"store_credit_overdue:{customer_id}:{oldest_due.isoformat()}"
+        alerts.append({
+            "id": alert_public_id(logical_key),
+            "type": "store_credit_overdue",
+            "module": "store_credit",
+            "moduleLabel": ALERT_MODULE_LABELS["store_credit"],
+            "priority": "critical",
+            "title": "Crediário atrasado",
+            "message": (
+                f"{row['customerName'] or 'Cliente'} possui "
+                f"{int(row['installments'] or 0)} parcela(s) vencida(s)."
+            ),
+            "entityId": customer_id,
+            "entityNumber": str(row["customerName"] or ""),
+            "customerName": str(row["customerName"] or ""),
+            "amount": money_round(row["balance"]),
+            "count": int(row["installments"] or 0),
+            "days": days,
+            "startedAt": oldest_due.isoformat(),
+            "action": {"tab": "crediario", "label": "Ver crediário", "customerId": customer_id},
+        })
+
+    conditional_rows = conn.execute(
+        """
+        SELECT conditional.id, conditional.conditional_number AS "number",
+               conditional.customer_id AS "customerId",
+               conditional.customer_name AS "customerName",
+               conditional.expected_return_date AS "dueDate",
+               conditional.checked_out_at AS "checkedOutAt",
+               COALESCE(SUM(
+                   item.original_quantity
+                   - item.returned_quantity
+                   - item.sold_quantity
+               ), 0) AS pending
+        FROM conditionals conditional
+        JOIN conditional_items item ON item.conditional_id = conditional.id
+        WHERE conditional.store_id = ?
+          AND conditional.status = 'open'
+          AND conditional.expected_return_date < ?
+        GROUP BY conditional.id, conditional.conditional_number,
+                 conditional.customer_id, conditional.customer_name,
+                 conditional.expected_return_date, conditional.checked_out_at
+        HAVING COALESCE(SUM(
+            item.original_quantity - item.returned_quantity - item.sold_quantity
+        ), 0) > 0
+        """,
+        (store_id, today.isoformat()),
+    ).fetchall()
+    for row in conditional_rows:
+        due = report_date_of(row["dueDate"])
+        if not due:
+            continue
+        conditional_id = str(row["id"])
+        logical_key = f"conditional_overdue:{conditional_id}"
+        alerts.append({
+            "id": alert_public_id(logical_key),
+            "type": "conditional_overdue",
+            "module": "conditional",
+            "moduleLabel": ALERT_MODULE_LABELS["conditional"],
+            "priority": "critical",
+            "title": "Condicional atrasado",
+            "message": (
+                f"Condicional {int(row['number'] or 0):06d} de "
+                f"{row['customerName'] or 'Cliente'} está atrasado."
+            ),
+            "entityId": conditional_id,
+            "entityNumber": f"COND{int(row['number'] or 0):06d}",
+            "customerName": str(row["customerName"] or ""),
+            "count": int(row["pending"] or 0),
+            "days": max(1, (today - due).days),
+            "startedAt": due.isoformat(),
+            "action": {
+                "tab": "venda",
+                "subtab": "conditional",
+                "label": "Ver condicional",
+                "conditionalId": conditional_id,
+            },
+        })
+
+    payable_rows = conn.execute(
+        """
+        SELECT id, supplier, category, due_date AS "dueDate",
+               COALESCE(open_amount, amount + interest + fine - discount - paid_amount) AS balance
+        FROM payables
+        WHERE store_id = ?
+          AND status <> 'cancelled'
+          AND COALESCE(open_amount, amount + interest + fine - discount - paid_amount) > 0.01
+          AND due_date <= ?
+        """,
+        (store_id, today.isoformat()),
+    ).fetchall()
+    for row in payable_rows:
+        due = report_date_of(row["dueDate"])
+        if not due:
+            continue
+        payable_id = str(row["id"])
+        overdue = due < today
+        alert_type = "payable_overdue" if overdue else "payable_due_today"
+        logical_key = f"{alert_type}:{payable_id}:{due.isoformat()}"
+        alerts.append({
+            "id": alert_public_id(logical_key),
+            "type": alert_type,
+            "module": "payable",
+            "moduleLabel": ALERT_MODULE_LABELS["payable"],
+            "priority": "critical" if overdue else "attention",
+            "title": "Conta vencida" if overdue else "Conta vence hoje",
+            "message": str(row["supplier"] or row["category"] or "Conta a pagar"),
+            "entityId": payable_id,
+            "entityNumber": payable_id,
+            "amount": money_round(row["balance"]),
+            "days": max(0, (today - due).days),
+            "startedAt": due.isoformat(),
+            "action": {"tab": "contas", "label": "Ver conta", "payableId": payable_id},
+        })
+
+    reserved = relational_reserved_stock(conn, store_id)
+    product_rows = conn.execute(
+        """
+        SELECT id, barcode, name, brand_name AS brand, size, color,
+               stock, cost, created_at AS "createdAt",
+               stock_entered_at AS "stockEnteredAt"
+        FROM products
+        WHERE store_id = ? AND active = 1
+        ORDER BY LOWER(name), id
+        """,
+        (store_id,),
+    ).fetchall()
+    movement_rows = conn.execute(
+        """
+        SELECT product_id AS "productId", id, created_at AS "createdAt"
+        FROM inventory_movements
+        WHERE store_id = ?
+        ORDER BY created_at DESC, id DESC
+        """,
+        (store_id,),
+    ).fetchall()
+    latest_movement: dict[str, dict] = {}
+    for movement in movement_rows:
+        latest_movement.setdefault(str(movement["productId"]), dict(movement))
+    for row in product_rows:
+        product_id = str(row["id"])
+        available = max(0, int(row["stock"] or 0) - int(reserved.get(product_id, 0)))
+        if available != 1:
+            continue
+        movement = latest_movement.get(product_id, {})
+        occurrence = (
+            str(movement.get("id") or "")
+            or str(row["stockEnteredAt"] or "")
+            or str(row["createdAt"] or "")
+            or "legacy"
+        )
+        logical_key = f"last_available_unit:{product_id}:{occurrence}"
+        started_at = (
+            report_date_of(movement.get("createdAt"))
+            or report_date_of(row["stockEnteredAt"])
+            or report_date_of(row["createdAt"])
+            or today
+        )
+        details = [
+            str(row["barcode"] or product_id),
+            str(row["brand"] or ""),
+            str(row["size"] or ""),
+            str(row["color"] or ""),
+        ]
+        alerts.append({
+            "id": alert_public_id(logical_key),
+            "type": "last_available_unit",
+            "module": "inventory",
+            "moduleLabel": ALERT_MODULE_LABELS["inventory"],
+            "priority": "attention",
+            "title": "Última unidade disponível",
+            "message": (
+                f"{row['name'] or 'Produto'} — "
+                f"{' | '.join(item for item in details if item)}"
+            ),
+            "entityId": product_id,
+            "entityNumber": str(row["barcode"] or product_id),
+            "brand": str(row["brand"] or ""),
+            "size": str(row["size"] or ""),
+            "color": str(row["color"] or ""),
+            "count": 1,
+            "days": max(0, (today - started_at).days),
+            "startedAt": started_at.isoformat(),
+            "action": {"tab": "estoque", "label": "Ver produto", "productId": product_id},
+        })
+    return alerts
+
+
+def apply_alert_user_state(
+    conn,
+    alerts: list[dict],
+    user_id: str,
+    store_id: str = "matriz",
+    cleanup: bool = False,
+) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT alert_id AS "alertId", read_at AS "readAt", pinned_at AS "pinnedAt"
+        FROM alert_user_states
+        WHERE store_id = ? AND user_id = ?
+        """,
+        (store_id, user_id),
+    ).fetchall()
+    state_by_id = {str(row["alertId"]): dict(row) for row in rows}
+    active_ids = {str(item["id"]) for item in alerts}
+    if cleanup:
+        for stale_id in set(state_by_id) - active_ids:
+            conn.execute(
+                "DELETE FROM alert_user_states WHERE store_id = ? AND user_id = ? AND alert_id = ?",
+                (store_id, user_id, stale_id),
+            )
+    result = []
+    for alert in alerts:
+        user_state = state_by_id.get(str(alert["id"]), {})
+        result.append({
+            **alert,
+            "read": bool(user_state.get("readAt")),
+            "readAt": user_state.get("readAt") or "",
+            "pinned": bool(user_state.get("pinnedAt")),
+            "pinnedAt": user_state.get("pinnedAt") or "",
+        })
+    result.sort(key=lambda item: (
+        0 if item["pinned"] else 1,
+        ALERT_PRIORITY_ORDER.get(item["priority"], 99),
+        str(item.get("startedAt") or ""),
+        str(item["id"]),
+    ))
+    return result
+
+
+def alert_summary(alerts: list[dict]) -> dict:
+    return {
+        "active": len(alerts),
+        "unread": sum(1 for item in alerts if not item.get("read")),
+        "critical": sum(1 for item in alerts if item.get("priority") == "critical"),
+        "attention": sum(1 for item in alerts if item.get("priority") == "attention"),
+        "pinned": sum(1 for item in alerts if item.get("pinned")),
+    }
+
+
+def alert_query_result(conn, args, user: dict, store_id: str = "matriz") -> dict:
+    alerts = apply_alert_user_state(
+        conn,
+        active_operational_alerts(conn, store_id),
+        str(user.get("id") or ""),
+        store_id,
+        cleanup=True,
+    )
+    term = str(args.get("search", "") or "").strip()
+    priority = str(args.get("priority", "") or "").strip()
+    module = str(args.get("module", "") or "").strip()
+    state = str(args.get("state", "") or "").strip()
+    if len(term) > 160:
+        raise DashboardOperationError("Busca de alertas muito longa.")
+    if priority and priority not in ALERT_PRIORITY_ORDER:
+        raise DashboardOperationError("Prioridade de alerta inválida.")
+    if module and module not in ALERT_MODULE_LABELS:
+        raise DashboardOperationError("Módulo de alerta inválido.")
+    if state and state not in {"read", "unread", "pinned"}:
+        raise DashboardOperationError("Situação de alerta inválida.")
+    filtered = []
+    for alert in alerts:
+        if term and not report_text_matches(
+            term,
+            alert.get("title"),
+            alert.get("message"),
+            alert.get("entityNumber"),
+            alert.get("customerName"),
+        ):
+            continue
+        if priority and alert["priority"] != priority:
+            continue
+        if module and alert["module"] != module:
+            continue
+        if state == "read" and not alert["read"]:
+            continue
+        if state == "unread" and alert["read"]:
+            continue
+        if state == "pinned" and not alert["pinned"]:
+            continue
+        filtered.append(alert)
+    try:
+        page = max(1, int(args.get("page", 1) or 1))
+        page_size = int(args.get("pageSize", 20) or 20)
+    except (TypeError, ValueError) as error:
+        raise DashboardOperationError("Paginação de alertas inválida.") from error
+    if page_size < 5 or page_size > 100:
+        raise DashboardOperationError("Paginação de alertas inválida.")
+    paged, pagination = report_paginate(filtered, page, page_size)
+    return {
+        "items": paged,
+        "pagination": pagination,
+        "summary": alert_summary(alerts),
+        "filteredTotal": len(filtered),
+    }
+
+
+def persist_alert_user_state(
+    alert_id: str,
+    *,
+    read: bool | None = None,
+    pinned: bool | None = None,
+    store_id: str = "matriz",
+) -> dict:
+    user = session.get("user") or {}
+    user_id = str(user.get("id") or "")
+    now = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        active = {
+            str(item["id"]): item
+            for item in active_operational_alerts(conn, store_id)
+        }
+        if alert_id not in active:
+            raise DashboardOperationError(
+                "Alerta não está mais ativo.",
+                404,
+                "ALERT_NOT_ACTIVE",
+            )
+        current = conn.execute(
+            """
+            SELECT id, read_at AS "readAt", pinned_at AS "pinnedAt"
+            FROM alert_user_states
+            WHERE store_id = ? AND user_id = ? AND alert_id = ?
+            """,
+            (store_id, user_id, alert_id),
+        ).fetchone()
+        row_id = str(current["id"]) if current else os.urandom(16).hex()
+        read_at = current["readAt"] if current else None
+        pinned_at = current["pinnedAt"] if current else None
+        if read is not None:
+            read_at = now if read else None
+        if pinned is not None:
+            pinned_at = now if pinned else None
+        conn.execute(
+            """
+            INSERT INTO alert_user_states (
+                id, store_id, user_id, alert_id, read_at, pinned_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(store_id, user_id, alert_id) DO UPDATE SET
+                read_at = excluded.read_at,
+                pinned_at = excluded.pinned_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                row_id,
+                store_id,
+                user_id,
+                alert_id,
+                read_at,
+                pinned_at,
+                now if not current else now,
+                now,
+            ),
+        )
+        enriched = apply_alert_user_state(
+            conn,
+            list(active.values()),
+            user_id,
+            store_id,
+        )
+    return next(item for item in enriched if item["id"] == alert_id)
+
+
+def mark_all_alerts_read(store_id: str = "matriz") -> int:
+    user = session.get("user") or {}
+    user_id = str(user.get("id") or "")
+    now = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        alerts = active_operational_alerts(conn, store_id)
+        for alert in alerts:
+            conn.execute(
+                """
+                INSERT INTO alert_user_states (
+                    id, store_id, user_id, alert_id, read_at, pinned_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+                ON CONFLICT(store_id, user_id, alert_id) DO UPDATE SET
+                    read_at = excluded.read_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    os.urandom(16).hex(),
+                    store_id,
+                    user_id,
+                    alert["id"],
+                    now,
+                    now,
+                    now,
+                ),
+            )
+    return len(alerts)
+
+
+def credit_score_payment_factor(delay_days: int) -> float:
+    if delay_days <= 0:
+        return 1.0
+    if delay_days <= 5:
+        return 0.85
+    if delay_days <= 15:
+        return 0.60
+    if delay_days <= 30:
+        return 0.30
+    return 0.0
+
+
+def customer_credit_score(conn, customer_id: str, store_id: str = "matriz") -> dict:
+    today = operational_today()
+    period_start = add_calendar_months(today, -12)
+    receivable_rows = [
+        dict(row)
+        for row in conn.execute(
+            f"""
+            {RECEIVABLE_SELECT}
+            WHERE store_id = ? AND customer_id = ?
+              AND method = 'storeCredit' AND status <> 'cancelled'
+            ORDER BY due_date, created_at, id
+            """,
+            (store_id, customer_id),
+        ).fetchall()
+    ]
+    receivables = [receivable_from_row(row) for row in receivable_rows]
+    payment_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT payment.receivable_id AS "receivableId",
+                   payment.principal_amount AS "principalAmount",
+                   payment.settled_amount AS "settledAmount",
+                   payment.discount_amount AS "discountAmount",
+                   payment.created_at AS "createdAt"
+            FROM receivable_payments payment
+            JOIN receivables receivable ON receivable.id = payment.receivable_id
+            WHERE payment.store_id = ? AND receivable.customer_id = ?
+              AND receivable.method = 'storeCredit'
+              AND payment.status = 'active'
+            ORDER BY payment.created_at, payment.id
+            """,
+            (store_id, customer_id),
+        ).fetchall()
+    ]
+    payments_by_receivable: dict[str, list[dict]] = {}
+    for payment in payment_rows:
+        payments_by_receivable.setdefault(str(payment["receivableId"]), []).append(payment)
+    renegotiation_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT renegotiation.receivable_id AS "receivableId",
+                   renegotiation.previous_due_date AS "previousDueDate",
+                   renegotiation.previous_open_amount AS "previousOpenAmount",
+                   renegotiation.created_at AS "createdAt"
+            FROM receivable_renegotiations renegotiation
+            JOIN receivables receivable
+              ON receivable.id = renegotiation.receivable_id
+            WHERE renegotiation.store_id = ?
+              AND receivable.customer_id = ?
+              AND receivable.method = 'storeCredit'
+              AND receivable.status <> 'cancelled'
+            ORDER BY renegotiation.created_at, renegotiation.id
+            """,
+            (store_id, customer_id),
+        ).fetchall()
+    ]
+
+    factors = []
+    factor_details = []
+    overdue_items = []
+    for renegotiation in renegotiation_rows:
+        previous_due = report_date_of(renegotiation.get("previousDueDate"))
+        renegotiated_on = report_date_of(renegotiation.get("createdAt"))
+        previous_open = float(renegotiation.get("previousOpenAmount") or 0)
+        if (
+            not previous_due
+            or not renegotiated_on
+            or renegotiated_on < period_start
+            or previous_open <= 0.01
+        ):
+            continue
+        delay = max(0, (renegotiated_on - previous_due).days)
+        if delay == 0:
+            continue
+        factor = credit_score_payment_factor(delay)
+        factors.append(factor)
+        factor_details.append({
+            "installment": "Renegociação",
+            "delayDays": delay,
+            "performance": round(factor * 100),
+        })
+
+    for receivable in receivables:
+        due = report_date_of(receivable.get("dueDate"))
+        original_due = report_date_of(receivable.get("originalDueDate")) or due
+        if not due or not original_due:
+            continue
+        in_window = due >= period_start
+        net_obligation = max(
+            0,
+            money_round(
+                receivable["amount"]
+                - receivable.get("returnReductionTotal", 0)
+            ),
+        )
+        payments = payments_by_receivable.get(str(receivable["id"]), [])
+        cumulative = 0.0
+        settled_on = None
+        for payment in payments:
+            cumulative = money_round(
+                cumulative
+                + float(payment.get("settledAmount") or 0)
+            )
+            if net_obligation > 0.01 and cumulative + 0.01 >= net_obligation:
+                settled_on = report_date_of(payment.get("createdAt"))
+                break
+        if in_window and settled_on:
+            delay = max(0, (settled_on - due).days)
+            factor = credit_score_payment_factor(delay)
+            factors.append(factor)
+            factor_details.append({
+                "installment": receivable.get("installment") or "-",
+                "delayDays": delay,
+                "performance": round(factor * 100),
+            })
+        open_amount = receivable_open_amount(receivable)
+        if open_amount > 0.01 and due < today:
+            delay = (today - due).days
+            overdue_items.append({
+                "id": receivable["id"],
+                "balance": open_amount,
+                "delayDays": delay,
+                "dueDate": due.isoformat(),
+            })
+            factors.append(0.0)
+            factor_details.append({
+                "installment": receivable.get("installment") or "-",
+                "delayDays": delay,
+                "performance": 0,
+            })
+
+    sale_rows = conn.execute(
+        """
+        SELECT sale.id, sale.created_at AS "createdAt",
+               MAX(CASE WHEN payment.method = 'storeCredit' THEN 1 ELSE 0 END) AS uses_credit
+        FROM sales sale
+        LEFT JOIN sale_payments payment ON payment.sale_id = sale.id
+        WHERE sale.store_id = ? AND sale.customer_id = ?
+          AND sale.status NOT IN ('cancelled', 'returned')
+        GROUP BY sale.id, sale.created_at
+        """,
+        (store_id, customer_id),
+    ).fetchall()
+    direct_purchase_count = sum(
+        1
+        for row in sale_rows
+        if not bool(row["uses_credit"])
+        and (
+            (sale_day := report_date_of(row["createdAt"])) is not None
+            and sale_day >= period_start
+        )
+    )
+    direct_points = (
+        0 if direct_purchase_count == 0
+        else 5 if direct_purchase_count == 1
+        else 10 if direct_purchase_count <= 3
+        else 15 if direct_purchase_count <= 6
+        else 20
+    )
+    has_credit_history = bool(receivables)
+    if not has_credit_history:
+        return {
+            "available": False,
+            "score": None,
+            "classification": "Não disponível",
+            "reason": "Cliente ainda não possui histórico de crediário.",
+            "directPurchases": direct_purchase_count,
+            "directPurchasePoints": direct_points,
+            "periodStart": period_start.isoformat(),
+            "periodEnd": today.isoformat(),
+            "factors": [],
+        }
+    if not factors:
+        return {
+            "available": False,
+            "score": None,
+            "classification": "Não disponível",
+            "reason": "Histórico de crediário ainda sem parcela avaliável.",
+            "directPurchases": direct_purchase_count,
+            "directPurchasePoints": direct_points,
+            "periodStart": period_start.isoformat(),
+            "periodEnd": today.isoformat(),
+            "factors": [],
+        }
+
+    credit_points = 80 * (sum(factors) / len(factors))
+    overdue_total_cents = sum(
+        int(math.floor(float(item["balance"]) * 100 + 0.5))
+        for item in overdue_items
+    )
+    overdue_penalty = 0.0
+    for item in overdue_items:
+        delay = int(item["delayDays"])
+        maximum = 5 if delay <= 5 else 10 if delay <= 15 else 20 if delay <= 30 else 30
+        balance_cents = int(math.floor(float(item["balance"]) * 100 + 0.5))
+        share = (
+            balance_cents / overdue_total_cents
+            if overdue_total_cents
+            else 0
+        )
+        overdue_penalty += maximum * share
+    raw_score = credit_points + direct_points - overdue_penalty
+    score = max(0, min(100, int(math.floor(raw_score + 0.5))))
+    classification = (
+        "Excelente" if score >= 90
+        else "Bom" if score >= 75
+        else "Regular" if score >= 50
+        else "Atenção" if score >= 25
+        else "Alto risco"
+    )
+    return {
+        "available": True,
+        "score": score,
+        "classification": classification,
+        "creditPoints": round(credit_points, 2),
+        "directPurchases": direct_purchase_count,
+        "directPurchasePoints": direct_points,
+        "overduePenalty": round(overdue_penalty, 2),
+        "overdueBalance": money_round(overdue_total_cents / 100),
+        "overdueInstallments": len(overdue_items),
+        "periodStart": period_start.isoformat(),
+        "periodEnd": today.isoformat(),
+        "factors": factor_details[-12:],
+        "reason": "",
+    }
+
+
+def dashboard_period(args) -> dict:
+    legacy_range = str(args.get("range", "") or "").strip()
+    if not str(args.get("period", "") or "").strip() and legacy_range:
+        preset = "7days" if legacy_range == "7" else "30days"
+        source = {"period": preset}
+    else:
+        source = args
+    try:
+        return resolve_report_period(source, {"period": True})
+    except ReportOperationError as error:
+        raise DashboardOperationError(error.message, error.status_code, error.code) from error
+
+
+def dashboard_period_dates(period: dict) -> list[date]:
+    start = period["start"]
+    end = period["end"]
+    return [start + timedelta(days=index) for index in range((end - start).days + 1)]
+
+
+def dashboard_commercial_period(context: dict, period: dict) -> dict:
+    valid_sales = [
+        sale
+        for sale in context["sales"]
+        if str(sale.get("status") or "") != "cancelled"
+        and report_period_contains(period, sale.get("createdAt"))
+    ]
+    valid_sale_ids = {
+        str(sale["id"])
+        for sale in context["sales"]
+        if str(sale.get("status") or "") != "cancelled"
+    }
+    returns = [
+        item
+        for item in context["returns"]
+        if str(item.get("status") or "") == "completed"
+        and str(item.get("origin") or "") == "commercial"
+        and str(item["id"]) not in context["cancellationReturnIds"]
+        and str(item.get("saleId") or "") in valid_sale_ids
+        and report_period_contains(period, item.get("createdAt"))
+    ]
+    return_ids = {str(item["id"]) for item in returns}
+    return_items = [
+        item for item in context["returnItems"]
+        if str(item.get("returnId") or "") in return_ids
+    ]
+    revenue = money_round(
+        sum(float(item.get("total") or 0) for item in valid_sales)
+        - sum(float(item.get("netTotal") or 0) for item in returns)
+    )
+    cost = money_round(
+        sum(float(item.get("costTotal") or 0) for item in valid_sales)
+        - sum(float(item.get("costTotal") or 0) for item in returns)
+    )
+    sold_pieces = sum(
+        int(item.get("quantity") or 0)
+        for sale in valid_sales
+        for item in context["itemsBySale"].get(str(sale["id"]), [])
+    )
+    returned_pieces = sum(int(item.get("quantity") or 0) for item in return_items)
+    return {
+        "sales": valid_sales,
+        "returns": returns,
+        "returnItems": return_items,
+        "revenue": revenue,
+        "cost": cost,
+        "profit": money_round(revenue - cost),
+        "pieces": sold_pieces - returned_pieces,
+    }
+
+
+def dashboard_sales_chart(context: dict, period: dict, include_financial: bool) -> list[dict]:
+    rows = []
+    for day in dashboard_period_dates(period):
+        day_period = {"start": day, "end": day}
+        totals = dashboard_commercial_period(context, day_period)
+        row = {
+            "date": day.isoformat(),
+            "salesCount": len(totals["sales"]),
+            "pieces": totals["pieces"],
+        }
+        if include_financial:
+            row["total"] = totals["revenue"]
+        rows.append(row)
+    return rows
+
+
+def dashboard_payment_summary(
+    conn,
+    context: dict,
+    period: dict,
+    include_financial: bool,
+    store_id: str = "matriz",
+) -> dict:
+    methods = ("cash", "pix", "debit", "credit", "storeCredit")
+    valid_period_sales = [
+        sale
+        for sale in context["sales"]
+        if str(sale.get("status") or "") != "cancelled"
+        and report_period_contains(period, sale.get("createdAt"))
+    ]
+    valid_sale_ids = {str(item["id"]) for item in valid_period_sales}
+    gross_by_method = {method: 0.0 for method in methods}
+    operations_by_method = {method: set() for method in methods}
+    for sale in valid_period_sales:
+        sale_id = str(sale["id"])
+        for payment in context["paymentsBySale"].get(sale_id, []):
+            method = str(payment.get("method") or "")
+            if method in gross_by_method:
+                gross_by_method[method] += float(payment.get("amount") or 0)
+                if float(payment.get("amount") or 0) > 0:
+                    operations_by_method[method].add(sale_id)
+
+    returned_by_method = {method: 0.0 for method in methods}
+    allocation_rows = conn.execute(
+        """
+        SELECT allocation.method, allocation.gross_amount AS "grossAmount",
+               header.created_at AS "createdAt", header.sale_id AS "saleId"
+        FROM sale_return_allocations allocation
+        JOIN sale_returns header ON header.id = allocation.return_id
+        LEFT JOIN sale_cancellations cancellation
+               ON cancellation.return_id = header.id
+        JOIN sales sale ON sale.id = header.sale_id
+        WHERE allocation.store_id = ?
+          AND header.status = 'completed'
+          AND header.origin = 'commercial'
+          AND cancellation.id IS NULL
+          AND sale.status <> 'cancelled'
+        """,
+        (store_id,),
+    ).fetchall()
+    for row in allocation_rows:
+        method = str(row["method"] or "")
+        if method in returned_by_method and report_period_contains(period, row["createdAt"]):
+            returned_by_method[method] += float(row["grossAmount"] or 0)
+
+    rows = []
+    positive_total = 0.0
+    for method in methods:
+        gross = money_round(gross_by_method[method])
+        returned = money_round(returned_by_method[method])
+        net = money_round(gross - returned)
+        positive = max(0, net)
+        positive_total += positive
+        row = {
+            "method": method,
+            "salesCount": len(operations_by_method[method]),
+        }
+        if include_financial:
+            row.update({
+                "gross": gross,
+                "returned": returned,
+                "net": net,
+                "chartValue": positive,
+            })
+        else:
+            row["chartValue"] = len(operations_by_method[method])
+        rows.append(row)
+    denominator = (
+        positive_total
+        if include_financial
+        else sum(float(item["chartValue"]) for item in rows)
+    )
+    positive_rows = [row for row in rows if float(row["chartValue"]) > 0]
+    allocated_percent = 0.0
+    for row in rows:
+        row["percent"] = 0
+    for index, row in enumerate(positive_rows):
+        if index == len(positive_rows) - 1:
+            row["percent"] = round(100 - allocated_percent, 2)
+        else:
+            row["percent"] = round(
+                (float(row["chartValue"]) / denominator) * 100,
+                2,
+            )
+            allocated_percent += row["percent"]
+    return {
+        "rows": rows,
+        "chartTotal": money_round(denominator) if include_financial else int(denominator),
+        "valueType": "money" if include_financial else "operations",
+        "totalSales": len(valid_sale_ids),
+        "hasPositiveValues": denominator > 0,
+        "hasNegativeValues": bool(
+            include_financial and any(float(item.get("net") or 0) < 0 for item in rows)
+        ),
+    }
+
+
+def dashboard_top_brands(context: dict, period: dict) -> list[dict]:
+    totals = dashboard_commercial_period(context, period)
+    quantities: dict[str, int] = {}
+    for sale in totals["sales"]:
+        for item in context["itemsBySale"].get(str(sale["id"]), []):
+            brand = str(item.get("brand") or "Sem marca")
+            quantities[brand] = quantities.get(brand, 0) + int(item.get("quantity") or 0)
+    for item in totals["returnItems"]:
+        brand = str(item.get("brand") or "Sem marca")
+        quantities[brand] = quantities.get(brand, 0) - int(item.get("quantity") or 0)
+    ordered = sorted(
+        (
+            {"name": name, "qty": quantity}
+            for name, quantity in quantities.items()
+            if quantity > 0
+        ),
+        key=lambda item: (-item["qty"], normalized_search_text(item["name"])),
+    )[:5]
+    return [{**item, "position": index + 1} for index, item in enumerate(ordered)]
+
+
+def dashboard_stopped_products(conn, include_financial: bool, store_id: str = "matriz") -> list[dict]:
+    today = operational_today()
+    reserved = relational_reserved_stock(conn, store_id)
+    last_sales = {
+        str(row["productId"]): report_date_of(row["lastSale"])
+        for row in conn.execute(
+            """
+            SELECT item.product_id AS "productId",
+                   MAX(sale.created_at) AS "lastSale"
+            FROM sale_items item
+            JOIN sales sale ON sale.id = item.sale_id
+            WHERE sale.store_id = ? AND sale.status <> 'cancelled'
+              AND item.product_id IS NOT NULL
+            GROUP BY item.product_id
+            """,
+            (store_id,),
+        ).fetchall()
+    }
+    rows = []
+    product_rows = conn.execute(
+        """
+        SELECT id, barcode, name, stock, cost,
+               stock_entered_at AS "stockEnteredAt"
+        FROM products
+        WHERE store_id = ? AND active = 1
+        """,
+        (store_id,),
+    ).fetchall()
+    for row in product_rows:
+        product_id = str(row["id"])
+        available = max(0, int(row["stock"] or 0) - int(reserved.get(product_id, 0)))
+        reference = last_sales.get(product_id) or report_date_of(row["stockEnteredAt"])
+        if available <= 0 or not reference:
+            continue
+        stopped_days = (today - reference).days
+        if stopped_days <= 90:
+            continue
+        item = {
+            "id": product_id,
+            "code": str(row["barcode"] or product_id),
+            "name": str(row["name"] or "Produto"),
+            "availableStock": available,
+            "days": stopped_days,
+        }
+        if include_financial:
+            item["stoppedValue"] = money_round(available * float(row["cost"] or 0))
+        rows.append(item)
+    rows.sort(key=lambda item: (
+        -item["days"],
+        -float(item.get("stoppedValue") or 0),
+        normalized_search_text(item["name"]),
+    ))
+    return rows[:6]
+
+
+def build_relational_dashboard(conn, args, user: dict, store_id: str = "matriz") -> dict:
+    period = dashboard_period(args)
+    is_admin = user.get("role") == "admin"
+    context = report_load_sales_context(conn, store_id)
+    today = operational_today()
+    today_period = {"start": today, "end": today}
+    month_period = {"start": today.replace(day=1), "end": today}
+    today_commercial = dashboard_commercial_period(context, today_period)
+    month_commercial = dashboard_commercial_period(context, month_period)
+    current_alerts = apply_alert_user_state(
+        conn,
+        active_operational_alerts(conn, store_id),
+        str(user.get("id") or ""),
+        store_id,
+    )
+    alerts = alert_summary(current_alerts)
+
+    receivable_rows = [
+        receivable_from_row(row)
+        for row in conn.execute(
+            f"{RECEIVABLE_SELECT} WHERE store_id = ?",
+            (store_id,),
+        ).fetchall()
+    ]
+    credit_open_rows = [
+        item
+        for item in receivable_rows
+        if item["method"] == "storeCredit"
+        and item["status"] != "cancelled"
+        and receivable_open_amount(item) > 0.01
+    ]
+    card_open_rows = [
+        item
+        for item in receivable_rows
+        if item["method"] in {"debit", "credit"}
+        and item["status"] != "cancelled"
+        and receivable_open_amount(item) > 0.01
+    ]
+    payable_rows = [
+        payable_from_row(row)
+        for row in conn.execute(
+            """
+            SELECT id, supplier, category, amount, issue_date AS "issueDate",
+                   due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+                   fee, discount, status, paid_at AS "paidAt",
+                   created_at AS "createdAt", updated_at AS "updatedAt",
+                   supplier_id AS "supplierId",
+                   expense_category_id AS "expenseCategoryId",
+                   open_amount AS "openAmount", interest, fine, recurring,
+                   recurring_day AS "recurringDay",
+                   recurring_series_id AS "recurringSeriesId",
+                   recurrence_month AS "recurrenceMonth",
+                   generated_from_id AS "generatedFromId", version,
+                   cancelled_at AS "cancelledAt",
+                   cancellation_reason AS "cancellationReason"
+            FROM payables WHERE store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    open_payables = [item for item in payable_rows if payable_open_amount(item) > 0.01]
+    overdue_payables = [
+        item
+        for item in open_payables
+        if (report_date_of(item.get("dueDate")) or today) < today
+    ]
+    cash_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT direction, amount, created_at AS "createdAt"
+            FROM cash_movements WHERE store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    today_cash = [item for item in cash_rows if report_date_of(item["createdAt"]) == today]
+    conditional_rows = conn.execute(
+        """
+        SELECT conditional.customer_id AS "customerId",
+               conditional.expected_return_date AS "dueDate",
+               SUM(item.original_quantity - item.returned_quantity - item.sold_quantity) AS pending
+        FROM conditionals conditional
+        JOIN conditional_items item ON item.conditional_id = conditional.id
+        WHERE conditional.store_id = ? AND conditional.status = 'open'
+        GROUP BY conditional.id, conditional.customer_id, conditional.expected_return_date
+        """,
+        (store_id,),
+    ).fetchall()
+    active_conditionals = [row for row in conditional_rows if int(row["pending"] or 0) > 0]
+    metrics = {
+        "todaySalesCount": len(today_commercial["sales"]),
+        "customersAttended": len({
+            str(item.get("customerId"))
+            for item in today_commercial["sales"]
+            if item.get("customerId")
+        }),
+        "creditOpenCount": len(credit_open_rows),
+        "payablesCount": len(open_payables),
+        "payablesOverdueCount": len(overdue_payables),
+        "cardReceivablesCount": len(card_open_rows),
+        "conditionalsCount": len(active_conditionals),
+        "conditionalsOverdue": sum(
+            1
+            for item in active_conditionals
+            if (report_date_of(item["dueDate"]) or today) < today
+        ),
+        "alertsActive": alerts["active"],
+        "alertsUnread": alerts["unread"],
+        "alertsCritical": alerts["critical"],
+        "alertsAttention": alerts["attention"],
+    }
+    if is_admin:
+        reserved = relational_reserved_stock(conn, store_id)
+        stock_rows = conn.execute(
+            "SELECT id, stock, cost FROM products WHERE store_id = ? AND active = 1",
+            (store_id,),
+        ).fetchall()
+        metrics.update({
+            "todayRevenue": today_commercial["revenue"],
+            "monthRevenue": month_commercial["revenue"],
+            "monthProfit": month_commercial["profit"],
+            "stockValue": money_round(sum(
+                max(0, int(row["stock"] or 0) - int(reserved.get(str(row["id"]), 0)))
+                * float(row["cost"] or 0)
+                for row in stock_rows
+            )),
+            "creditOpen": money_round(sum(receivable_open_amount(item) for item in credit_open_rows)),
+            "cashBalance": money_round(sum(
+                float(item["amount"] or 0) if item["direction"] == "in"
+                else -float(item["amount"] or 0)
+                for item in cash_rows
+            )),
+            "cashInToday": money_round(sum(
+                float(item["amount"] or 0)
+                for item in today_cash if item["direction"] == "in"
+            )),
+            "cashOutToday": money_round(sum(
+                float(item["amount"] or 0)
+                for item in today_cash if item["direction"] == "out"
+            )),
+            "payablesOpen": money_round(sum(payable_open_amount(item) for item in open_payables)),
+            "payablesOverdue": money_round(sum(payable_open_amount(item) for item in overdue_payables)),
+            "cardReceivablesOpen": money_round(sum(receivable_open_amount(item) for item in card_open_rows)),
+        })
+    return {
+        "profile": "admin" if is_admin else "operator",
+        "today": today.isoformat(),
+        "period": {
+            "preset": period["preset"],
+            "start": period["start"].isoformat(),
+            "end": period["end"].isoformat(),
+        },
+        "metrics": metrics,
+        "salesChart": dashboard_sales_chart(context, period, is_admin),
+        "payments": dashboard_payment_summary(conn, context, period, is_admin, store_id),
+        "topBrands": dashboard_top_brands(context, period),
+        "stoppedProducts": dashboard_stopped_products(conn, is_admin, store_id),
+    }
 
 
 def build_dashboard_summary(state: dict, days: int, today: str) -> dict:
@@ -2833,6 +17616,1322 @@ def build_reports_summary(state: dict, start: str, end: str, today: str) -> dict
     return {"start": start, "end": end, "reports": reports}
 
 
+REPORT_PAYMENT_LABELS = {
+    "cash": "Dinheiro",
+    "pix": "PIX",
+    "debit": "Débito",
+    "credit": "Crédito",
+    "storeCredit": "Crediário",
+    "exchangeCredit": "Crédito de troca",
+}
+REPORT_DEFINITIONS = {
+    "sales": {
+        "title": "Relatório de Vendas",
+        "description": "Histórico de vendas e resultado líquido do período.",
+        "period": True,
+        "position": False,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "customer", "user", "product", "brand", "category", "method", "status"),
+    },
+    "sold-products": {
+        "title": "Relatório de Produtos Vendidos",
+        "description": "Quantidade e valor líquido por produto histórico.",
+        "period": True,
+        "position": False,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "product", "brand", "category", "size", "color"),
+    },
+    "cash": {
+        "title": "Relatório de Caixa",
+        "description": "Movimentações do caixa contínuo e seu resultado líquido.",
+        "period": True,
+        "position": False,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "direction", "method", "expenseCategory"),
+    },
+    "store-credit": {
+        "title": "Relatório de Crediário",
+        "description": "Posição das parcelas por vencimento e saldo oficial.",
+        "period": True,
+        "position": True,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "customer", "status"),
+    },
+    "payables": {
+        "title": "Relatório de Contas a Pagar",
+        "description": "Posição das obrigações, pagamentos e saldos.",
+        "period": True,
+        "position": True,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "supplier", "category", "status", "dateType"),
+    },
+    "stock": {
+        "title": "Relatório de Estoque",
+        "description": "Posição atual do estoque real, reservado e disponível.",
+        "period": False,
+        "position": True,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "brand", "category", "size", "color", "stockStatus"),
+    },
+    "conditionals": {
+        "title": "Relatório de Condicionais",
+        "description": "Saídas condicionais, retornos, conversões e atrasos.",
+        "period": True,
+        "position": False,
+        "admin_only": False,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "customer", "status"),
+    },
+    "profit": {
+        "title": "Relatório de Lucro",
+        "description": "Receita, custo histórico, lucro líquido e margem.",
+        "period": True,
+        "position": False,
+        "admin_only": True,
+        "formats": ("pdf", "xlsx"),
+        "filters": ("search", "product", "brand", "category"),
+    },
+}
+REPORT_FILTER_LABELS = {
+    "search": "Busca",
+    "customer": "Cliente",
+    "user": "Usuário",
+    "product": "Produto",
+    "brand": "Marca",
+    "category": "Categoria",
+    "method": "Forma de pagamento",
+    "status": "Situação",
+    "direction": "Movimentação",
+    "expenseCategory": "Tipo de despesa",
+    "supplier": "Fornecedor",
+    "dateType": "Data considerada",
+    "size": "Tamanho",
+    "color": "Cor",
+    "stockStatus": "Estoque",
+}
+
+
+class ReportOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def report_parse_civil_date(value: object, label: str) -> date:
+    try:
+        parsed = date.fromisoformat(str(value or "").strip())
+    except ValueError as error:
+        raise ReportOperationError(f"{label} inválida.") from error
+    return parsed
+
+
+def report_timestamp_local(value: object) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("Timestamp ausente.")
+    normalized = raw.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=STORE_TIMEZONE)
+    return parsed.astimezone(STORE_TIMEZONE)
+
+
+def report_date_of(value: object) -> date | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if len(raw) == 10:
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+    try:
+        return report_timestamp_local(raw).date()
+    except ValueError:
+        return None
+
+
+def report_datetime_text(value: object) -> str:
+    try:
+        return report_timestamp_local(value).strftime("%d/%m/%Y %H:%M")
+    except ValueError:
+        return "Histórico indisponível"
+
+
+def report_date_text(value: object) -> str:
+    parsed = report_date_of(value)
+    return parsed.strftime("%d/%m/%Y") if parsed else "Não informado"
+
+
+def resolve_report_period(args, definition: dict) -> dict:
+    today = datetime.now(STORE_TIMEZONE).date()
+    if not definition.get("period"):
+        return {"preset": "current", "start": None, "end": None}
+    preset = str(args.get("period", "30days") or "30days").strip()
+    if preset == "today":
+        start = end = today
+    elif preset == "7days":
+        start, end = today - timedelta(days=6), today
+    elif preset == "30days":
+        start, end = today - timedelta(days=29), today
+    elif preset == "month":
+        start, end = today.replace(day=1), today
+    elif preset == "custom":
+        if not str(args.get("start", "") or "").strip() or not str(args.get("end", "") or "").strip():
+            raise ReportOperationError("Informe a data inicial e a data final.")
+        start = report_parse_civil_date(args.get("start"), "Data inicial")
+        end = report_parse_civil_date(args.get("end"), "Data final")
+    else:
+        raise ReportOperationError("Período de relatório inválido.")
+    if start > end:
+        raise ReportOperationError("A data inicial não pode ser posterior à data final.")
+    return {"preset": preset, "start": start, "end": end}
+
+
+def report_period_contains(period: dict, value: object) -> bool:
+    if period.get("start") is None:
+        return True
+    parsed = report_date_of(value)
+    return bool(parsed and period["start"] <= parsed <= period["end"])
+
+
+def report_filter_value(args, key: str) -> str:
+    value = str(args.get(key, "") or "").strip()
+    if len(value) > 160:
+        raise ReportOperationError(f"Filtro {REPORT_FILTER_LABELS.get(key, key)} é muito longo.")
+    return value
+
+
+def report_text_matches(term: str, *values: object) -> bool:
+    normalized = normalized_search_text(term)
+    if not normalized:
+        return True
+    searchable = normalized_search_text(" ".join(str(value or "") for value in values))
+    return all(part in searchable for part in normalized.split())
+
+
+def report_page_args(args, export: bool) -> tuple[int, int]:
+    if export:
+        return 1, 0
+    try:
+        page = int(args.get("page", 1) or 1)
+        page_size = int(args.get("pageSize", 20) or 20)
+    except (TypeError, ValueError) as error:
+        raise ReportOperationError("Paginação inválida.") from error
+    if page < 1 or page_size < 5 or page_size > 100:
+        raise ReportOperationError("Paginação inválida.")
+    return page, page_size
+
+
+def report_paginate(rows: list[dict], page: int, page_size: int) -> tuple[list[dict], dict]:
+    total = len(rows)
+    if page_size == 0:
+        return rows, {"page": 1, "pageSize": total, "total": total, "pages": 1 if total else 0}
+    pages = max(1, math.ceil(total / page_size))
+    safe_page = min(page, pages)
+    start = (safe_page - 1) * page_size
+    return rows[start:start + page_size], {
+        "page": safe_page,
+        "pageSize": page_size,
+        "total": total,
+        "pages": pages if total else 0,
+    }
+
+
+def report_money_summary(key: str, label: str, value: object) -> dict:
+    return {"key": key, "label": label, "value": money_round(value), "type": "money"}
+
+
+def report_integer_summary(key: str, label: str, value: object) -> dict:
+    return {"key": key, "label": label, "value": int(value or 0), "type": "integer"}
+
+
+def report_column(key: str, label: str, value_type: str = "text") -> dict:
+    return {"key": key, "label": label, "type": value_type}
+
+
+def report_payment_text(payments: list[dict]) -> str:
+    names = []
+    for payment in payments:
+        method = str(payment.get("method") or "")
+        label = REPORT_PAYMENT_LABELS.get(method, method or "Não informado")
+        if label not in names:
+            names.append(label)
+    return " + ".join(names) or "Não informado"
+
+
+def report_sale_status(sale: dict, returned_quantity: int, sold_quantity: int) -> str:
+    if str(sale.get("status") or "") == "cancelled":
+        return "Cancelada"
+    if returned_quantity <= 0:
+        return "Concluída"
+    if max(0, sold_quantity - returned_quantity) == 0:
+        return "Devolvida"
+    return "Parcialmente devolvida"
+
+
+def report_load_sales_context(conn, store_id: str) -> dict:
+    sales = [
+        dict(row) for row in conn.execute(
+            """
+            SELECT id, sale_number AS "saleNumber", customer_id AS "customerId",
+                   customer_name AS "customerName", subtotal, discount,
+                   addition, total, cost_total AS "costTotal", status,
+                   user_id AS "userId", user_name AS "userName",
+                   created_at AS "createdAt", conditional_id AS "conditionalId",
+                   exchange_id AS "exchangeId", warranty_id AS "warrantyId"
+            FROM sales WHERE store_id = ?
+            ORDER BY created_at DESC, sale_number DESC
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    items = [
+        dict(row) for row in conn.execute(
+            """
+            SELECT item.id, item.sale_id AS "saleId", item.product_id AS "productId",
+                   item.barcode, item.name, item.brand, item.brand_id AS "brandId",
+                   item.category, item.category_id AS "categoryId", item.size,
+                   item.color, item.quantity, item.unit_cost AS "unitCost",
+                   item.original_unit_price AS "originalUnitPrice",
+                   item.practiced_unit_price AS "practicedUnitPrice",
+                   item.unit_discount AS "unitDiscount",
+                   item.unit_addition AS "unitAddition",
+                   item.final_unit_price AS "finalUnitPrice",
+                   item.net_total AS "netTotal"
+            FROM sale_items item
+            JOIN sales sale ON sale.id = item.sale_id
+            WHERE sale.store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    payments = [
+        dict(row) for row in conn.execute(
+            """
+            SELECT payment.id, payment.sale_id AS "saleId", payment.method,
+                   payment.amount, payment.installments,
+                   payment.modality_name AS "modalityName",
+                   payment.gross_amount AS "grossAmount",
+                   payment.fee_amount AS "feeAmount",
+                   payment.net_amount AS "netAmount"
+            FROM sale_payments payment
+            JOIN sales sale ON sale.id = payment.sale_id
+            WHERE sale.store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    returns = [
+        dict(row) for row in conn.execute(
+            """
+            SELECT id, sale_id AS "saleId", status, origin,
+                   net_total AS "netTotal", cost_total AS "costTotal",
+                   created_at AS "createdAt"
+            FROM sale_returns WHERE store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    return_items = [
+        dict(row) for row in conn.execute(
+            """
+            SELECT item.id, item.return_id AS "returnId",
+                   header.sale_id AS "saleId", item.sale_item_id AS "saleItemId",
+                   item.product_id AS "productId", item.product_name AS "name",
+                   item.barcode, item.brand, item.size, item.color,
+                   item.quantity, item.net_total AS "netTotal",
+                   item.cost_total AS "costTotal"
+            FROM sale_return_items item
+            JOIN sale_returns header ON header.id = item.return_id
+            WHERE header.store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    ]
+    cancellation_return_ids = {
+        str(row["returnId"])
+        for row in conn.execute(
+            """
+            SELECT return_id AS "returnId"
+            FROM sale_cancellations WHERE store_id = ?
+            """,
+            (store_id,),
+        ).fetchall()
+    }
+    items_by_sale: dict[str, list[dict]] = {}
+    payments_by_sale: dict[str, list[dict]] = {}
+    returns_by_sale: dict[str, list[dict]] = {}
+    return_items_by_sale: dict[str, list[dict]] = {}
+    for item in items:
+        items_by_sale.setdefault(str(item["saleId"]), []).append(item)
+    for payment in payments:
+        payments_by_sale.setdefault(str(payment["saleId"]), []).append(payment)
+    for item in returns:
+        returns_by_sale.setdefault(str(item["saleId"]), []).append(item)
+    for item in return_items:
+        return_items_by_sale.setdefault(str(item["saleId"]), []).append(item)
+    return {
+        "sales": sales,
+        "salesById": {str(item["id"]): item for item in sales},
+        "items": items,
+        "itemsBySale": items_by_sale,
+        "itemsById": {str(item["id"]): item for item in items},
+        "paymentsBySale": payments_by_sale,
+        "returns": returns,
+        "returnsBySale": returns_by_sale,
+        "returnItems": return_items,
+        "returnItemsBySale": return_items_by_sale,
+        "cancellationReturnIds": cancellation_return_ids,
+    }
+
+
+def report_sale_matches(sale: dict, context: dict, filters: dict) -> bool:
+    sale_id = str(sale["id"])
+    items = context["itemsBySale"].get(sale_id, [])
+    payments = context["paymentsBySale"].get(sale_id, [])
+    if filters["search"] and not report_text_matches(
+        filters["search"],
+        sale_id,
+        sale.get("saleNumber"),
+        sale.get("customerName"),
+        sale.get("userName"),
+        *(item.get("name") for item in items),
+    ):
+        return False
+    if filters["customer"] and not report_text_matches(
+        filters["customer"], sale.get("customerId"), sale.get("customerName")
+    ):
+        return False
+    if filters["user"] and not report_text_matches(
+        filters["user"], sale.get("userId"), sale.get("userName")
+    ):
+        return False
+    if filters["product"] and not any(
+        report_text_matches(filters["product"], item.get("productId"), item.get("barcode"), item.get("name"))
+        for item in items
+    ):
+        return False
+    if filters["brand"] and not any(report_text_matches(filters["brand"], item.get("brand")) for item in items):
+        return False
+    if filters["category"] and not any(report_text_matches(filters["category"], item.get("category")) for item in items):
+        return False
+    if filters["method"] and not any(str(item.get("method")) == filters["method"] for item in payments):
+        return False
+    sold_quantity = sum(int(item.get("quantity") or 0) for item in items)
+    returned_quantity = sum(
+        int(item.get("quantity") or 0)
+        for item in context["returnItemsBySale"].get(sale_id, [])
+    )
+    status = report_sale_status(sale, returned_quantity, sold_quantity)
+    status_key = {
+        "Concluída": "completed",
+        "Cancelada": "cancelled",
+        "Devolvida": "returned",
+        "Parcialmente devolvida": "partial",
+    }[status]
+    return not filters["status"] or filters["status"] == status_key
+
+
+def build_sales_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    context = report_load_sales_context(conn, "matriz")
+    filtered_sales = [
+        sale for sale in context["sales"]
+        if report_period_contains(period, sale.get("createdAt"))
+        and report_sale_matches(sale, context, filters)
+    ]
+    rows = []
+    for sale in filtered_sales:
+        sale_id = str(sale["id"])
+        items = context["itemsBySale"].get(sale_id, [])
+        payments = context["paymentsBySale"].get(sale_id, [])
+        return_items = context["returnItemsBySale"].get(sale_id, [])
+        sold_quantity = sum(int(item.get("quantity") or 0) for item in items)
+        returned_quantity = sum(int(item.get("quantity") or 0) for item in return_items)
+        returned_total = money_round(sum(float(item.get("netTotal") or 0) for item in return_items))
+        returned_cost = money_round(sum(float(item.get("costTotal") or 0) for item in return_items))
+        cancelled = str(sale.get("status") or "") == "cancelled"
+        net_total = 0 if cancelled else money_round(max(0, float(sale.get("total") or 0) - returned_total))
+        net_cost = 0 if cancelled else money_round(max(0, float(sale.get("costTotal") or 0) - returned_cost))
+        row = {
+            "id": sale_id,
+            "saleNumber": f"VENDA{int(sale.get('saleNumber') or 0):03d}" if sale.get("saleNumber") else sale_id,
+            "dateTime": report_datetime_text(sale.get("createdAt")),
+            "customer": sale.get("customerName") or "Venda simples",
+            "user": sale.get("userName") or "Não informado",
+            "pieces": 0 if cancelled else max(0, sold_quantity - returned_quantity),
+            "netTotal": net_total,
+            "payments": report_payment_text(payments),
+            "status": report_sale_status(sale, returned_quantity, sold_quantity),
+        }
+        if is_admin:
+            row["profit"] = money_round(net_total - net_cost)
+        rows.append(row)
+
+    valid_period_sales = [
+        sale for sale in context["sales"]
+        if str(sale.get("status") or "") != "cancelled"
+        and report_period_contains(period, sale.get("createdAt"))
+        and report_sale_matches(sale, context, {**filters, "status": ""})
+    ]
+    valid_sale_ids = {str(item["id"]) for item in context["sales"] if str(item.get("status") or "") != "cancelled"}
+    period_return_headers = [
+        item for item in context["returns"]
+        if str(item.get("status") or "") == "completed"
+        and str(item["id"]) not in context["cancellationReturnIds"]
+        and str(item.get("saleId")) in valid_sale_ids
+        and report_period_contains(period, item.get("createdAt"))
+        and report_sale_matches(
+            context["salesById"][str(item["saleId"])],
+            context,
+            {**filters, "status": ""},
+        )
+    ]
+    positive_total = money_round(sum(float(item.get("total") or 0) for item in valid_period_sales))
+    positive_cost = money_round(sum(float(item.get("costTotal") or 0) for item in valid_period_sales))
+    returned_total = money_round(sum(float(item.get("netTotal") or 0) for item in period_return_headers))
+    returned_cost = money_round(sum(float(item.get("costTotal") or 0) for item in period_return_headers))
+    positive_pieces = sum(
+        int(item.get("quantity") or 0)
+        for sale in valid_period_sales
+        for item in context["itemsBySale"].get(str(sale["id"]), [])
+    )
+    period_return_ids = {str(item["id"]) for item in period_return_headers}
+    returned_pieces = sum(
+        int(item.get("quantity") or 0)
+        for item in context["returnItems"]
+        if str(item.get("returnId")) in period_return_ids
+    )
+    net_revenue = money_round(positive_total - returned_total)
+    net_cost = money_round(positive_cost - returned_cost)
+    summary = [
+        report_integer_summary("sales", "Vendas", len(valid_period_sales)),
+        report_integer_summary("pieces", "Peças líquidas", positive_pieces - returned_pieces),
+        report_money_summary("gross", "Vendas válidas", positive_total),
+        report_money_summary("returns", "Devoluções", returned_total),
+        report_money_summary("net", "Valor líquido", net_revenue),
+    ]
+    if is_admin:
+        summary.append(report_money_summary("profit", "Lucro líquido", net_revenue - net_cost))
+    columns = [
+        report_column("saleNumber", "Venda"),
+        report_column("dateTime", "Data e hora"),
+        report_column("customer", "Cliente"),
+        report_column("user", "Usuário"),
+        report_column("pieces", "Peças", "integer"),
+        report_column("netTotal", "Total líquido", "money"),
+        report_column("payments", "Pagamentos"),
+        report_column("status", "Situação"),
+    ]
+    if is_admin:
+        columns.append(report_column("profit", "Lucro", "money"))
+    return rows, columns, summary
+
+
+def report_product_key(item: dict) -> tuple:
+    return (
+        str(item.get("productId") or ""),
+        str(item.get("barcode") or ""),
+        str(item.get("name") or "Histórico indisponível"),
+        str(item.get("brand") or "Sem marca"),
+        str(item.get("category") or "Sem categoria"),
+        str(item.get("size") or "-"),
+        str(item.get("color") or "-"),
+    )
+
+
+def build_sold_products_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    context = report_load_sales_context(conn, "matriz")
+    grouped: dict[tuple, dict] = {}
+    for sale in context["sales"]:
+        if str(sale.get("status") or "") == "cancelled" or not report_period_contains(period, sale.get("createdAt")):
+            continue
+        for item in context["itemsBySale"].get(str(sale["id"]), []):
+            key = report_product_key(item)
+            group = grouped.setdefault(key, {
+                "productId": item.get("productId") or "",
+                "code": item.get("barcode") or "Não informado",
+                "product": item.get("name") or "Histórico indisponível",
+                "brand": item.get("brand") or "Sem marca",
+                "category": item.get("category") or "Sem categoria",
+                "size": item.get("size") or "-",
+                "color": item.get("color") or "-",
+                "quantity": 0,
+                "netTotal": 0.0,
+                "historicalCost": 0.0,
+            })
+            group["quantity"] += int(item.get("quantity") or 0)
+            group["netTotal"] += float(item.get("netTotal") or 0)
+            group["historicalCost"] += float(item.get("unitCost") or 0) * int(item.get("quantity") or 0)
+    valid_sale_ids = {str(item["id"]) for item in context["sales"] if str(item.get("status") or "") != "cancelled"}
+    return_headers = {
+        str(item["id"]): item for item in context["returns"]
+        if str(item.get("status") or "") == "completed"
+        and str(item["id"]) not in context["cancellationReturnIds"]
+        and str(item.get("saleId")) in valid_sale_ids
+        and report_period_contains(period, item.get("createdAt"))
+    }
+    for item in context["returnItems"]:
+        if str(item.get("returnId")) not in return_headers:
+            continue
+        original = context["itemsById"].get(str(item.get("saleItemId"))) or item
+        key = report_product_key(original)
+        group = grouped.setdefault(key, {
+            "productId": original.get("productId") or "",
+            "code": original.get("barcode") or "Não informado",
+            "product": original.get("name") or "Histórico indisponível",
+            "brand": original.get("brand") or "Sem marca",
+            "category": original.get("category") or "Sem categoria",
+            "size": original.get("size") or "-",
+            "color": original.get("color") or "-",
+            "quantity": 0,
+            "netTotal": 0.0,
+            "historicalCost": 0.0,
+        })
+        group["quantity"] -= int(item.get("quantity") or 0)
+        group["netTotal"] -= float(item.get("netTotal") or 0)
+        group["historicalCost"] -= float(item.get("costTotal") or 0)
+    rows = []
+    for group in grouped.values():
+        if filters["search"] and not report_text_matches(
+            filters["search"], group["code"], group["product"], group["brand"], group["category"], group["size"], group["color"]
+        ):
+            continue
+        if filters["product"] and not report_text_matches(filters["product"], group["productId"], group["code"], group["product"]):
+            continue
+        if filters["brand"] and not report_text_matches(filters["brand"], group["brand"]):
+            continue
+        if filters["category"] and not report_text_matches(filters["category"], group["category"]):
+            continue
+        if filters["size"] and not report_text_matches(filters["size"], group["size"]):
+            continue
+        if filters["color"] and not report_text_matches(filters["color"], group["color"]):
+            continue
+        group["netTotal"] = money_round(group["netTotal"])
+        group["historicalCost"] = money_round(group["historicalCost"])
+        if is_admin:
+            group["profit"] = money_round(group["netTotal"] - group["historicalCost"])
+        else:
+            group.pop("historicalCost", None)
+        rows.append(group)
+    rows.sort(key=lambda item: (-int(item["quantity"]), normalized_search_text(item["product"])))
+    net_total = money_round(sum(float(item["netTotal"]) for item in rows))
+    summary = [
+        report_integer_summary("products", "Produtos", len(rows)),
+        report_integer_summary("pieces", "Peças líquidas", sum(int(item["quantity"]) for item in rows)),
+        report_money_summary("net", "Valor líquido", net_total),
+    ]
+    columns = [
+        report_column("product", "Produto"),
+        report_column("code", "Código"),
+        report_column("brand", "Marca"),
+        report_column("category", "Categoria"),
+        report_column("size", "Tamanho"),
+        report_column("color", "Cor"),
+        report_column("quantity", "Quantidade líquida", "integer"),
+        report_column("netTotal", "Valor líquido", "money"),
+    ]
+    if is_admin:
+        net_cost = money_round(sum(float(item["historicalCost"]) for item in rows))
+        net_profit = money_round(net_total - net_cost)
+        summary.extend((
+            report_money_summary("cost", "Custo histórico", net_cost),
+            report_money_summary("profit", "Lucro líquido", net_profit),
+        ))
+        columns.extend((
+            report_column("historicalCost", "Custo histórico", "money"),
+            report_column("profit", "Lucro", "money"),
+        ))
+    return rows, columns, summary
+
+
+def build_cash_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    movement_rows = conn.execute(
+        """
+        SELECT movement.id, movement.direction, movement.type,
+               movement.description, movement.method, movement.amount,
+               movement.ref_id AS "refId",
+               movement.expense_category_id AS "expenseCategoryId",
+               movement.origin_type AS "originType",
+               movement.origin_id AS "originId",
+               movement.resulting_balance AS "resultingBalance",
+               movement.created_at AS "createdAt",
+               category.name AS "expenseCategory"
+        FROM cash_movements movement
+        LEFT JOIN expense_categories category
+          ON category.store_id = movement.store_id
+         AND category.id = movement.expense_category_id
+        WHERE movement.store_id = ?
+        ORDER BY movement.created_at, movement.id
+        """,
+        ("matriz",),
+    ).fetchall()
+    sale_customers = {
+        str(row["id"]): str(row["customerName"] or "")
+        for row in conn.execute(
+            """
+            SELECT id, customer_name AS "customerName"
+            FROM sales WHERE store_id = ?
+            """,
+            ("matriz",),
+        ).fetchall()
+    }
+    receivable_customers = {
+        str(row["id"]): str(row["customerName"] or "")
+        for row in conn.execute(
+            """
+            SELECT id, customer_name AS "customerName"
+            FROM receivables WHERE store_id = ?
+            """,
+            ("matriz",),
+        ).fetchall()
+    }
+    rows = []
+    running_balance = 0.0
+    for source in movement_rows:
+        movement = dict(source)
+        amount = money_round(movement.get("amount"))
+        running_balance = money_round(
+            running_balance + (amount if movement.get("direction") == "in" else -amount)
+        )
+        if not report_period_contains(period, movement.get("createdAt")):
+            continue
+        customer = (
+            sale_customers.get(str(movement.get("originId") or ""))
+            or sale_customers.get(str(movement.get("refId") or ""))
+            or receivable_customers.get(str(movement.get("originId") or ""))
+            or receivable_customers.get(str(movement.get("refId") or ""))
+            or ""
+        )
+        origin = str(movement.get("originType") or movement.get("type") or "manual")
+        expense_category = str(
+            movement.get("expenseCategory") or movement.get("type") or ""
+        )
+        if filters["search"] and not report_text_matches(
+            filters["search"],
+            movement.get("description"),
+            origin,
+            customer,
+            expense_category,
+        ):
+            continue
+        if filters["direction"] and movement.get("direction") != filters["direction"]:
+            continue
+        if filters["method"] and movement.get("method") != filters["method"]:
+            continue
+        if filters["expenseCategory"] and not report_text_matches(
+            filters["expenseCategory"],
+            movement.get("expenseCategoryId"),
+            expense_category,
+        ):
+            continue
+        rows.append({
+            "id": movement["id"],
+            "dateTime": report_datetime_text(movement.get("createdAt")),
+            "direction": "Entrada" if movement.get("direction") == "in" else "Saída",
+            "description": movement.get("description") or "Sem descrição",
+            "origin": origin.replace("_", " ").title(),
+            "customer": customer or "-",
+            "method": REPORT_PAYMENT_LABELS.get(
+                str(movement.get("method") or ""),
+                str(movement.get("method") or "Não informado"),
+            ),
+            "expenseCategory": expense_category or "-",
+            "amount": amount,
+            "balance": (
+                money_round(movement["resultingBalance"])
+                if movement.get("resultingBalance") is not None
+                else running_balance
+            ),
+            "_createdAt": movement.get("createdAt") or "",
+            "_direction": movement.get("direction") or "",
+        })
+    rows.sort(
+        key=lambda item: report_timestamp_local(item["_createdAt"]),
+        reverse=True,
+    )
+    inputs = money_round(
+        sum(item["amount"] for item in rows if item["_direction"] == "in")
+    )
+    outputs = money_round(
+        sum(item["amount"] for item in rows if item["_direction"] == "out")
+    )
+    for item in rows:
+        item.pop("_createdAt", None)
+        item.pop("_direction", None)
+    return rows, [
+        report_column("dateTime", "Data e hora"),
+        report_column("direction", "Movimento"),
+        report_column("description", "Descrição"),
+        report_column("origin", "Origem"),
+        report_column("customer", "Cliente"),
+        report_column("method", "Forma"),
+        report_column("expenseCategory", "Tipo de despesa"),
+        report_column("amount", "Valor", "money"),
+        report_column("balance", "Saldo após movimento", "money"),
+    ], [
+        report_money_summary("inputs", "Entradas", inputs),
+        report_money_summary("outputs", "Saídas", outputs),
+        report_money_summary("net", "Resultado líquido", inputs - outputs),
+    ]
+
+
+def report_receivable_status(receivable: dict, today: date) -> tuple[str, str]:
+    open_amount = receivable_open_amount(receivable)
+    if receivable.get("status") == "cancelled":
+        return "cancelled", "Cancelada"
+    if open_amount <= 0.01 or receivable.get("status") == "paid":
+        return "paid", "Quitada"
+    due_date = report_date_of(receivable.get("dueDate"))
+    if due_date and due_date < today:
+        return "overdue", "Atrasada"
+    return "open", "Em dia"
+
+
+def build_store_credit_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    today = datetime.now(STORE_TIMEZONE).date()
+    source_rows = conn.execute(
+        f"""
+        {RECEIVABLE_SELECT}
+        WHERE store_id = ? AND method = 'storeCredit'
+        ORDER BY due_date, created_at, id
+        """,
+        ("matriz",),
+    ).fetchall()
+    rows = []
+    for source in source_rows:
+        receivable = receivable_from_row(source)
+        if not report_period_contains(period, receivable.get("dueDate")):
+            continue
+        status_key, status_label = report_receivable_status(receivable, today)
+        if filters["search"] and not report_text_matches(
+            filters["search"],
+            receivable.get("customerName"),
+            receivable.get("saleId"),
+            receivable.get("installment"),
+        ):
+            continue
+        if filters["customer"] and not report_text_matches(
+            filters["customer"],
+            receivable.get("customerId"),
+            receivable.get("customerName"),
+        ):
+            continue
+        if filters["status"] and filters["status"] != status_key:
+            continue
+        rows.append({
+            "id": receivable["id"],
+            "customer": receivable.get("customerName") or "Não informado",
+            "sale": receivable.get("saleId") or "-",
+            "installment": receivable.get("installment") or "-",
+            "dueDate": report_date_text(receivable.get("dueDate")),
+            "originalAmount": receivable.get("amount") or 0,
+            "paidAmount": receivable.get("received") or 0,
+            "returnReduction": receivable.get("returnReductionTotal") or 0,
+            "discount": receivable.get("discountTotal") or 0,
+            "openAmount": receivable_open_amount(receivable),
+            "status": status_label,
+        })
+    original = money_round(sum(item["originalAmount"] for item in rows))
+    paid = money_round(sum(item["paidAmount"] for item in rows))
+    open_total = money_round(sum(item["openAmount"] for item in rows))
+    overdue = money_round(
+        sum(item["openAmount"] for item in rows if item["status"] == "Atrasada")
+    )
+    return rows, [
+        report_column("customer", "Cliente"),
+        report_column("sale", "Venda"),
+        report_column("installment", "Parcela"),
+        report_column("dueDate", "Vencimento"),
+        report_column("originalAmount", "Valor original", "money"),
+        report_column("paidAmount", "Valor pago", "money"),
+        report_column("returnReduction", "Abatido por devolução", "money"),
+        report_column("discount", "Descontos", "money"),
+        report_column("openAmount", "Saldo aberto", "money"),
+        report_column("status", "Situação"),
+    ], [
+        report_money_summary("original", "Valor original", original),
+        report_money_summary("received", "Recebido", paid),
+        report_money_summary("open", "Em aberto", open_total),
+        report_money_summary("overdue", "Atrasado", overdue),
+    ]
+
+
+def report_payable_status(payable: dict, today: date) -> tuple[str, str]:
+    if payable.get("status") == "cancelled":
+        return "cancelled", "Cancelada"
+    if float(payable.get("openAmount") or 0) <= 0.01:
+        return "paid", "Quitada"
+    due_date = report_date_of(payable.get("dueDate"))
+    if due_date and due_date < today:
+        return "overdue", "Vencida"
+    if due_date == today:
+        return "today", "Vence hoje"
+    return "open", "A vencer"
+
+
+def build_payables_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    source_rows = conn.execute(
+        """
+        SELECT id, supplier, category, amount, issue_date AS "issueDate",
+               due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+               fee, discount, status, paid_at AS "paidAt",
+               created_at AS "createdAt", updated_at AS "updatedAt",
+               supplier_id AS "supplierId",
+               expense_category_id AS "expenseCategoryId",
+               open_amount AS "openAmount", interest, fine, recurring,
+               recurring_day AS "recurringDay",
+               recurring_series_id AS "recurringSeriesId",
+               recurrence_month AS "recurrenceMonth",
+               generated_from_id AS "generatedFromId", version,
+               cancelled_at AS "cancelledAt",
+               cancellation_reason AS "cancellationReason"
+        FROM payables WHERE store_id = ?
+        ORDER BY due_date, created_at, id
+        """,
+        ("matriz",),
+    ).fetchall()
+    today = datetime.now(STORE_TIMEZONE).date()
+    rows = []
+    for source in source_rows:
+        payable = enrich_payable(conn, payable_from_row(source))
+        date_field = (
+            payable.get("issueDate")
+            if filters["dateType"] == "issue"
+            else payable.get("dueDate")
+        )
+        if not report_period_contains(period, date_field):
+            continue
+        status_key, status_label = report_payable_status(payable, today)
+        if filters["search"] and not report_text_matches(
+            filters["search"],
+            payable.get("supplier"),
+            payable.get("category"),
+            payable.get("notes"),
+        ):
+            continue
+        if filters["supplier"] and not report_text_matches(
+            filters["supplier"],
+            payable.get("supplierId"),
+            payable.get("supplier"),
+        ):
+            continue
+        if filters["category"] and not report_text_matches(
+            filters["category"],
+            payable.get("expenseCategoryId"),
+            payable.get("category"),
+        ):
+            continue
+        if filters["status"] and filters["status"] != status_key:
+            continue
+        payments, _events = payable_relational_details(conn, payable["id"])
+        active_payments = [item for item in payments if item.get("status") == "active"]
+        has_relational_history = bool(payments)
+        paid_amount = (
+            sum(float(item.get("amount") or 0) for item in active_payments)
+            if has_relational_history
+            else float(payable.get("paidAmount") or 0)
+        )
+        interest = (
+            sum(float(item.get("interest") or 0) for item in active_payments)
+            if has_relational_history
+            else float(payable.get("interest") or 0)
+        )
+        fine = (
+            sum(float(item.get("fine") or 0) for item in active_payments)
+            if has_relational_history
+            else float(payable.get("fine") or 0)
+        )
+        discount = (
+            sum(float(item.get("discount") or 0) for item in active_payments)
+            if has_relational_history
+            else float(payable.get("discount") or 0)
+        )
+        rows.append({
+            "id": payable["id"],
+            "supplier": payable.get("supplier") or "Não informado",
+            "category": payable.get("category") or "Sem categoria",
+            "issueDate": report_date_text(payable.get("issueDate")),
+            "dueDate": report_date_text(payable.get("dueDate")),
+            "originalAmount": payable.get("amount") or 0,
+            "paidAmount": money_round(paid_amount),
+            "interest": money_round(interest),
+            "fine": money_round(fine),
+            "discount": money_round(discount),
+            "openAmount": payable.get("openAmount") or 0,
+            "status": status_label,
+        })
+    return rows, [
+        report_column("supplier", "Fornecedor"),
+        report_column("category", "Categoria"),
+        report_column("issueDate", "Emissão"),
+        report_column("dueDate", "Vencimento"),
+        report_column("originalAmount", "Valor original", "money"),
+        report_column("paidAmount", "Valor pago", "money"),
+        report_column("interest", "Juros", "money"),
+        report_column("fine", "Multa", "money"),
+        report_column("discount", "Desconto", "money"),
+        report_column("openAmount", "Saldo aberto", "money"),
+        report_column("status", "Situação"),
+    ], [
+        report_money_summary("original", "Valor original", sum(item["originalAmount"] for item in rows)),
+        report_money_summary("paid", "Valor pago", sum(item["paidAmount"] for item in rows)),
+        report_money_summary("open", "Em aberto", sum(item["openAmount"] for item in rows)),
+        report_money_summary(
+            "overdue",
+            "Vencido",
+            sum(item["openAmount"] for item in rows if item["status"] == "Vencida"),
+        ),
+    ]
+
+
+def build_stock_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    reserved_rows = conn.execute(
+        """
+        SELECT item.product_id AS "productId",
+               COALESCE(SUM(
+                   item.original_quantity
+                   - item.returned_quantity
+                   - item.sold_quantity
+               ), 0) AS reserved
+        FROM conditional_items item
+        JOIN conditionals header ON header.id = item.conditional_id
+        WHERE header.store_id = ? AND header.status = 'open'
+        GROUP BY item.product_id
+        """,
+        ("matriz",),
+    ).fetchall()
+    reserved = {
+        str(item["productId"]): int(item["reserved"] or 0)
+        for item in reserved_rows
+    }
+    product_rows = conn.execute(
+        """
+        SELECT id, barcode, name, brand_name AS brand,
+               category_name AS category, size, color, stock, cost, active
+        FROM products
+        WHERE store_id = ?
+        ORDER BY name, size, color, barcode
+        """,
+        ("matriz",),
+    ).fetchall()
+    rows = []
+    for source in product_rows:
+        product = dict(source)
+        real = int(product.get("stock") or 0)
+        reserved_quantity = max(0, int(reserved.get(str(product["id"]), 0)))
+        available = max(0, real - reserved_quantity)
+        if filters["search"] and not report_text_matches(
+            filters["search"],
+            product.get("barcode"),
+            product.get("name"),
+            product.get("brand"),
+            product.get("category"),
+        ):
+            continue
+        if filters["brand"] and not report_text_matches(filters["brand"], product.get("brand")):
+            continue
+        if filters["category"] and not report_text_matches(filters["category"], product.get("category")):
+            continue
+        if filters["size"] and not report_text_matches(filters["size"], product.get("size")):
+            continue
+        if filters["color"] and not report_text_matches(filters["color"], product.get("color")):
+            continue
+        stock_status = filters["stockStatus"]
+        if stock_status == "with_stock" and available <= 0:
+            continue
+        if stock_status == "last_unit" and available != 1:
+            continue
+        if stock_status == "zero" and available != 0:
+            continue
+        row = {
+            "id": product["id"],
+            "code": product.get("barcode") or "Não informado",
+            "product": product.get("name") or "Não informado",
+            "brand": product.get("brand") or "Sem marca",
+            "category": product.get("category") or "Sem categoria",
+            "size": product.get("size") or "-",
+            "color": product.get("color") or "-",
+            "realStock": real,
+            "reservedStock": reserved_quantity,
+            "availableStock": available,
+            "unitCost": money_round(product.get("cost")),
+        }
+        if is_admin:
+            row["stockValue"] = money_round(real * float(product.get("cost") or 0))
+        rows.append(row)
+    summary = [
+        report_integer_summary("products", "Produtos", len(rows)),
+        report_integer_summary("real", "Estoque real", sum(item["realStock"] for item in rows)),
+        report_integer_summary("reserved", "Reservado", sum(item["reservedStock"] for item in rows)),
+        report_integer_summary("available", "Disponível", sum(item["availableStock"] for item in rows)),
+    ]
+    columns = [
+        report_column("product", "Produto"),
+        report_column("code", "Código"),
+        report_column("brand", "Marca"),
+        report_column("category", "Categoria"),
+        report_column("size", "Tamanho"),
+        report_column("color", "Cor"),
+        report_column("realStock", "Estoque real", "integer"),
+        report_column("reservedStock", "Reservado", "integer"),
+        report_column("availableStock", "Disponível", "integer"),
+        report_column("unitCost", "Custo unitário", "money"),
+    ]
+    if is_admin:
+        summary.append(
+            report_money_summary(
+                "stockValue",
+                "Valor financeiro",
+                sum(item["stockValue"] for item in rows),
+            )
+        )
+        columns.append(report_column("stockValue", "Valor em estoque", "money"))
+    return rows, columns, summary
+
+
+def build_conditionals_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    today = datetime.now(STORE_TIMEZONE).date()
+    headers = conn.execute(
+        """
+        SELECT id, conditional_number AS "conditionalNumber",
+               customer_id AS "customerId", customer_name AS "customerName",
+               status, checked_out_at AS "checkedOutAt",
+               expected_return_date AS "expectedReturnDate",
+               responsible_user_name AS "responsibleUserName",
+               finalized_at AS "finalizedAt", cancelled_at AS "cancelledAt"
+        FROM conditionals
+        WHERE store_id = ?
+        ORDER BY checked_out_at DESC, conditional_number DESC
+        """,
+        ("matriz",),
+    ).fetchall()
+    item_rows = conn.execute(
+        """
+        SELECT conditional_id AS "conditionalId",
+               original_quantity AS original,
+               returned_quantity AS returned,
+               sold_quantity AS sold,
+               pending_sale_quantity AS "pendingSale"
+        FROM conditional_items
+        WHERE conditional_id IN (
+            SELECT id FROM conditionals WHERE store_id = ?
+        )
+        """,
+        ("matriz",),
+    ).fetchall()
+    quantities: dict[str, dict] = {}
+    for item in item_rows:
+        group = quantities.setdefault(
+            str(item["conditionalId"]),
+            {"sent": 0, "returned": 0, "sold": 0, "pendingSale": 0},
+        )
+        group["sent"] += int(item["original"] or 0)
+        group["returned"] += int(item["returned"] or 0)
+        group["sold"] += int(item["sold"] or 0)
+        group["pendingSale"] += int(item["pendingSale"] or 0)
+    rows = []
+    for source in headers:
+        conditional = dict(source)
+        if not report_period_contains(period, conditional.get("checkedOutAt")):
+            continue
+        expected = report_date_of(conditional.get("expectedReturnDate"))
+        status_key = str(conditional.get("status") or "open")
+        status_label = {
+            "open": "Em aberto",
+            "finalized": "Finalizado",
+            "cancelled": "Cancelado",
+        }.get(status_key, status_key)
+        if status_key == "open" and expected and expected < today:
+            status_key, status_label = "overdue", "Atrasado"
+        if filters["search"] and not report_text_matches(
+            filters["search"],
+            conditional.get("conditionalNumber"),
+            conditional.get("customerName"),
+            conditional.get("responsibleUserName"),
+        ):
+            continue
+        if filters["customer"] and not report_text_matches(
+            filters["customer"],
+            conditional.get("customerId"),
+            conditional.get("customerName"),
+        ):
+            continue
+        if filters["status"] and filters["status"] != status_key:
+            continue
+        quantity = quantities.get(
+            str(conditional["id"]),
+            {"sent": 0, "returned": 0, "sold": 0, "pendingSale": 0},
+        )
+        rows.append({
+            "id": conditional["id"],
+            "number": f"COND{int(conditional.get('conditionalNumber') or 0):04d}",
+            "customer": conditional.get("customerName") or "Não informado",
+            "checkedOutAt": report_datetime_text(conditional.get("checkedOutAt")),
+            "expectedReturnDate": report_date_text(conditional.get("expectedReturnDate")),
+            "sent": quantity["sent"],
+            "returned": quantity["returned"],
+            "sold": quantity["sold"],
+            "pending": max(0, quantity["sent"] - quantity["returned"] - quantity["sold"]),
+            "status": status_label,
+        })
+    return rows, [
+        report_column("number", "Condicional"),
+        report_column("customer", "Cliente"),
+        report_column("checkedOutAt", "Saída"),
+        report_column("expectedReturnDate", "Retorno previsto"),
+        report_column("sent", "Enviadas", "integer"),
+        report_column("returned", "Devolvidas", "integer"),
+        report_column("sold", "Vendidas", "integer"),
+        report_column("pending", "Pendentes", "integer"),
+        report_column("status", "Situação"),
+    ], [
+        report_integer_summary("conditionals", "Condicionais", len(rows)),
+        report_integer_summary("sent", "Peças enviadas", sum(item["sent"] for item in rows)),
+        report_integer_summary("returned", "Peças devolvidas", sum(item["returned"] for item in rows)),
+        report_integer_summary("sold", "Peças vendidas", sum(item["sold"] for item in rows)),
+        report_integer_summary("pending", "Peças pendentes", sum(item["pending"] for item in rows)),
+    ]
+
+
+def build_profit_report(conn, period: dict, filters: dict, is_admin: bool) -> tuple[list[dict], list[dict], list[dict]]:
+    rows, _columns, _summary = build_sold_products_report(
+        conn,
+        period,
+        {**filters, "size": "", "color": ""},
+        True,
+    )
+    for row in rows:
+        revenue = float(row.get("netTotal") or 0)
+        profit = float(row.get("profit") or 0)
+        row["margin"] = money_round((profit / revenue) * 100) if revenue > 0 else 0
+    revenue = money_round(sum(float(item.get("netTotal") or 0) for item in rows))
+    cost = money_round(sum(float(item.get("historicalCost") or 0) for item in rows))
+    profit = money_round(revenue - cost)
+    return rows, [
+        report_column("product", "Produto"),
+        report_column("code", "Código"),
+        report_column("brand", "Marca"),
+        report_column("category", "Categoria"),
+        report_column("quantity", "Peças líquidas", "integer"),
+        report_column("netTotal", "Receita líquida", "money"),
+        report_column("historicalCost", "Custo histórico", "money"),
+        report_column("profit", "Lucro líquido", "money"),
+        report_column("margin", "Margem", "percent"),
+    ], [
+        report_money_summary("revenue", "Receita líquida", revenue),
+        report_money_summary("cost", "Custo histórico", cost),
+        report_money_summary("profit", "Lucro líquido", profit),
+        {
+            "key": "margin",
+            "label": "Margem",
+            "value": money_round((profit / revenue) * 100) if revenue > 0 else 0,
+            "type": "percent",
+        },
+    ]
+
+
+REPORT_BUILDERS = {
+    "sales": build_sales_report,
+    "sold-products": build_sold_products_report,
+    "cash": build_cash_report,
+    "store-credit": build_store_credit_report,
+    "payables": build_payables_report,
+    "stock": build_stock_report,
+    "conditionals": build_conditionals_report,
+    "profit": build_profit_report,
+}
+
+
+def report_period_label(period: dict) -> str:
+    if period.get("start") is None:
+        return "Posição atual"
+    return (
+        f"{period['start'].strftime('%d/%m/%Y')} a "
+        f"{period['end'].strftime('%d/%m/%Y')}"
+    )
+
+
+def build_report_document(
+    report_key: str,
+    args,
+    *,
+    is_admin: bool,
+    export: bool = False,
+) -> dict:
+    definition = REPORT_DEFINITIONS.get(report_key)
+    if not definition:
+        raise ReportOperationError("Relatório não encontrado.", 404)
+    if definition.get("admin_only") and not is_admin:
+        raise ReportOperationError(
+            "Apenas administrador pode acessar este relatório.",
+            403,
+        )
+    period = resolve_report_period(args, definition)
+    filters = {
+        key: report_filter_value(args, key)
+        for key in REPORT_FILTER_LABELS
+    }
+    if filters["method"] and filters["method"] not in REPORT_PAYMENT_LABELS:
+        raise ReportOperationError("Forma de pagamento inválida.")
+    if filters["direction"] and filters["direction"] not in {"in", "out"}:
+        raise ReportOperationError("Tipo de movimentação inválido.")
+    if filters["dateType"] not in {"", "due", "issue"}:
+        raise ReportOperationError("Tipo de data inválido.")
+    page, page_size = report_page_args(args, export)
+    with connect_db() as conn:
+        rows, columns, summary = REPORT_BUILDERS[report_key](
+            conn,
+            period,
+            filters,
+            is_admin,
+        )
+    visible_rows, pagination = report_paginate(rows, page, page_size)
+    user = session.get("user") or {}
+    active_filters = [
+        [REPORT_FILTER_LABELS[key], value]
+        for key, value in filters.items()
+        if key in definition.get("filters", ()) and value
+    ]
+    metadata_display = [
+        ["Loja", "Mova Sports - Loja Matriz"],
+        ["Período", report_period_label(period)],
+        ["Gerado em", datetime.now(STORE_TIMEZONE).strftime("%d/%m/%Y %H:%M")],
+        ["Usuário", user.get("name") or "Não informado"],
+    ]
+    metadata_display.extend(active_filters)
+    return {
+        "key": report_key,
+        "title": definition["title"],
+        "description": definition["description"],
+        "columns": columns,
+        "rows": visible_rows,
+        "summary": summary,
+        "pagination": pagination,
+        "metadata": {
+            "period": {
+                "preset": period.get("preset"),
+                "start": period["start"].isoformat() if period.get("start") else None,
+                "end": period["end"].isoformat() if period.get("end") else None,
+            },
+            "filters": {
+                key: value
+                for key, value in filters.items()
+                if key in definition.get("filters", ()) and value
+            },
+            "display": metadata_display,
+        },
+    }
+
+
 def sync_payable_to_state(payable: dict | None = None, cash: list[dict] | None = None) -> None:
     state, _ = read_state()
     if payable:
@@ -2844,10 +18943,16 @@ def sync_payable_to_state(payable: dict | None = None, cash: list[dict] | None =
 
 
 class PayablePaymentError(Exception):
-    def __init__(self, message: str, status_code: int):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        code: str = "",
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.code = code
 
 
 def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "matriz") -> tuple[dict, list[dict]]:
@@ -2861,7 +18966,15 @@ def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "mat
             SELECT id, supplier, category, amount, issue_date AS issueDate,
                    due_date AS dueDate, notes, paid_amount AS paidAmount,
                    fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
-                   updated_at AS updatedAt
+                   updated_at AS updatedAt, supplier_id AS "supplierId",
+                   expense_category_id AS "expenseCategoryId",
+                   open_amount AS "openAmount", interest, fine, recurring,
+                   recurring_day AS "recurringDay",
+                   recurring_series_id AS "recurringSeriesId",
+                   recurrence_month AS "recurrenceMonth",
+                   generated_from_id AS "generatedFromId", version,
+                   cancelled_at AS "cancelledAt",
+                   cancellation_reason AS "cancellationReason"
             FROM payables
             WHERE store_id = ? AND id = ?{payable_lock}
             """,
@@ -2877,7 +18990,15 @@ def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "mat
         fee = money_round(payload.get("fee", payable.get("fee", 0)))
         discount = money_round(payload.get("discount", payable.get("discount", 0)))
         total_due = money_round(payable["amount"] + fee - discount)
-        open_amount = max(0, money_round(total_due - float(payable.get("paidAmount") or 0)))
+        supplier_adjustments = payable_adjustment_total(conn, payable_id)
+        open_amount = max(
+            0,
+            money_round(
+                total_due
+                - float(payable.get("paidAmount") or 0)
+                - supplier_adjustments
+            ),
+        )
         payment_amount = money_round(payload.get("amount", open_amount))
         if payment_amount <= 0:
             raise PayablePaymentError("Valor pago deve ser maior que zero.", 400)
@@ -2886,19 +19007,30 @@ def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "mat
 
         paid_at = str(payload.get("paidAt") or utc_now())
         method = str(payload.get("method") or "pix").strip()
+        if method not in {"cash", "pix", "debit"}:
+            raise PayablePaymentError(
+                "Use Dinheiro, PIX ou Débito para pagar contas.",
+                400,
+            )
         payable["fee"] = fee
         payable["discount"] = discount
         payable["paidAmount"] = money_round(float(payable.get("paidAmount") or 0) + payment_amount)
-        payable["status"] = "paid" if payable["paidAmount"] + 0.01 >= total_due else "pending"
+        payable["supplierAdjustments"] = supplier_adjustments
+        payable["openAmount"] = max(
+            0,
+            money_round(total_due - payable["paidAmount"] - supplier_adjustments),
+        )
+        payable["status"] = "paid" if payable["openAmount"] <= 0.01 else "pending"
         payable["paidAt"] = paid_at
         payable["updatedAt"] = utc_now()
         movement = normalize_cash_movement_payload({
             "direction": "out",
-            "type": "contas a pagar",
+            "type": payable["category"],
             "description": f"{payable['category']}{' - ' + str(payload.get('note')).strip() if payload.get('note') else ''}",
             "method": method,
             "amount": payment_amount,
             "refId": payable_id,
+            "expenseCategoryId": payable["expenseCategoryId"],
             "createdAt": paid_at,
         })
         cash = [movement]
@@ -2923,9 +19055,10 @@ def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "mat
         conn.execute(
             """
             INSERT INTO cash_movements (
-                id, store_id, direction, type, description, method, amount, ref_id, created_at
+                id, store_id, direction, type, description, method, amount,
+                ref_id, expense_category_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 movement["id"],
@@ -2936,6 +19069,7 @@ def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "mat
                 movement["method"],
                 float(movement["amount"]),
                 movement["refId"],
+                movement["expenseCategoryId"] or None,
                 movement["createdAt"],
             ),
         )
@@ -2966,20 +19100,789 @@ def persist_payable_payment(payable_id: str, payload: dict, store_id: str = "mat
     return payable, cash
 
 
+def payable_event(
+    conn,
+    *,
+    payable_id: str,
+    event_type: str,
+    previous_status: str,
+    new_status: str,
+    details: dict,
+    store_id: str = "matriz",
+    payment_id: str = "",
+    created_at: str | None = None,
+) -> dict:
+    user = session.get("user") or {}
+    event = {
+        "id": os.urandom(16).hex(),
+        "payableId": payable_id,
+        "type": event_type,
+        "paymentId": payment_id,
+        "previousStatus": previous_status,
+        "newStatus": new_status,
+        "details": details,
+        "userId": user.get("id", ""),
+        "userName": user.get("name", ""),
+        "createdAt": created_at or utc_now(),
+    }
+    conn.execute(
+        """
+        INSERT INTO payable_events (
+            id, store_id, payable_id, event_type, payment_id,
+            previous_status, new_status, details_json, user_id,
+            user_name, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event["id"],
+            store_id,
+            payable_id,
+            event_type,
+            payment_id or None,
+            previous_status or None,
+            new_status or None,
+            json.dumps(details, ensure_ascii=False, sort_keys=True),
+            event["userId"] or None,
+            event["userName"] or None,
+            event["createdAt"],
+        ),
+    )
+    return event
+
+
+def payable_relational_details(
+    conn,
+    payable_id: str,
+) -> tuple[list[dict], list[dict]]:
+    payments = [
+        {
+            "id": row["id"],
+            "payableId": row["payableId"],
+            "cashMovementId": row["cashMovementId"],
+            "amount": money_round(row["amount"]),
+            "interest": money_round(row["interest"]),
+            "fine": money_round(row["fine"]),
+            "discount": money_round(row["discount"]),
+            "method": row["method"],
+            "note": row["note"] or "",
+            "status": row["status"],
+            "reversalCashMovementId": row["reversalCashMovementId"] or "",
+            "reversedAt": row["reversedAt"] or "",
+            "reversalReason": row["reversalReason"] or "",
+            "userId": row["userId"] or "",
+            "userName": row["userName"] or "",
+            "createdAt": row["createdAt"],
+        }
+        for row in conn.execute(
+            """
+            SELECT id, payable_id AS "payableId",
+                   cash_movement_id AS "cashMovementId", amount,
+                   interest_amount AS interest, fine_amount AS fine,
+                   discount_amount AS discount, method, note, status,
+                   reversal_cash_movement_id AS "reversalCashMovementId",
+                   reversed_at AS "reversedAt",
+                   reversal_reason AS "reversalReason",
+                   user_id AS "userId", user_name AS "userName",
+                   created_at AS "createdAt"
+            FROM payable_payments
+            WHERE payable_id = ?
+            ORDER BY created_at, id
+            """,
+            (payable_id,),
+        ).fetchall()
+    ]
+    events = []
+    for row in conn.execute(
+        """
+        SELECT id, event_type AS type, payment_id AS "paymentId",
+               previous_status AS "previousStatus",
+               new_status AS "newStatus", details_json AS details,
+               user_id AS "userId", user_name AS "userName",
+               created_at AS "createdAt"
+        FROM payable_events
+        WHERE payable_id = ?
+        ORDER BY created_at, id
+        """,
+        (payable_id,),
+    ).fetchall():
+        try:
+            details = json.loads(row["details"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            details = {}
+        events.append({
+            "id": row["id"],
+            "type": row["type"],
+            "paymentId": row["paymentId"] or "",
+            "previousStatus": row["previousStatus"] or "",
+            "newStatus": row["newStatus"] or "",
+            "details": details,
+            "userId": row["userId"] or "",
+            "userName": row["userName"] or "",
+            "createdAt": row["createdAt"],
+        })
+    return payments, events
+
+
+def replace_payable_in_state(state: dict, payable: dict) -> None:
+    current = state.get("payables")
+    current = current if isinstance(current, list) else []
+    state["payables"] = [
+        payable,
+        *[
+            item
+            for item in current
+            if str(item.get("id", "")) != str(payable["id"])
+        ],
+    ]
+
+
+def payable_v14_select(lock_clause: str = "") -> str:
+    return f"""
+        SELECT id, supplier, category, amount, issue_date AS "issueDate",
+               due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+               fee, discount, status, paid_at AS "paidAt",
+               created_at AS "createdAt", updated_at AS "updatedAt",
+               supplier_id AS "supplierId",
+               expense_category_id AS "expenseCategoryId",
+               open_amount AS "openAmount", interest, fine, recurring,
+               recurring_day AS "recurringDay",
+               recurring_series_id AS "recurringSeriesId",
+               recurrence_month AS "recurrenceMonth",
+               generated_from_id AS "generatedFromId", version,
+               cancelled_at AS "cancelledAt",
+               cancellation_reason AS "cancellationReason"
+        FROM payables
+        WHERE store_id = ? AND id = ?{lock_clause}
+    """
+
+
+def persist_payable_payment_v14(
+    payable_id: str,
+    payload: dict,
+    idempotency_key: str = "",
+    store_id: str = "matriz",
+) -> tuple[dict, list[dict], bool]:
+    key = str(
+        idempotency_key or payload.get("idempotencyKey") or ""
+    ).strip() or os.urandom(16).hex()
+    method = str(payload.get("method") or "pix").strip()
+    interest = money_round(payload.get("interest", payload.get("fee", 0)))
+    fine = money_round(payload.get("fine", 0))
+    discount = money_round(payload.get("discount", 0))
+    requested_amount = payload.get("amount")
+    note = str(payload.get("note", "") or "").strip()
+    request_hash = operation_request_hash({
+        "payableId": payable_id,
+        "amount": (
+            money_round(requested_amount)
+            if requested_amount is not None
+            else None
+        ),
+        "interest": interest,
+        "fine": fine,
+        "discount": discount,
+        "method": method,
+        "note": note,
+    })
+    if method not in {"cash", "pix", "debit"}:
+        raise PayablePaymentError(
+            "Use Dinheiro, PIX ou Debito para pagar contas."
+        )
+    if min(interest, fine, discount) < 0:
+        raise PayablePaymentError(
+            "Juros, multa e desconto nao podem ser negativos."
+        )
+
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT response_json AS "responseJson",
+                   request_hash AS "requestHash"
+            FROM payable_payments
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise PayablePaymentError(
+                    "A chave de idempotencia ja foi utilizada.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                result = json.loads(replay["responseJson"])
+            except (json.JSONDecodeError, TypeError) as error:
+                raise PayablePaymentError(
+                    "O pagamento existe, mas sua resposta historica esta inconsistente.",
+                    409,
+                    "HISTORICAL_RESPONSE_INCONSISTENT",
+                ) from error
+            return result["payable"], result["cash"], True
+
+        row = conn.execute(
+            payable_v14_select(lock_clause),
+            (store_id, payable_id),
+        ).fetchone()
+        if not row:
+            raise PayablePaymentError("Conta não encontrada.", 404)
+        payable = payable_from_row(row)
+        if payable["status"] == "paid":
+            raise PayablePaymentError(
+                "Conta já está paga.",
+                409,
+            )
+        if payable["status"] == "cancelled":
+            raise PayablePaymentError(
+                "Conta cancelada não pode receber nova baixa.",
+                409,
+            )
+        if (
+            payable.get("openAmount") is None
+            and payable["interest"] + payable["fine"] <= 0.009
+            and payable["fee"] > 0.009
+        ):
+            payable["interest"] = payable["fee"]
+        supplier_adjustments = payable_adjustment_total(conn, payable_id)
+        open_before = max(
+            0,
+            money_round(
+                payable["amount"]
+                + payable["interest"]
+                + payable["fine"]
+                - payable["discount"]
+                - payable["paidAmount"]
+                - supplier_adjustments
+            ),
+        )
+        adjusted_open = money_round(open_before + interest + fine - discount)
+        if adjusted_open < -0.009:
+            raise PayablePaymentError(
+                "O desconto nao pode superar o saldo acrescido dos ajustes."
+            )
+        adjusted_open = max(0, adjusted_open)
+        payment_amount = money_round(
+            adjusted_open if requested_amount is None else requested_amount
+        )
+        if payment_amount < 0 or (
+            payment_amount <= 0.009 and adjusted_open > 0.009
+        ):
+            raise PayablePaymentError("Valor pago deve ser maior que zero.")
+        if payment_amount - adjusted_open > 0.01:
+            raise PayablePaymentError(
+                "Valor pago nao pode ser maior que o saldo em aberto."
+            )
+
+        paid_at = utc_now()
+        previous_status = payable["status"]
+        payable["interest"] = money_round(payable["interest"] + interest)
+        payable["fine"] = money_round(payable["fine"] + fine)
+        payable["fee"] = money_round(
+            payable["interest"] + payable["fine"]
+        )
+        payable["discount"] = money_round(payable["discount"] + discount)
+        payable["paidAmount"] = money_round(
+            payable["paidAmount"] + payment_amount
+        )
+        payable["supplierAdjustments"] = supplier_adjustments
+        payable["openAmount"] = max(
+            0,
+            money_round(adjusted_open - payment_amount),
+        )
+        payable["status"] = (
+            "paid" if payable["openAmount"] <= 0.01 else "pending"
+        )
+        payable["paidAt"] = paid_at if payable["status"] == "paid" else ""
+        payable["updatedAt"] = paid_at
+        payable["version"] += 1
+        payment_id = os.urandom(16).hex()
+        movement = None
+        if payment_amount > 0.009:
+            movement = normalize_cash_movement_payload({
+                "direction": "out",
+                "type": payable["category"],
+                "description": (
+                    f"{payable['category']}{' - ' + note if note else ''}"
+                ),
+                "method": method,
+                "amount": payment_amount,
+                "refId": payable_id,
+                "expenseCategoryId": payable["expenseCategoryId"],
+                "originType": "payable_payment",
+                "originId": payment_id,
+                "createdAt": paid_at,
+            })
+            movement = insert_cash_movement(conn, movement, store_id)
+        conn.execute(
+            """
+            UPDATE payables
+            SET paid_amount = ?, fee = ?, discount = ?, status = ?,
+                paid_at = ?, updated_at = ?, open_amount = ?,
+                interest = ?, fine = ?, version = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                payable["paidAmount"],
+                payable["fee"],
+                payable["discount"],
+                payable["status"],
+                payable["paidAt"],
+                payable["updatedAt"],
+                payable["openAmount"],
+                payable["interest"],
+                payable["fine"],
+                payable["version"],
+                store_id,
+                payable_id,
+            ),
+        )
+        user = session.get("user") or {}
+        conn.execute(
+            """
+            INSERT INTO payable_payments (
+                id, store_id, payable_id, cash_movement_id, amount,
+                interest_amount, fine_amount, discount_amount, method,
+                note, status, user_id, user_name, idempotency_key,
+                request_hash, response_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payment_id,
+                store_id,
+                payable_id,
+                movement["id"] if movement else None,
+                payment_amount,
+                interest,
+                fine,
+                discount,
+                method,
+                note or None,
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                "{}",
+                paid_at,
+            ),
+        )
+        payable_event(
+            conn,
+            payable_id=payable_id,
+            event_type="payment",
+            payment_id=payment_id,
+            previous_status=previous_status,
+            new_status=payable["status"],
+            details={
+                "amount": payment_amount,
+                "interest": interest,
+                "fine": fine,
+                "discount": discount,
+                "method": method,
+                "openAmount": payable["openAmount"],
+            },
+            created_at=paid_at,
+        )
+        payments, events = payable_relational_details(conn, payable_id)
+        payable["payments"] = payments
+        payable["events"] = events
+        cash = [movement] if movement else []
+        result = {"payable": payable, "cash": cash}
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            "UPDATE payable_payments SET response_json = ? WHERE id = ?",
+            (response_json, payment_id),
+        )
+        state = load_locked_app_state(conn)
+        replace_payable_in_state(state, payable)
+        if movement:
+            replace_cash_in_state(state, movement)
+        persist_targeted_app_state(conn, state, paid_at)
+        record_audit(
+            "pay",
+            "payable",
+            payable_id,
+            {"paymentId": payment_id, "payable": payable, "cash": cash},
+            conn=conn,
+        )
+    return payable, cash, False
+
+
+def persist_payable_payment_reversal(
+    payable_id: str,
+    payment_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    reason = str(payload.get("reason", "") or "").strip()
+    key = str(idempotency_key or "").strip()
+    if not reason:
+        raise PayablePaymentError("Informe o motivo do estorno.")
+    if not key or len(key) > 160:
+        raise PayablePaymentError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = operation_request_hash({
+        "payableId": payable_id,
+        "paymentId": payment_id,
+        "reason": reason,
+    })
+    now = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT reversal_request_hash AS "requestHash",
+                   reversal_response_json AS "responseJson"
+            FROM payable_payments
+            WHERE store_id = ?
+              AND reversal_idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise PayablePaymentError(
+                    "A chave de idempotencia ja foi utilizada.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                return json.loads(replay["responseJson"]), True
+            except (json.JSONDecodeError, TypeError) as error:
+                raise PayablePaymentError(
+                    "O estorno existe, mas sua resposta historica esta inconsistente.",
+                    409,
+                    "HISTORICAL_RESPONSE_INCONSISTENT",
+                ) from error
+
+        payable_row = conn.execute(
+            payable_v14_select(lock_clause),
+            (store_id, payable_id),
+        ).fetchone()
+        if not payable_row:
+            raise PayablePaymentError("Conta nao encontrada.", 404)
+        payment = conn.execute(
+            f"""
+            SELECT id, cash_movement_id AS "cashMovementId",
+                   amount, interest_amount AS interest,
+                   fine_amount AS fine, discount_amount AS discount,
+                   method, status
+            FROM payable_payments
+            WHERE store_id = ? AND payable_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, payable_id, payment_id),
+        ).fetchone()
+        if not payment:
+            raise PayablePaymentError("Pagamento nao encontrado.", 404)
+        if payment["status"] == "reversed":
+            raise PayablePaymentError(
+                "O pagamento ja foi estornado.",
+                409,
+                "PAYMENT_ALREADY_REVERSED",
+            )
+        payable = payable_from_row(payable_row)
+        previous_status = payable["status"]
+        payable["paidAmount"] = max(
+            0,
+            money_round(payable["paidAmount"] - payment["amount"]),
+        )
+        payable["interest"] = max(
+            0,
+            money_round(payable["interest"] - payment["interest"]),
+        )
+        payable["fine"] = max(
+            0,
+            money_round(payable["fine"] - payment["fine"]),
+        )
+        payable["fee"] = money_round(
+            payable["interest"] + payable["fine"]
+        )
+        payable["discount"] = max(
+            0,
+            money_round(payable["discount"] - payment["discount"]),
+        )
+        supplier_adjustments = payable_adjustment_total(conn, payable_id)
+        payable["openAmount"] = max(
+            0,
+            money_round(
+                payable["amount"]
+                + payable["interest"]
+                + payable["fine"]
+                - payable["discount"]
+                - payable["paidAmount"]
+                - supplier_adjustments
+            ),
+        )
+        payable["status"] = "pending"
+        payable["paidAt"] = ""
+        payable["updatedAt"] = now
+        payable["version"] += 1
+        reversal = None
+        if money_round(payment["amount"]) > 0.009:
+            reversal = normalize_cash_movement_payload({
+                "direction": "in",
+                "type": "estorno conta a pagar",
+                "description": f"Estorno de pagamento - {reason}",
+                "method": payment["method"],
+                "amount": payment["amount"],
+                "refId": payable_id,
+                "originType": "payable_payment_reversal",
+                "originId": payment_id,
+                "reversalOfId": payment["cashMovementId"] or "",
+                "idempotencyKey": key,
+                "requestHash": request_hash,
+                "createdAt": now,
+            })
+            reversal = insert_cash_movement(conn, reversal, store_id)
+        conn.execute(
+            """
+            UPDATE payable_payments
+            SET status = 'reversed', reversal_cash_movement_id = ?,
+                reversed_at = ?, reversal_reason = ?,
+                reversal_idempotency_key = ?,
+                reversal_request_hash = ?
+            WHERE id = ?
+            """,
+            (
+                reversal["id"] if reversal else None,
+                now,
+                reason,
+                key,
+                request_hash,
+                payment_id,
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE payables
+            SET paid_amount = ?, interest = ?, fine = ?, fee = ?,
+                discount = ?, open_amount = ?, status = 'pending',
+                paid_at = NULL, updated_at = ?, version = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                payable["paidAmount"],
+                payable["interest"],
+                payable["fine"],
+                payable["fee"],
+                payable["discount"],
+                payable["openAmount"],
+                now,
+                payable["version"],
+                store_id,
+                payable_id,
+            ),
+        )
+        payable_event(
+            conn,
+            payable_id=payable_id,
+            event_type="payment_reversal",
+            payment_id=payment_id,
+            previous_status=previous_status,
+            new_status="pending",
+            details={
+                "reason": reason,
+                "amount": money_round(payment["amount"]),
+                "openAmount": payable["openAmount"],
+            },
+            created_at=now,
+        )
+        payments, events = payable_relational_details(conn, payable_id)
+        payable["payments"] = payments
+        payable["events"] = events
+        cash = [reversal] if reversal else []
+        result = {"payable": payable, "cash": cash}
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            UPDATE payable_payments
+            SET reversal_response_json = ?
+            WHERE id = ?
+            """,
+            (response_json, payment_id),
+        )
+        if reversal:
+            conn.execute(
+                "UPDATE cash_movements SET response_json = ? WHERE id = ?",
+                (response_json, reversal["id"]),
+            )
+        state = load_locked_app_state(conn)
+        replace_payable_in_state(state, payable)
+        if reversal:
+            replace_cash_in_state(state, reversal)
+        persist_targeted_app_state(conn, state, now)
+        record_audit(
+            "reverse_payment",
+            "payable",
+            payable_id,
+            {"paymentId": payment_id, "reason": reason},
+            conn=conn,
+        )
+        return result, False
+
+
+def persist_payable_cancellation(
+    payable_id: str,
+    payload: dict,
+    store_id: str = "matriz",
+) -> dict:
+    reason = str(payload.get("reason", "") or "").strip()
+    if not reason:
+        raise PayablePaymentError("Informe o motivo do cancelamento.")
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            payable_v14_select(lock_clause),
+            (store_id, payable_id),
+        ).fetchone()
+        if not row:
+            raise PayablePaymentError("Conta nao encontrada.", 404)
+        payable = payable_from_row(row)
+        if payable["status"] == "cancelled":
+            raise PayablePaymentError("Conta ja cancelada.", 409)
+        active_payment = conn.execute(
+            """
+            SELECT 1 FROM payable_payments
+            WHERE payable_id = ? AND status = 'active'
+            LIMIT 1
+            """,
+            (payable_id,),
+        ).fetchone()
+        if payable["paidAmount"] > 0.009 or active_payment:
+            raise PayablePaymentError(
+                "Estorne os pagamentos antes de cancelar a conta.",
+                409,
+                "PAYABLE_HAS_PAYMENTS",
+            )
+        if payable_adjustment_total(conn, payable_id) > 0.009:
+            raise PayablePaymentError(
+                "A conta possui credito de fornecedor aplicado e nao pode ser cancelada.",
+                409,
+                "PAYABLE_HAS_SUPPLIER_CREDIT",
+            )
+        previous_status = payable["status"]
+        payable["status"] = "cancelled"
+        payable["openAmount"] = 0.0
+        payable["cancelledAt"] = now
+        payable["cancellationReason"] = reason
+        payable["updatedAt"] = now
+        payable["version"] += 1
+        conn.execute(
+            """
+            UPDATE payables
+            SET status = 'cancelled', open_amount = 0,
+                cancelled_at = ?, cancellation_reason = ?,
+                cancelled_by_id = ?, cancelled_by_name = ?,
+                updated_at = ?, version = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                now,
+                reason,
+                user.get("id") or None,
+                user.get("name") or None,
+                now,
+                payable["version"],
+                store_id,
+                payable_id,
+            ),
+        )
+        payable_event(
+            conn,
+            payable_id=payable_id,
+            event_type="cancelled",
+            previous_status=previous_status,
+            new_status="cancelled",
+            details={"reason": reason},
+            created_at=now,
+        )
+        payments, events = payable_relational_details(conn, payable_id)
+        payable["payments"] = payments
+        payable["events"] = events
+        state = load_locked_app_state(conn)
+        replace_payable_in_state(state, payable)
+        persist_targeted_app_state(conn, state, now)
+        record_audit(
+            "cancel",
+            "payable",
+            payable_id,
+            {"reason": reason},
+            conn=conn,
+        )
+        return payable
+
+
 def persist_payable_creation(payable: dict, store_id: str = "matriz") -> str:
     updated_at = utc_now()
+    payable["interest"] = money_round(payable.get("interest", 0))
+    payable["fine"] = money_round(payable.get("fine", 0))
+    payable["fee"] = money_round(payable["interest"] + payable["fine"])
+    payable["openAmount"] = max(
+        0,
+        money_round(
+            payable["amount"]
+            + payable["interest"]
+            + payable["fine"]
+            - payable["discount"]
+            - payable["paidAmount"]
+        ),
+    )
+    if payable.get("recurring"):
+        try:
+            recurring_day = int(
+                payable.get("recurringDay")
+                or str(payable.get("dueDate") or "")[-2:]
+            )
+        except (TypeError, ValueError) as error:
+            raise CatalogOperationError(
+                "Informe um dia valido para a recorrencia."
+            ) from error
+        if recurring_day < 1 or recurring_day > 31:
+            raise CatalogOperationError(
+                "Informe um dia valido para a recorrencia."
+            )
+        payable["recurringDay"] = recurring_day
+        payable["recurringSeriesId"] = (
+            payable.get("recurringSeriesId") or payable["id"]
+        )
+        payable["recurrenceMonth"] = (
+            payable.get("recurrenceMonth")
+            or str(payable.get("dueDate") or "")[:7]
+        )
     with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        if payable.get("supplierId") or payable.get("expenseCategoryId"):
+            resolve_payable_catalog_links(conn, payable, store_id)
         conn.execute(
             """
             INSERT INTO payables (
                 id, store_id, supplier, category, amount, issue_date, due_date,
-                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at
+                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at,
+                supplier_id, expense_category_id, open_amount, interest, fine,
+                recurring, recurring_day, recurring_series_id,
+                recurrence_month, generated_from_id, version
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 store_id = excluded.store_id,
                 supplier = excluded.supplier,
                 category = excluded.category,
+                supplier_id = excluded.supplier_id,
+                expense_category_id = excluded.expense_category_id,
                 amount = excluded.amount,
                 issue_date = excluded.issue_date,
                 due_date = excluded.due_date,
@@ -2990,7 +19893,16 @@ def persist_payable_creation(payable: dict, store_id: str = "matriz") -> str:
                 status = excluded.status,
                 paid_at = excluded.paid_at,
                 created_at = excluded.created_at,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                open_amount = excluded.open_amount,
+                interest = excluded.interest,
+                fine = excluded.fine,
+                recurring = excluded.recurring,
+                recurring_day = excluded.recurring_day,
+                recurring_series_id = excluded.recurring_series_id,
+                recurrence_month = excluded.recurrence_month,
+                generated_from_id = excluded.generated_from_id,
+                version = excluded.version
             """,
             (
                 payable["id"],
@@ -3008,34 +19920,238 @@ def persist_payable_creation(payable: dict, store_id: str = "matriz") -> str:
                 payable["paidAt"],
                 payable["createdAt"],
                 payable["updatedAt"],
+                payable.get("supplierId") or None,
+                payable.get("expenseCategoryId") or None,
+                payable["openAmount"],
+                payable["interest"],
+                payable["fine"],
+                1 if payable.get("recurring") else 0,
+                payable.get("recurringDay"),
+                payable.get("recurringSeriesId") or None,
+                payable.get("recurrenceMonth") or None,
+                payable.get("generatedFromId") or None,
+                int(payable.get("version", 0) or 0),
             ),
         )
 
-        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
-        row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
-        if row:
-            try:
-                state = json.loads(row["data"])
-            except json.JSONDecodeError:
-                state = default_state()
-        else:
-            state = default_state()
-        if not isinstance(state, dict):
-            state = default_state()
-        current_payables = state.get("payables")
-        payables = current_payables if isinstance(current_payables, list) else []
-        state["payables"] = [item for item in payables if item.get("id") != payable["id"]]
-        state["payables"].append(payable)
-        conn.execute(
-            """
-            INSERT INTO app_state (id, data, updated_at)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-            """,
-            (json.dumps(state, ensure_ascii=False), updated_at),
+        payable_event(
+            conn,
+            payable_id=payable["id"],
+            event_type=(
+                "recurrence" if payable.get("generatedFromId") else "created"
+            ),
+            previous_status="",
+            new_status=payable["status"],
+            details={
+                "amount": payable["amount"],
+                "dueDate": payable["dueDate"],
+                "recurring": bool(payable.get("recurring")),
+            },
+            created_at=payable["createdAt"],
         )
+        state = load_locked_app_state(conn)
+        replace_payable_in_state(state, payable)
+        persist_targeted_app_state(conn, state, updated_at)
         record_audit("create", "payable", payable["id"], {"payable": payable}, conn=conn)
     return updated_at
+
+
+def payable_recurrence_month_after(month_value: str) -> str:
+    try:
+        year, month = (int(part) for part in month_value.split("-", 1))
+        current = date(year, month, 1)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise PayablePaymentError(
+            "Mes de recorrencia invalido.",
+            400,
+            "INVALID_RECURRENCE_MONTH",
+        ) from error
+    if current.month == 12:
+        return f"{current.year + 1:04d}-01"
+    return f"{current.year:04d}-{current.month + 1:02d}"
+
+
+def payable_recurrence_date(month_value: str, day_value: int) -> str:
+    year, month = (int(part) for part in month_value.split("-", 1))
+    day = min(max(1, int(day_value)), monthrange(year, month)[1])
+    return date(year, month, day).isoformat()
+
+
+def persist_payable_recurrences(
+    target_month: str = "",
+    store_id: str = "matriz",
+) -> list[dict]:
+    operational_today = datetime.now(STORE_TIMEZONE).date()
+    default_target = payable_recurrence_month_after(
+        operational_today.strftime("%Y-%m")
+    )
+    target = str(target_month or default_target).strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", target):
+        raise PayablePaymentError(
+            "Mes de recorrencia invalido.",
+            400,
+            "INVALID_RECURRENCE_MONTH",
+        )
+    try:
+        target_date = date.fromisoformat(f"{target}-01")
+    except ValueError as error:
+        raise PayablePaymentError(
+            "Mes de recorrencia invalido.",
+            400,
+            "INVALID_RECURRENCE_MONTH",
+        ) from error
+    maximum_target = date.fromisoformat(
+        f"{payable_recurrence_month_after(default_target)}-01"
+    )
+    if target_date > maximum_target:
+        raise PayablePaymentError(
+            "A geracao recorrente esta limitada aos proximos meses.",
+            400,
+            "RECURRENCE_RANGE_EXCEEDED",
+        )
+
+    created: list[dict] = []
+    now = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        rows = conn.execute(
+            f"""
+            {payable_v14_select(lock_clause)}
+            """.replace(
+                f"WHERE store_id = ? AND id = ?{lock_clause}",
+                (
+                    "WHERE store_id = ? AND recurring = 1 "
+                    "AND recurring_series_id IS NOT NULL "
+                    f"ORDER BY recurring_series_id, recurrence_month{lock_clause}"
+                ),
+            ),
+            (store_id,),
+        ).fetchall()
+        latest_by_series: dict[str, dict] = {}
+        for row in rows:
+            payable = payable_from_row(row)
+            series_id = payable["recurringSeriesId"]
+            if (
+                series_id
+                and payable["recurrenceMonth"]
+                and (
+                    series_id not in latest_by_series
+                    or payable["recurrenceMonth"]
+                    > latest_by_series[series_id]["recurrenceMonth"]
+                )
+            ):
+                latest_by_series[series_id] = payable
+
+        for series_id, latest in latest_by_series.items():
+            source = latest
+            month_value = source["recurrenceMonth"]
+            generated_count = 0
+            while month_value < target:
+                month_value = payable_recurrence_month_after(month_value)
+                if month_value > target:
+                    break
+                existing = conn.execute(
+                    """
+                    SELECT id FROM payables
+                    WHERE store_id = ? AND recurring_series_id = ?
+                      AND recurrence_month = ?
+                    """,
+                    (store_id, series_id, month_value),
+                ).fetchone()
+                if existing:
+                    continue
+                generated_count += 1
+                due_date = payable_recurrence_date(
+                    month_value,
+                    source["recurringDay"],
+                )
+                issue_day = int(str(source.get("issueDate") or "01")[-2:])
+                issue_date = payable_recurrence_date(month_value, issue_day)
+                payable = {
+                    **source,
+                    "id": os.urandom(16).hex(),
+                    "issueDate": issue_date,
+                    "dueDate": due_date,
+                    "paidAmount": 0.0,
+                    "fee": 0.0,
+                    "discount": 0.0,
+                    "interest": 0.0,
+                    "fine": 0.0,
+                    "openAmount": source["amount"],
+                    "status": "pending",
+                    "paidAt": "",
+                    "recurrenceMonth": month_value,
+                    "generatedFromId": source["id"],
+                    "version": 0,
+                    "createdAt": now,
+                    "updatedAt": now,
+                    "payments": [],
+                    "events": [],
+                }
+                conn.execute(
+                    """
+                    INSERT INTO payables (
+                        id, store_id, supplier, category, amount, issue_date,
+                        due_date, notes, paid_amount, fee, discount, status,
+                        paid_at, created_at, updated_at, supplier_id,
+                        expense_category_id, open_amount, interest, fine,
+                        recurring, recurring_day, recurring_series_id,
+                        recurrence_month, generated_from_id, version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                              ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payable["id"], store_id, payable["supplier"],
+                        payable["category"], payable["amount"],
+                        payable["issueDate"], payable["dueDate"],
+                        payable["notes"], 0, 0, 0, "pending", None,
+                        now, now, payable["supplierId"] or None,
+                        payable["expenseCategoryId"] or None,
+                        payable["openAmount"], 0, 0, 1,
+                        payable["recurringDay"], series_id, month_value,
+                        source["id"], 0,
+                    ),
+                )
+                payable_event(
+                    conn,
+                    payable_id=payable["id"],
+                    event_type="recurrence",
+                    previous_status="",
+                    new_status="pending",
+                    details={
+                        "seriesId": series_id,
+                        "recurrenceMonth": month_value,
+                        "generatedFromId": source["id"],
+                    },
+                    created_at=now,
+                )
+                source = payable
+                created.append(payable)
+                if generated_count > 24:
+                    raise PayablePaymentError(
+                        "Limite de recorrencias excedido.",
+                        409,
+                        "RECURRENCE_LIMIT_EXCEEDED",
+                    )
+
+        if created:
+            state = load_locked_app_state(conn)
+            for payable in created:
+                replace_payable_in_state(state, payable)
+            persist_targeted_app_state(conn, state, now)
+            record_audit(
+                "create",
+                "payable_recurrence",
+                target,
+                {
+                    "targetMonth": target,
+                    "createdIds": [item["id"] for item in created],
+                },
+                conn=conn,
+            )
+    return created
 
 
 def persist_payable_update(
@@ -3050,44 +20166,89 @@ def persist_payable_update(
 
         lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
         row = conn.execute(
-            f"""
-            SELECT id, supplier, category, amount, issue_date AS issueDate,
-                   due_date AS dueDate, notes, paid_amount AS paidAmount,
-                   fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
-                   updated_at AS updatedAt
-            FROM payables
-            WHERE store_id = ? AND id = ?{lock_clause}
-            """,
+            payable_v14_select(lock_clause),
             (store_id, payable_id),
         ).fetchone()
         if not row:
             return None, None
 
-        payable = normalize_payable_payload(payload, payable_from_row(row))
+        existing = payable_from_row(row)
+        if existing["status"] in {"paid", "cancelled"}:
+            return None, "Conta paga ou cancelada nao pode ser editada."
+        if existing["paidAmount"] > 0.009:
+            protected_fields = {
+                "amount", "supplierId", "supplier", "expenseCategoryId",
+                "category", "issueDate", "dueDate",
+            }
+            if any(
+                key in payload
+                and str(payload.get(key)) != str(existing.get(key))
+                for key in protected_fields
+            ):
+                return None, (
+                    "Conta com pagamento parcial permite alterar apenas "
+                    "observacoes."
+                )
+        payable = normalize_payable_payload(payload, existing)
         payable["id"] = payable_id
+        if payable.get("supplierId") or payable.get("expenseCategoryId"):
+            try:
+                resolve_payable_catalog_links(conn, payable, store_id)
+            except CatalogOperationError as error:
+                return None, error.message
         error = validate_payable(payable)
         if error:
             return None, error
-
-        state_row = conn.execute(
-            f"SELECT data FROM app_state WHERE id = 1{lock_clause}"
-        ).fetchone()
-        if state_row:
+        if payable.get("recurring"):
             try:
-                state = json.loads(state_row["data"])
-            except json.JSONDecodeError:
-                state = default_state()
+                recurring_day = int(
+                    payable.get("recurringDay")
+                    or str(payable.get("dueDate") or "")[-2:]
+                )
+            except (TypeError, ValueError):
+                return None, "Informe um dia valido para a recorrencia."
+            if recurring_day < 1 or recurring_day > 31:
+                return None, "Informe um dia valido para a recorrencia."
+            payable["recurringDay"] = recurring_day
+            payable["recurringSeriesId"] = (
+                payable.get("recurringSeriesId") or payable_id
+            )
+            payable["recurrenceMonth"] = (
+                payable.get("recurrenceMonth")
+                or str(payable.get("dueDate") or "")[:7]
+            )
         else:
-            state = default_state()
-        if not isinstance(state, dict):
-            state = default_state()
+            payable["recurringDay"] = None
+            payable["recurringSeriesId"] = ""
+            payable["recurrenceMonth"] = ""
+        supplier_adjustments = payable_adjustment_total(conn, payable_id)
+        payable["supplierAdjustments"] = supplier_adjustments
+        payable["openAmount"] = max(
+            0,
+            money_round(
+                payable["amount"]
+                + payable["interest"]
+                + payable["fine"]
+                - payable["discount"]
+                - payable["paidAmount"]
+                - supplier_adjustments
+            ),
+        )
+        payable["fee"] = money_round(
+            payable["interest"] + payable["fine"]
+        )
+        payable["version"] = int(existing.get("version", 0) or 0) + 1
 
         conn.execute(
             """
             UPDATE payables
             SET supplier = ?, category = ?, amount = ?, issue_date = ?, due_date = ?,
                 notes = ?, paid_amount = ?, fee = ?, discount = ?, status = ?, paid_at = ?,
-                created_at = ?, updated_at = ?
+                created_at = ?, updated_at = ?, supplier_id = ?,
+                expense_category_id = ?, open_amount = ?, interest = ?,
+                fine = ?, recurring = ?, recurring_day = ?,
+                recurring_series_id = ?, recurrence_month = ?,
+                generated_from_id = ?, version = ?
             WHERE store_id = ? AND id = ?
             """,
             (
@@ -3104,23 +20265,41 @@ def persist_payable_update(
                 payable["paidAt"],
                 payable["createdAt"],
                 payable["updatedAt"],
+                payable["supplierId"] or None,
+                payable["expenseCategoryId"] or None,
+                payable["openAmount"],
+                payable["interest"],
+                payable["fine"],
+                1 if payable.get("recurring") else 0,
+                payable.get("recurringDay"),
+                payable.get("recurringSeriesId") or None,
+                payable.get("recurrenceMonth") or None,
+                payable.get("generatedFromId") or None,
+                payable["version"],
                 store_id,
                 payable_id,
             ),
         )
-
-        current_payables = state.get("payables")
-        payables = current_payables if isinstance(current_payables, list) else []
-        state["payables"] = [item for item in payables if item.get("id") != payable_id]
-        state["payables"].append(payable)
-        conn.execute(
-            """
-            INSERT INTO app_state (id, data, updated_at)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-            """,
-            (json.dumps(state, ensure_ascii=False), updated_at),
+        payable_event(
+            conn,
+            payable_id=payable_id,
+            event_type="updated",
+            previous_status=existing["status"],
+            new_status=payable["status"],
+            details={
+                "amountBefore": existing["amount"],
+                "amountAfter": payable["amount"],
+                "dueDateBefore": existing["dueDate"],
+                "dueDateAfter": payable["dueDate"],
+            },
+            created_at=updated_at,
         )
+        payments, events = payable_relational_details(conn, payable_id)
+        payable["payments"] = payments
+        payable["events"] = events
+        state = load_locked_app_state(conn)
+        replace_payable_in_state(state, payable)
+        persist_targeted_app_state(conn, state, updated_at)
         record_audit("update", "payable", payable_id, {"payable": payable}, conn=conn)
     return payable, None
 
@@ -3161,52 +20340,1336 @@ def sync_cash_movements_to_state(movements: list[dict], settle_card_amount: floa
     return changed_receivables
 
 
-def persist_cash_movement(movement: dict, store_id: str = "matriz") -> str:
-    updated_at = utc_now()
+def persist_bank_receipt(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    description = str(
+        payload.get("description", "") or "Recebimento de cartao"
+    ).strip()
+    credit = money_round(payload.get("credit", 0))
+    debit = money_round(payload.get("debit", 0))
+    generic_amount = money_round(payload.get("amount", 0))
+    if generic_amount > 0 and credit <= 0 and debit <= 0:
+        credit = generic_amount
+    total = money_round(credit + debit)
+    if total <= 0:
+        raise FinancialOperationError("Informe um valor recebido.")
+    if not description:
+        raise FinancialOperationError("Descricao e obrigatoria.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise FinancialOperationError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = operation_request_hash({
+        "description": description,
+        "credit": credit,
+        "debit": debit,
+    })
+    now = utc_now()
+    user = session.get("user") or {}
     with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash",
+                   response_json AS "responseJson"
+            FROM bank_receipts
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise FinancialOperationError(
+                    "A chave de idempotencia ja foi utilizada.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                return json.loads(replay["responseJson"]), True
+            except (json.JSONDecodeError, TypeError) as error:
+                raise FinancialOperationError(
+                    "O recebimento existe, mas sua resposta historica esta inconsistente.",
+                    409,
+                    "HISTORICAL_RESPONSE_INCONSISTENT",
+                ) from error
+
+        receipt_id = os.urandom(16).hex()
+        movements = []
+        for method, amount, label in (
+            ("credit", credit, "Credito"),
+            ("debit", debit, "Debito"),
+        ):
+            if amount <= 0:
+                continue
+            movement = normalize_cash_movement_payload({
+                "direction": "in",
+                "type": "conta bancaria",
+                "description": f"{description} - {label}",
+                "method": method,
+                "amount": amount,
+                "refId": receipt_id,
+                "originType": "bank_receipt",
+                "originId": receipt_id,
+                "createdAt": now,
+            })
+            movements.append(insert_cash_movement(conn, movement, store_id))
+
+        result = {
+            "cash": movements,
+            "receivables": [],
+            "receipt": {
+                "id": receipt_id,
+                "description": description,
+                "credit": credit,
+                "debit": debit,
+                "total": total,
+                "status": "registered",
+                "createdAt": now,
+                "userId": user.get("id", ""),
+                "userName": user.get("name", ""),
+            },
+        }
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
         conn.execute(
             """
-            INSERT INTO cash_movements (
-                id, store_id, direction, type, description, method, amount, ref_id, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bank_receipts (
+                id, store_id, description, credit_amount, debit_amount,
+                total_amount, status, user_id, user_name, idempotency_key,
+                request_hash, response_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?, ?, ?, ?, ?)
             """,
             (
-                movement["id"],
+                receipt_id,
                 store_id,
-                movement["direction"],
-                movement["type"],
-                movement["description"],
-                movement["method"],
-                float(movement["amount"]),
-                movement["refId"],
-                movement["createdAt"],
+                description,
+                credit,
+                debit,
+                total,
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                response_json,
+                now,
+            ),
+        )
+        state = load_locked_app_state(conn)
+        for movement in reversed(movements):
+            replace_cash_in_state(state, movement)
+        persist_targeted_app_state(conn, state, now)
+        record_audit(
+            "create",
+            "bank_receipt",
+            receipt_id,
+            {"total": total, "movementIds": [item["id"] for item in movements]},
+            conn=conn,
+        )
+        return result, False
+
+
+def load_locked_app_state(conn) -> dict:
+    lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+    row = conn.execute(
+        f"SELECT data FROM app_state WHERE id = 1{lock_clause}"
+    ).fetchone()
+    if row:
+        try:
+            state = json.loads(row["data"])
+        except (json.JSONDecodeError, TypeError):
+            state = default_state()
+    else:
+        state = default_state()
+    return state if isinstance(state, dict) else default_state()
+
+
+def persist_targeted_app_state(conn, state: dict, updated_at: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_state (id, data, updated_at)
+        VALUES (1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            data = excluded.data,
+            updated_at = excluded.updated_at
+        """,
+        (json.dumps(state, ensure_ascii=False), updated_at),
+    )
+
+
+def replace_cash_in_state(state: dict, movement: dict) -> None:
+    current = state.get("cash")
+    current = current if isinstance(current, list) else []
+    state["cash"] = [
+        movement,
+        *[
+            item
+            for item in current
+            if str(item.get("id", "")) != str(movement["id"])
+        ],
+    ]
+
+
+CARD_RECEIVABLE_METHODS = frozenset({"credit", "debit"})
+CARD_RECONCILIABLE_STATUSES = frozenset({"cardPending", "cardPartial"})
+
+
+def card_receipt_timestamp(receipt_date: str) -> str:
+    try:
+        parsed_date = date.fromisoformat(str(receipt_date or "").strip())
+    except ValueError as error:
+        raise ReceivableOperationError("Data de recebimento inválida.") from error
+    local_now = datetime.now(STORE_TIMEZONE)
+    local_value = datetime.combine(
+        parsed_date,
+        local_now.timetz().replace(tzinfo=None),
+        tzinfo=STORE_TIMEZONE,
+    )
+    return local_value.astimezone(timezone.utc).isoformat()
+
+
+def card_reconciliation_public_row(row) -> dict:
+    return {
+        "id": row["id"],
+        "receiptDate": row["receiptDate"],
+        "totalReceived": money_round(row["totalReceived"]),
+        "itemCount": int(row["itemCount"] or 0),
+        "note": row["note"] or "",
+        "status": row["status"],
+        "cashMovementId": row["cashMovementId"] or "",
+        "reversalCashMovementId": row["reversalCashMovementId"] or "",
+        "userId": row["userId"] or "",
+        "userName": row["userName"] or "",
+        "createdAt": row["createdAt"],
+        "reversedAt": row["reversedAt"] or "",
+        "reversalReason": row["reversalReason"] or "",
+    }
+
+
+def card_reconciliation_document(
+    conn,
+    reconciliation_id: str,
+    store_id: str = "matriz",
+) -> dict:
+    row = conn.execute(
+        """
+        SELECT id, receipt_date AS "receiptDate",
+               total_received AS "totalReceived", item_count AS "itemCount",
+               note, status, cash_movement_id AS "cashMovementId",
+               reversal_cash_movement_id AS "reversalCashMovementId",
+               user_id AS "userId", user_name AS "userName",
+               created_at AS "createdAt", reversed_at AS "reversedAt",
+               reversal_reason AS "reversalReason"
+        FROM card_reconciliations
+        WHERE store_id = ? AND id = ?
+        """,
+        (store_id, reconciliation_id),
+    ).fetchone()
+    if not row:
+        raise ReceivableOperationError("Conciliação não encontrada.", 404)
+    document = card_reconciliation_public_row(row)
+    item_rows = conn.execute(
+        """
+        SELECT item.id, item.receivable_id AS "receivableId",
+               item.payment_id AS "paymentId", item.sale_id AS "saleId",
+               item.method, item.modality_name AS "modalityName",
+               item.expected_balance_before AS "expectedBalanceBefore",
+               item.allocated_amount AS "allocatedAmount",
+               item.close_with_divergence AS "closeWithDivergence",
+               item.divergence_note AS "divergenceNote",
+               item.difference_after AS "differenceAfter",
+               item.status_before AS "statusBefore",
+               item.status_after AS "statusAfter",
+               item.created_at AS "createdAt"
+        FROM card_reconciliation_items item
+        WHERE item.store_id = ? AND item.reconciliation_id = ?
+        ORDER BY item.created_at, item.id
+        """,
+        (store_id, reconciliation_id),
+    ).fetchall()
+    document["items"] = [
+        {
+            **dict(item),
+            "expectedBalanceBefore": money_round(item["expectedBalanceBefore"]),
+            "allocatedAmount": money_round(item["allocatedAmount"]),
+            "closeWithDivergence": bool(item["closeWithDivergence"]),
+            "differenceAfter": money_round(item["differenceAfter"]),
+        }
+        for item in item_rows
+    ]
+    return document
+
+
+def normalize_card_reconciliation_payload(payload: dict) -> dict:
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ReceivableOperationError("Selecione ao menos um recebível.")
+    if len(raw_items) > 100:
+        raise ReceivableOperationError("O lote excede o limite de 100 recebíveis.")
+    items = []
+    seen = set()
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ReceivableOperationError("Item de conciliação inválido.")
+        receivable_id = str(raw.get("receivableId", "") or "").strip()
+        if not receivable_id or receivable_id in seen:
+            raise ReceivableOperationError("Recebíveis duplicados ou inválidos.")
+        seen.add(receivable_id)
+        try:
+            version = int(raw.get("expectedVersion"))
+        except (TypeError, ValueError) as error:
+            raise ReceivableOperationError(
+                "A versão do recebível é obrigatória."
+            ) from error
+        amount = receivable_operation_money(raw.get("amount"), "Valor atribuído")
+        expected_balance = receivable_operation_money(
+            raw.get("expectedBalance"),
+            "Saldo esperado",
+        )
+        if amount <= 0:
+            raise ReceivableOperationError(
+                "Cada recebível deve possuir valor recebido maior que zero."
+            )
+        close_with_divergence = bool(raw.get("closeWithDivergence"))
+        divergence_note = str(raw.get("divergenceNote", "") or "").strip()
+        if close_with_divergence and not divergence_note:
+            raise ReceivableOperationError(
+                "Informe a justificativa para encerrar com divergência."
+            )
+        items.append({
+            "receivableId": receivable_id,
+            "amount": amount,
+            "expectedBalance": expected_balance,
+            "expectedVersion": version,
+            "closeWithDivergence": close_with_divergence,
+            "divergenceNote": divergence_note,
+        })
+    total_received = receivable_operation_money(
+        payload.get("totalReceived"),
+        "Valor efetivamente recebido",
+    )
+    if total_received <= 0:
+        raise ReceivableOperationError(
+            "Informe o valor efetivamente recebido."
+        )
+    allocated_total = money_round(sum(item["amount"] for item in items))
+    if abs(allocated_total - total_received) > 0.01:
+        raise ReceivableOperationError(
+            "A soma atribuída deve corresponder ao valor efetivamente recebido.",
+            409,
+            "ALLOCATION_TOTAL_MISMATCH",
+        )
+    receipt_date = str(payload.get("receiptDate", "") or "").strip()
+    card_receipt_timestamp(receipt_date)
+    return {
+        "receiptDate": receipt_date,
+        "totalReceived": total_received,
+        "note": str(payload.get("note", "") or "").strip(),
+        "items": items,
+    }
+
+
+def persist_card_reconciliation(
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    normalized = normalize_card_reconciliation_payload(payload)
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise ReceivableOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = receivable_request_hash(normalized)
+    created_at = utc_now()
+    movement_timestamp = card_receipt_timestamp(normalized["receiptDate"])
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash",
+                   response_json AS "responseJson"
+            FROM card_reconciliations
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise ReceivableOperationError(
+                    "A chave de idempotência já foi utilizada.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                return json.loads(replay["responseJson"]), True
+            except (json.JSONDecodeError, TypeError) as error:
+                raise ReceivableOperationError(
+                    "A conciliação histórica está inconsistente.",
+                    409,
+                    "HISTORICAL_RESPONSE_INCONSISTENT",
+                ) from error
+
+        item_ids = [item["receivableId"] for item in normalized["items"]]
+        placeholders = ",".join("?" for _ in item_ids)
+        rows = conn.execute(
+            f"""
+            {RECEIVABLE_SELECT}
+            WHERE store_id = ? AND id IN ({placeholders}){lock_clause}
+            """,
+            (store_id, *item_ids),
+        ).fetchall()
+        rows_by_id = {str(row["id"]): row for row in rows}
+        if len(rows_by_id) != len(item_ids):
+            raise ReceivableOperationError(
+                "Um ou mais recebíveis não foram encontrados.",
+                404,
+            )
+
+        reconciliation_id = os.urandom(16).hex()
+        cash_movement = normalize_cash_movement_payload({
+            "direction": "in",
+            "type": "conciliação de cartões",
+            "description": (
+                f"Conciliação de cartões - {len(item_ids)} recebível"
+                f"{'is' if len(item_ids) != 1 else ''}"
+            ),
+            "method": "card",
+            "amount": normalized["totalReceived"],
+            "refId": reconciliation_id,
+            "originType": "card_reconciliation",
+            "originId": reconciliation_id,
+            "createdAt": movement_timestamp,
+        })
+        cash_movement = insert_cash_movement(
+            conn,
+            cash_movement,
+            store_id,
+            enforce_non_negative=False,
+        )
+        conn.execute(
+            """
+            INSERT INTO card_reconciliations (
+                id, store_id, receipt_date, total_received, item_count, note,
+                status, cash_movement_id, user_id, user_name, idempotency_key,
+                request_hash, response_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, '{}', ?)
+            """,
+            (
+                reconciliation_id,
+                store_id,
+                normalized["receiptDate"],
+                normalized["totalReceived"],
+                len(item_ids),
+                normalized["note"] or None,
+                cash_movement["id"],
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                created_at,
             ),
         )
 
-        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
-        row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
-        if row:
-            try:
-                state = json.loads(row["data"])
-            except json.JSONDecodeError:
-                state = default_state()
-        else:
-            state = default_state()
-        if not isinstance(state, dict):
-            state = default_state()
-        current_cash = state.get("cash")
-        state["cash"] = [movement, *(current_cash if isinstance(current_cash, list) else [])]
+        changed_receivables = []
+        for item in normalized["items"]:
+            receivable = receivable_from_row(rows_by_id[item["receivableId"]])
+            if (
+                receivable["method"] not in CARD_RECEIVABLE_METHODS
+                or receivable["status"] not in CARD_RECONCILIABLE_STATUSES
+            ):
+                raise ReceivableOperationError(
+                    "Recebível não está disponível para conciliação.",
+                    409,
+                    "RECEIVABLE_NOT_ELIGIBLE",
+                )
+            if (
+                receivable["version"] != item["expectedVersion"]
+                or abs(receivable["openAmount"] - item["expectedBalance"]) > 0.01
+            ):
+                raise ReceivableOperationError(
+                    "Um ou mais recebíveis foram alterados. Revise a conciliação.",
+                    409,
+                    "STALE_RECEIVABLE",
+                )
+            if (
+                item["amount"] > receivable["openAmount"] + 0.01
+                and not item["closeWithDivergence"]
+            ):
+                raise ReceivableOperationError(
+                    "Valor recebido superior ao saldo exige divergência explícita.",
+                    409,
+                    "DIVERGENCE_CONFIRMATION_REQUIRED",
+                )
+
+            received_before = receivable["received"]
+            open_before = receivable["openAmount"]
+            difference_before = receivable["differenceAmount"]
+            new_received = money_round(received_before + item["amount"])
+            expected_total = max(
+                0,
+                money_round(
+                    receivable["amount"] - receivable["returnReductionTotal"]
+                ),
+            )
+            natural_open = max(0, money_round(expected_total - new_received))
+            difference_after = money_round(new_received - expected_total)
+            if item["closeWithDivergence"]:
+                new_open = 0.0
+                new_status = "cardDivergent"
+            elif natural_open <= 0.01:
+                new_open = 0.0
+                new_status = (
+                    "cardDivergent"
+                    if abs(difference_after) > 0.01
+                    else "paid"
+                )
+            else:
+                new_open = natural_open
+                new_status = "cardPartial"
+                difference_after = 0.0
+
+            payment_id = os.urandom(16).hex()
+            conn.execute(
+                """
+                INSERT INTO receivable_payments (
+                    id, store_id, receivable_id, sale_id, customer_id, method,
+                    amount, created_at, note, principal_amount, settled_amount,
+                    interest_amount, fine_amount, addition_amount,
+                    discount_amount, user_id, user_name, response_json,
+                    modality_name, gross_amount, net_amount,
+                    reconciliation_id, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0,
+                          ?, ?, '{}', ?, ?, ?, ?, 'active')
+                """,
+                (
+                    payment_id,
+                    store_id,
+                    receivable["id"],
+                    receivable["saleId"] or None,
+                    receivable["customerId"] or None,
+                    receivable["method"],
+                    item["amount"],
+                    created_at,
+                    normalized["note"] or "Conciliação de cartão",
+                    item["amount"],
+                    item["amount"],
+                    user.get("id") or None,
+                    user.get("name") or None,
+                    receivable["modalityName"] or None,
+                    item["amount"],
+                    item["amount"],
+                    reconciliation_id,
+                ),
+            )
+            updated = conn.execute(
+                """
+                UPDATE receivables
+                SET received = ?, open_amount = ?, difference_amount = ?,
+                    status = ?, paid_at = ?, last_payment_at = ?,
+                    updated_at = ?, version = version + 1
+                WHERE store_id = ? AND id = ? AND version = ?
+                """,
+                (
+                    new_received,
+                    new_open,
+                    difference_after,
+                    new_status,
+                    created_at if new_status in {"paid", "cardDivergent"} else None,
+                    created_at,
+                    created_at,
+                    store_id,
+                    receivable["id"],
+                    receivable["version"],
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ReceivableOperationError(
+                    "Um ou mais recebíveis foram alterados. Revise a conciliação.",
+                    409,
+                    "STALE_RECEIVABLE",
+                )
+            conn.execute(
+                """
+                INSERT INTO card_reconciliation_items (
+                    id, store_id, reconciliation_id, receivable_id, payment_id,
+                    sale_id, method, modality_name, expected_balance_before,
+                    allocated_amount, close_with_divergence, divergence_note,
+                    difference_after, difference_before, received_before,
+                    received_after, open_amount_before, open_amount_after,
+                    status_before, status_after, version_before, version_after,
+                    paid_at_before, last_payment_at_before, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    os.urandom(16).hex(),
+                    store_id,
+                    reconciliation_id,
+                    receivable["id"],
+                    payment_id,
+                    receivable["saleId"] or None,
+                    receivable["method"],
+                    receivable["modalityName"] or None,
+                    open_before,
+                    item["amount"],
+                    1 if item["closeWithDivergence"] else 0,
+                    item["divergenceNote"] or None,
+                    difference_after,
+                    difference_before,
+                    received_before,
+                    new_received,
+                    open_before,
+                    new_open,
+                    receivable["status"],
+                    new_status,
+                    receivable["version"],
+                    receivable["version"] + 1,
+                    receivable["paidAt"] or None,
+                    receivable["lastPaymentAt"] or None,
+                    created_at,
+                ),
+            )
+            row = conn.execute(
+                f"{RECEIVABLE_SELECT} WHERE store_id = ? AND id = ?",
+                (store_id, receivable["id"]),
+            ).fetchone()
+            changed_receivables.append(receivable_from_row(row))
+
+        state = load_locked_app_state(conn)
+        replace_receivables_in_state(state, changed_receivables)
+        replace_cash_in_state(state, cash_movement)
+        persist_targeted_app_state(conn, state, created_at)
+        document = card_reconciliation_document(
+            conn,
+            reconciliation_id,
+            store_id,
+        )
+        result = {
+            "reconciliation": document,
+            "receivables": changed_receivables,
+            "cash": cash_movement,
+        }
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
         conn.execute(
             """
-            INSERT INTO app_state (id, data, updated_at)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
+            UPDATE card_reconciliations
+            SET response_json = ?
+            WHERE store_id = ? AND id = ?
             """,
-            (json.dumps(state, ensure_ascii=False), updated_at),
+            (response_json, store_id, reconciliation_id),
         )
+        record_audit(
+            "create",
+            "card_reconciliation",
+            reconciliation_id,
+            {
+                "totalReceived": normalized["totalReceived"],
+                "itemCount": len(item_ids),
+                "receivableIds": item_ids,
+            },
+            conn=conn,
+        )
+        return result, False
+
+
+def reverse_card_reconciliation(
+    reconciliation_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    reason = str(payload.get("reason", "") or "").strip()
+    key = str(idempotency_key or "").strip()
+    if not reason:
+        raise ReceivableOperationError("Informe o motivo do estorno.")
+    if not key or len(key) > 160:
+        raise ReceivableOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = receivable_request_hash({
+        "reconciliationId": reconciliation_id,
+        "reason": reason,
+    })
+    now = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT id, status, total_received AS "totalReceived",
+                   cash_movement_id AS "cashMovementId",
+                   reversal_idempotency_key AS "reversalIdempotencyKey",
+                   reversal_request_hash AS "reversalRequestHash",
+                   reversal_response_json AS "reversalResponseJson"
+            FROM card_reconciliations
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, reconciliation_id),
+        ).fetchone()
+        if not row:
+            raise ReceivableOperationError("Conciliação não encontrada.", 404)
+        if row["reversalIdempotencyKey"]:
+            if (
+                row["reversalIdempotencyKey"] == key
+                and row["reversalRequestHash"] == request_hash
+            ):
+                try:
+                    return json.loads(row["reversalResponseJson"]), True
+                except (json.JSONDecodeError, TypeError) as error:
+                    raise ReceivableOperationError(
+                        "O estorno histórico está inconsistente.",
+                        409,
+                    ) from error
+            raise ReceivableOperationError(
+                "A conciliação já foi estornada.",
+                409,
+                "RECONCILIATION_ALREADY_REVERSED",
+            )
+        if row["status"] != "active":
+            raise ReceivableOperationError(
+                "A conciliação já foi estornada.",
+                409,
+                "RECONCILIATION_ALREADY_REVERSED",
+            )
+
+        item_rows = conn.execute(
+            f"""
+            SELECT item.receivable_id AS "receivableId",
+                   item.payment_id AS "paymentId",
+                   item.received_before AS "receivedBefore",
+                   item.open_amount_before AS "openAmountBefore",
+                   item.difference_before AS "differenceBefore",
+                   item.status_before AS "statusBefore",
+                   item.version_after AS "versionAfter",
+                   item.paid_at_before AS "paidAtBefore",
+                   item.last_payment_at_before AS "lastPaymentAtBefore"
+            FROM card_reconciliation_items item
+            WHERE item.store_id = ? AND item.reconciliation_id = ?
+            ORDER BY item.created_at, item.id{lock_clause}
+            """,
+            (store_id, reconciliation_id),
+        ).fetchall()
+        if not item_rows:
+            raise ReceivableOperationError(
+                "A conciliação não possui itens rastreáveis.",
+                409,
+                "RECONCILIATION_ITEMS_MISSING",
+            )
+        changed = []
+        for item in item_rows:
+            updated = conn.execute(
+                """
+                UPDATE receivables
+                SET received = ?, open_amount = ?, difference_amount = ?,
+                    status = ?, paid_at = ?, last_payment_at = ?,
+                    updated_at = ?, version = version + 1
+                WHERE store_id = ? AND id = ? AND version = ?
+                """,
+                (
+                    item["receivedBefore"],
+                    item["openAmountBefore"],
+                    item["differenceBefore"],
+                    item["statusBefore"],
+                    item["paidAtBefore"],
+                    item["lastPaymentAtBefore"],
+                    now,
+                    store_id,
+                    item["receivableId"],
+                    item["versionAfter"],
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ReceivableOperationError(
+                    "Um recebível foi alterado após a conciliação. Revise antes do estorno.",
+                    409,
+                    "STALE_RECONCILIATION",
+                )
+            conn.execute(
+                """
+                UPDATE receivable_payments
+                SET status = 'reversed', reversed_at = ?, reversal_reason = ?
+                WHERE store_id = ? AND id = ? AND status = 'active'
+                """,
+                (now, reason, store_id, item["paymentId"]),
+            )
+            changed_row = conn.execute(
+                f"{RECEIVABLE_SELECT} WHERE store_id = ? AND id = ?",
+                (store_id, item["receivableId"]),
+            ).fetchone()
+            changed.append(receivable_from_row(changed_row))
+
+        original_movement = conn.execute(
+            f"""
+            SELECT id, direction, type, description, method, amount,
+                   ref_id AS "refId",
+                   expense_category_id AS "expenseCategoryId",
+                   origin_type AS "originType", origin_id AS "originId",
+                   user_id AS "userId", user_name AS "userName",
+                   resulting_balance AS "resultingBalance",
+                   reversal_of_id AS "reversalOfId",
+                   reversed_at AS "reversedAt", created_at AS "createdAt"
+            FROM cash_movements
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, row["cashMovementId"]),
+        ).fetchone()
+        if not original_movement:
+            raise ReceivableOperationError(
+                "Entrada financeira da conciliação não encontrada.",
+                409,
+                "RECONCILIATION_CASH_MISSING",
+            )
+        original = cash_movement_from_row(original_movement)
+        if original["reversedAt"]:
+            raise ReceivableOperationError(
+                "Entrada financeira já estornada.",
+                409,
+                "RECONCILIATION_CASH_ALREADY_REVERSED",
+            )
+        reversal = normalize_cash_movement_payload({
+            "direction": "out",
+            "type": "estorno de conciliação",
+            "description": f"Estorno de conciliação - {reason}",
+            "method": "card",
+            "amount": row["totalReceived"],
+            "refId": reconciliation_id,
+            "originType": "card_reconciliation_reversal",
+            "originId": reconciliation_id,
+            "reversalOfId": original["id"],
+            "createdAt": now,
+        })
+        reversal = insert_cash_movement(
+            conn,
+            reversal,
+            store_id,
+            enforce_non_negative=False,
+        )
+        conn.execute(
+            """
+            UPDATE cash_movements SET reversed_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (now, store_id, original["id"]),
+        )
+        original["reversedAt"] = now
+        conn.execute(
+            """
+            UPDATE card_reconciliations
+            SET status = 'reversed', reversal_cash_movement_id = ?,
+                reversed_at = ?, reversal_reason = ?,
+                reversed_by_id = ?, reversed_by_name = ?,
+                reversal_idempotency_key = ?, reversal_request_hash = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (
+                reversal["id"],
+                now,
+                reason,
+                user.get("id") or None,
+                user.get("name") or None,
+                key,
+                request_hash,
+                store_id,
+                reconciliation_id,
+            ),
+        )
+        state = load_locked_app_state(conn)
+        replace_receivables_in_state(state, changed)
+        replace_cash_in_state(state, original)
+        replace_cash_in_state(state, reversal)
+        persist_targeted_app_state(conn, state, now)
+        document = card_reconciliation_document(
+            conn,
+            reconciliation_id,
+            store_id,
+        )
+        result = {
+            "reconciliation": document,
+            "receivables": changed,
+            "cash": reversal,
+        }
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            UPDATE card_reconciliations
+            SET reversal_response_json = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (response_json, store_id, reconciliation_id),
+        )
+        record_audit(
+            "reverse",
+            "card_reconciliation",
+            reconciliation_id,
+            {
+                "reason": reason,
+                "itemCount": len(item_rows),
+                "reversalCashMovementId": reversal["id"],
+            },
+            conn=conn,
+        )
+        return result, False
+
+
+def list_card_receivables_data(
+    query: dict,
+    store_id: str = "matriz",
+) -> dict:
+    search = str(query.get("search", "") or "").strip().lower()
+    status = str(query.get("status", "") or "").strip()
+    method = str(query.get("method", "") or "").strip()
+    start = str(query.get("start", "") or "").strip()
+    end = str(query.get("end", "") or "").strip()
+    try:
+        page = max(1, int(query.get("page", 1) or 1))
+        page_size = min(100, max(5, int(query.get("pageSize", 20) or 20)))
+    except (TypeError, ValueError):
+        page, page_size = 1, 20
+    clauses = ["receivable.store_id = ?", "receivable.method IN ('credit', 'debit')"]
+    params: list[object] = [store_id]
+    if search:
+        clauses.append(
+            "(LOWER(COALESCE(receivable.sale_id, '')) LIKE ? "
+            "OR LOWER(COALESCE(receivable.customer_name, '')) LIKE ? "
+            "OR LOWER(CAST(receivable.net_amount AS TEXT)) LIKE ?)"
+        )
+        term = f"%{search}%"
+        params.extend((term, term, term))
+    if status:
+        clauses.append("receivable.status = ?")
+        params.append(status)
+    if method in CARD_RECEIVABLE_METHODS:
+        clauses.append("receivable.method = ?")
+        params.append(method)
+    elif method.startswith("credit:"):
+        try:
+            installments = int(method.split(":", 1)[1])
+        except ValueError:
+            installments = 0
+        if installments > 0:
+            clauses.extend((
+                "receivable.method = 'credit'",
+                "receivable.card_installments = ?",
+            ))
+            params.append(installments)
+    if start:
+        try:
+            start = date.fromisoformat(start).isoformat()
+        except ValueError as error:
+            raise ReceivableOperationError("Data inicial inválida.") from error
+        clauses.append("receivable.due_date >= ?")
+        params.append(start)
+    if end:
+        try:
+            end = date.fromisoformat(end).isoformat()
+        except ValueError as error:
+            raise ReceivableOperationError("Data final inválida.") from error
+        clauses.append("receivable.due_date <= ?")
+        params.append(end)
+    if start and end and start > end:
+        raise ReceivableOperationError("Período inválido.")
+    where_sql = " AND ".join(clauses)
+    offset = (page - 1) * page_size
+    today = datetime.now(STORE_TIMEZONE).date()
+    month_start = today.replace(day=1).isoformat()
+    month_end = (
+        (today.replace(day=28) + timedelta(days=4)).replace(day=1)
+        - timedelta(days=1)
+    ).isoformat()
+    with connect_db() as conn:
+        total_row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM receivables receivable
+            WHERE {where_sql}
+            """,
+            tuple(params),
+        ).fetchone()
+        rows = conn.execute(
+            f"""
+            SELECT {RECEIVABLE_SELECT.split('SELECT', 1)[1].split('FROM receivables', 1)[0]}
+            FROM receivables receivable
+            WHERE {where_sql}
+            ORDER BY COALESCE(receivable.due_date, receivable.created_at),
+                     receivable.created_at, receivable.id
+            LIMIT ? OFFSET ?
+            """,
+            (*params, page_size, offset),
+        ).fetchall()
+        history_by_receivable: dict[str, list[dict]] = {}
+        page_ids = [str(row["id"]) for row in rows]
+        if page_ids:
+            history_placeholders = ",".join("?" for _ in page_ids)
+            history_rows = conn.execute(
+                f"""
+                SELECT item.receivable_id AS "receivableId",
+                       reconciliation.id AS "reconciliationId",
+                       reconciliation.receipt_date AS "receiptDate",
+                       reconciliation.total_received AS "reconciliationTotal",
+                       reconciliation.item_count AS "itemCount",
+                       reconciliation.status,
+                       reconciliation.note,
+                       reconciliation.user_name AS "userName",
+                       reconciliation.created_at AS "createdAt",
+                       reconciliation.reversed_at AS "reversedAt",
+                       reconciliation.reversal_reason AS "reversalReason",
+                       item.allocated_amount AS "allocatedAmount",
+                       item.difference_after AS "differenceAfter",
+                       item.status_after AS "statusAfter"
+                FROM card_reconciliation_items item
+                JOIN card_reconciliations reconciliation
+                  ON reconciliation.id = item.reconciliation_id
+                 AND reconciliation.store_id = item.store_id
+                WHERE item.store_id = ?
+                  AND item.receivable_id IN ({history_placeholders})
+                ORDER BY reconciliation.created_at DESC, item.id
+                """,
+                (store_id, *page_ids),
+            ).fetchall()
+            for history in history_rows:
+                item = {
+                    **dict(history),
+                    "allocatedAmount": money_round(history["allocatedAmount"]),
+                    "differenceAfter": money_round(history["differenceAfter"]),
+                    "reconciliationTotal": money_round(
+                        history["reconciliationTotal"]
+                    ),
+                }
+                history_by_receivable.setdefault(
+                    str(item.pop("receivableId")),
+                    [],
+                ).append(item)
+        summary = conn.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE
+                    WHEN status IN ('cardPending', 'cardPartial')
+                    THEN open_amount ELSE 0 END), 0) AS "openTotal",
+                COALESCE(SUM(CASE
+                    WHEN status IN ('cardPending', 'cardPartial')
+                         AND due_date = ?
+                    THEN open_amount ELSE 0 END), 0) AS "dueToday",
+                COALESCE(SUM(CASE
+                    WHEN status = 'cardDivergent'
+                    THEN ABS(difference_amount) ELSE 0 END), 0) AS "divergenceTotal"
+            FROM receivables
+            WHERE store_id = ? AND method IN ('credit', 'debit')
+            """,
+            (today.isoformat(), store_id),
+        ).fetchone()
+        received_month = conn.execute(
+            """
+            SELECT COALESCE(SUM(total_received), 0) AS total
+            FROM card_reconciliations
+            WHERE store_id = ? AND status = 'active'
+              AND receipt_date BETWEEN ? AND ?
+            """,
+            (store_id, month_start, month_end),
+        ).fetchone()
+    return {
+        "items": [
+            {
+                **receivable_from_row(row),
+                "reconciliations": history_by_receivable.get(
+                    str(row["id"]),
+                    [],
+                ),
+            }
+            for row in rows
+        ],
+        "pagination": {
+            "page": page,
+            "pageSize": page_size,
+            "total": int(total_row["total"] or 0),
+            "pages": max(
+                1,
+                math.ceil(int(total_row["total"] or 0) / page_size),
+            ),
+        },
+        "summary": {
+            "openTotal": money_round(summary["openTotal"]),
+            "dueToday": money_round(summary["dueToday"]),
+            "receivedMonth": money_round(received_month["total"]),
+            "divergenceTotal": money_round(summary["divergenceTotal"]),
+        },
+    }
+
+
+def persist_cash_movement(movement: dict, store_id: str = "matriz") -> str:
+    updated_at = utc_now()
+    key = str(
+        movement.get("idempotencyKey") or movement.get("id") or ""
+    ).strip()
+    request_hash = operation_request_hash({
+        "direction": movement.get("direction"),
+        "type": movement.get("type"),
+        "description": movement.get("description"),
+        "method": movement.get("method"),
+        "amount": money_round(movement.get("amount", 0)),
+        "expenseCategoryId": movement.get("expenseCategoryId") or "",
+    })
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash",
+                   response_json AS "responseJson",
+                   created_at AS "createdAt"
+            FROM cash_movements
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise FinancialOperationError(
+                    "A chave de idempotencia ja foi utilizada.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                persisted = json.loads(replay["responseJson"])
+            except (json.JSONDecodeError, TypeError) as error:
+                raise FinancialOperationError(
+                    "A movimentacao existe, mas seu historico esta inconsistente.",
+                    409,
+                    "HISTORICAL_RESPONSE_INCONSISTENT",
+                ) from error
+            movement.clear()
+            movement.update(persisted)
+            return str(replay["createdAt"] or updated_at)
+        if movement["direction"] == "out":
+            category = catalog_item_reference(
+                conn,
+                "expense-categories",
+                movement["expenseCategoryId"] or movement["type"],
+                store_id,
+            )
+            if not category or category["status"] != "active":
+                raise CatalogOperationError(
+                    "Selecione uma categoria de despesa ativa.", 400
+                )
+            movement["expenseCategoryId"] = category["id"]
+            movement["type"] = category["name"]
+        movement["createdAt"] = updated_at
+        movement["originType"] = movement.get("originType") or "manual"
+        movement["originId"] = movement.get("originId") or movement["id"]
+        movement["idempotencyKey"] = key
+        movement["requestHash"] = request_hash
+        movement = insert_cash_movement(conn, movement, store_id)
+        public_movement = {
+            key: value
+            for key, value in movement.items()
+            if key not in {"requestHash", "responseJson"}
+        }
+        response_json = json.dumps(
+            public_movement,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        conn.execute(
+            "UPDATE cash_movements SET response_json = ? WHERE id = ?",
+            (response_json, movement["id"]),
+        )
+        movement.clear()
+        movement.update(public_movement)
+        state = load_locked_app_state(conn)
+        replace_cash_in_state(state, movement)
+        persist_targeted_app_state(conn, state, updated_at)
         record_audit("create", "cash", movement["id"], {"movement": movement}, conn=conn)
     return updated_at
+
+
+def cash_movement_from_row(row) -> dict:
+    keys = row.keys()
+    return {
+        "id": row["id"],
+        "direction": row["direction"],
+        "type": row["type"],
+        "description": row["description"],
+        "method": row["method"],
+        "amount": money_round(row["amount"]),
+        "refId": row["refId"] or "",
+        "expenseCategoryId": row["expenseCategoryId"] or "",
+        "originType": row["originType"] or "legacy",
+        "originId": row["originId"] or "",
+        "userId": row["userId"] or "",
+        "userName": row["userName"] or "",
+        "resultingBalance": (
+            money_round(row["resultingBalance"])
+            if row["resultingBalance"] is not None
+            else None
+        ),
+        "reversalOfId": row["reversalOfId"] or "",
+        "reversedAt": row["reversedAt"] or "",
+        "idempotencyKey": (
+            row["idempotencyKey"] or "" if "idempotencyKey" in keys else ""
+        ),
+        "createdAt": row["createdAt"],
+    }
+
+
+def persist_cash_reversal(
+    movement_id: str,
+    payload: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    reason = str(payload.get("reason", "") or "").strip()
+    key = str(idempotency_key or "").strip()
+    if not reason:
+        raise FinancialOperationError("Informe o motivo do estorno.")
+    if not key or len(key) > 160:
+        raise FinancialOperationError(
+            "Informe uma chave de idempotencia valida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = operation_request_hash({
+        "movementId": movement_id,
+        "reason": reason,
+    })
+    now = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        replay = conn.execute(
+            f"""
+            SELECT request_hash AS "requestHash",
+                   response_json AS "responseJson"
+            FROM cash_movements
+            WHERE store_id = ? AND idempotency_key = ?{lock_clause}
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if str(replay["requestHash"] or "") != request_hash:
+                raise FinancialOperationError(
+                    "A chave de idempotencia ja foi utilizada.",
+                    409,
+                    "IDEMPOTENCY_CONFLICT",
+                )
+            try:
+                return json.loads(replay["responseJson"]), True
+            except (json.JSONDecodeError, TypeError) as error:
+                raise FinancialOperationError(
+                    "O estorno existe, mas sua resposta historica esta inconsistente.",
+                    409,
+                    "HISTORICAL_RESPONSE_INCONSISTENT",
+                ) from error
+
+        row = conn.execute(
+            f"""
+            SELECT id, direction, type, description, method, amount,
+                   ref_id AS "refId",
+                   expense_category_id AS "expenseCategoryId",
+                   origin_type AS "originType", origin_id AS "originId",
+                   user_id AS "userId", user_name AS "userName",
+                   resulting_balance AS "resultingBalance",
+                   reversal_of_id AS "reversalOfId",
+                   reversed_at AS "reversedAt",
+                   created_at AS "createdAt"
+            FROM cash_movements
+            WHERE store_id = ? AND id = ?{lock_clause}
+            """,
+            (store_id, movement_id),
+        ).fetchone()
+        if not row:
+            raise FinancialOperationError("Movimentacao nao encontrada.", 404)
+        original = cash_movement_from_row(row)
+        if original["reversalOfId"]:
+            raise FinancialOperationError(
+                "Um estorno nao pode ser estornado diretamente.",
+                409,
+                "REVERSAL_OF_REVERSAL",
+            )
+        existing = conn.execute(
+            """
+            SELECT id FROM cash_movements
+            WHERE store_id = ? AND reversal_of_id = ?
+            """,
+            (store_id, movement_id),
+        ).fetchone()
+        if existing or original["reversedAt"]:
+            raise FinancialOperationError(
+                "A movimentacao ja foi estornada.",
+                409,
+                "MOVEMENT_ALREADY_REVERSED",
+            )
+
+        reversal = normalize_cash_movement_payload({
+            "direction": "out" if original["direction"] == "in" else "in",
+            "type": "estorno",
+            "description": f"Estorno: {original['description']} - {reason}",
+            "method": original["method"],
+            "amount": original["amount"],
+            "refId": original["refId"] or original["id"],
+            "originType": "cash_reversal",
+            "originId": original["id"],
+            "reversalOfId": original["id"],
+            "idempotencyKey": key,
+            "requestHash": request_hash,
+            "createdAt": now,
+        })
+        reversal = insert_cash_movement(conn, reversal, store_id)
+        public_reversal = {
+            key: value
+            for key, value in reversal.items()
+            if key not in {"requestHash", "responseJson"}
+        }
+        result = {
+            "movement": public_reversal,
+            "reversedMovementId": original["id"],
+        }
+        response_json = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        conn.execute(
+            """
+            UPDATE cash_movements
+            SET response_json = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (response_json, store_id, reversal["id"]),
+        )
+        conn.execute(
+            """
+            UPDATE cash_movements
+            SET reversed_at = ?
+            WHERE store_id = ? AND id = ?
+            """,
+            (now, store_id, original["id"]),
+        )
+        original["reversedAt"] = now
+        state = load_locked_app_state(conn)
+        replace_cash_in_state(state, original)
+        replace_cash_in_state(state, public_reversal)
+        persist_targeted_app_state(conn, state, now)
+        record_audit(
+            "reverse",
+            "cash",
+            original["id"],
+            {"reason": reason, "reversalId": reversal["id"]},
+            conn=conn,
+        )
+        return result, False
 
 
 def persist_cash_closing(closing: dict, store_id: str = "matriz") -> str:
@@ -3280,28 +21743,213 @@ def cash_closing_metrics(state: dict, date: str) -> dict:
     }
 
 
-def simple_table_config(kind: str) -> tuple[str, str]:
-    if kind == "brands":
-        return "brands", "brand"
-    if kind == "categories":
-        return "categories", "category"
-    raise ValueError("Cadastro inválido.")
+CATALOG_CONFIG = {
+    "brands": ("brands", "brands", "brand_id", "brand_name", "brand"),
+    "categories": ("categories", "categories", "category_id", "category_name", "category"),
+    "sizes": ("sizes", "sizes", "size_id", "size", "size"),
+    "colors": ("colors", "colors", "color_id", "color", "color"),
+    "expense-categories": (
+        "expense_categories",
+        "expenseCategories",
+        "expense_category_id",
+        "category",
+        "category",
+    ),
+}
 
 
-def sync_simple_name_to_state(kind: str, name: str | None = None, previous: str | None = None, deleted_name: str | None = None) -> None:
-    state, _ = read_state()
-    collection, product_field = simple_table_config(kind)
-    if deleted_name:
-        state[collection] = [item for item in state.get(collection, []) if item != deleted_name]
-    elif name:
-        items = [item for item in state.get(collection, []) if item != previous and item != name]
-        state[collection] = [*items, name]
-        if previous:
+class CatalogOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+
+
+def catalog_config(kind: str) -> tuple[str, str, str, str, str]:
+    try:
+        return CATALOG_CONFIG[kind]
+    except KeyError as error:
+        raise CatalogOperationError("Cadastro auxiliar inválido.", 404) from error
+
+
+def catalog_from_row(row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"] or "",
+        "status": row["status"] or "active",
+        "createdAt": row["createdAt"] or row["updatedAt"],
+        "updatedAt": row["updatedAt"],
+    }
+
+
+def catalog_rows(conn, kind: str, store_id: str = "matriz") -> list[dict]:
+    table, _, _, _, _ = catalog_config(kind)
+    rows = conn.execute(
+        f"""
+        SELECT id, name, status, created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM {table}
+        WHERE store_id = ?
+        ORDER BY LOWER(name)
+        """,
+        (store_id,),
+    ).fetchall()
+    return [catalog_from_row(row) for row in rows]
+
+
+def catalog_item_reference(conn, kind: str, identifier: str, store_id: str = "matriz"):
+    table, _, _, _, _ = catalog_config(kind)
+    normalized = normalized_search_text(identifier)
+    return conn.execute(
+        f"""
+        SELECT id, name, normalized_name, status, created_at AS "createdAt",
+               updated_at AS "updatedAt"
+        FROM {table}
+        WHERE store_id = ?
+          AND (id = ? OR normalized_name = ? OR LOWER(name) = LOWER(?))
+        LIMIT 1
+        """,
+        (store_id, identifier, normalized, identifier),
+    ).fetchone()
+
+
+def persist_catalog_item(
+    kind: str,
+    payload: dict,
+    identifier: str | None = None,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    table, collection, product_id_column, product_name_column, state_field = catalog_config(kind)
+    name = " ".join(str(payload.get("name", "") or "").split())
+    if not name:
+        raise CatalogOperationError("Nome é obrigatório.")
+    normalized_name = normalized_search_text(name)
+    now = utc_now()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        existing_row = catalog_item_reference(conn, kind, identifier, store_id) if identifier else None
+        if identifier and not existing_row:
+            raise CatalogOperationError("Cadastro não encontrado.", 404)
+        item_id = str(existing_row["id"] if existing_row else payload.get("id") or os.urandom(16).hex())
+        duplicate = next(
+            (
+                row
+                for row in conn.execute(
+                    f"SELECT id, name, normalized_name FROM {table} WHERE store_id = ? AND id <> ?",
+                    (store_id, item_id),
+                ).fetchall()
+                if normalized_search_text(row["normalized_name"] or row["name"]) == normalized_name
+            ),
+            None,
+        )
+        if duplicate:
+            raise CatalogOperationError("Nome já cadastrado.", 409)
+        status = str(existing_row["status"] if existing_row else "active")
+        created_at = str(
+            existing_row["createdAt"] if existing_row and existing_row["createdAt"] else now
+        )
+        previous_name = str(existing_row["name"] or "") if existing_row else ""
+        conn.execute(
+            f"""
+            INSERT INTO {table} (
+                id, store_id, name, normalized_name, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                normalized_name = excluded.normalized_name,
+                updated_at = excluded.updated_at
+            """,
+            (item_id, store_id, name, normalized_name, status, created_at, now),
+        )
+        if existing_row and kind in {"brands", "categories", "sizes", "colors"}:
+            conn.execute(
+                f"""
+                UPDATE products
+                SET {product_name_column} = ?, updated_at = ?
+                WHERE store_id = ? AND {product_id_column} = ?
+                """,
+                (name, now, store_id, item_id),
+            )
+        if existing_row and kind == "expense-categories":
+            conn.execute(
+                """
+                UPDATE payables
+                SET category = ?, updated_at = ?
+                WHERE store_id = ? AND expense_category_id = ?
+                """,
+                (name, now, store_id, item_id),
+            )
+        item = {
+            "id": item_id,
+            "name": name,
+            "status": status,
+            "createdAt": created_at,
+            "updatedAt": now,
+        }
+        update_state_collection_in_transaction(conn, collection, item, item_id=item_id)
+        if existing_row and previous_name != name and kind in {"brands", "categories", "sizes", "colors"}:
+            lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+            state_row = conn.execute(f"SELECT data FROM app_state WHERE id = 1{lock_clause}").fetchone()
+            state = json.loads(state_row["data"]) if state_row else default_state()
             state["products"] = [
-                {**product, product_field: name} if product.get(product_field) == previous else product
+                {**product, state_field: name}
+                if str(product.get(f"{state_field}Id", "")) == item_id
+                else product
                 for product in state.get("products", [])
             ]
-    write_app_state_only(state)
+            conn.execute(
+                "UPDATE app_state SET data = ?, updated_at = ? WHERE id = 1",
+                (json.dumps(state, ensure_ascii=False), now),
+            )
+        record_audit(
+            "update" if existing_row else "create",
+            kind,
+            item_id,
+            {"name": name, "previousName": previous_name},
+            conn,
+        )
+    return item, existing_row is None
+
+
+def persist_catalog_status(
+    kind: str,
+    identifier: str,
+    new_status: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if new_status not in CATALOG_STATUSES:
+        raise CatalogOperationError("Situação inválida.")
+    table, collection, _, _, _ = catalog_config(kind)
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        row = catalog_item_reference(conn, kind, identifier, store_id)
+        if not row:
+            raise CatalogOperationError("Cadastro não encontrado.", 404)
+        item = catalog_from_row(row)
+        if item["status"] == new_status:
+            return item, False
+        if new_status == "active":
+            duplicate = conn.execute(
+                f"""
+                SELECT id FROM {table}
+                WHERE store_id = ? AND normalized_name = ? AND id <> ?
+                LIMIT 1
+                """,
+                (store_id, normalized_search_text(item["name"]), item["id"]),
+            ).fetchone()
+            if duplicate:
+                raise CatalogOperationError("Existe outro cadastro ativo com o mesmo nome.", 409)
+        now = utc_now()
+        conn.execute(
+            f"UPDATE {table} SET status = ?, normalized_name = ?, updated_at = ? WHERE store_id = ? AND id = ?",
+            (new_status, normalized_search_text(item["name"]), now, store_id, item["id"]),
+        )
+        item.update({"status": new_status, "updatedAt": now})
+        update_state_collection_in_transaction(conn, collection, item, item_id=item["id"])
+        record_audit("status", kind, item["id"], {"status": new_status}, conn)
+    return item, True
 
 
 @app.get("/")
@@ -3312,6 +21960,11 @@ def index():
 @app.get("/uploads/products/<path:filename>")
 def uploaded_product_image(filename: str):
     return send_from_directory(PRODUCT_UPLOAD_DIR, filename)
+
+
+@app.get("/uploads/store/<path:filename>")
+def uploaded_store_image(filename: str):
+    return send_from_directory(STORE_UPLOAD_DIR, filename)
 
 
 @app.get("/api/health")
@@ -3485,6 +22138,26 @@ def upload_product_photo_api():
     return jsonify({"ok": True, "data": saved}), 201
 
 
+@app.post("/api/uploads/warranty-photo")
+def upload_warranty_photo_api():
+    file_storage = request.files.get("photo")
+    try:
+        saved = save_product_image(file_storage)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    record_audit(
+        "upload",
+        "warranty_photo",
+        saved["filename"],
+        {
+            "filename": saved["filename"],
+            "size": saved["size"],
+            "storage": saved["storage"],
+        },
+    )
+    return jsonify({"ok": True, "data": saved}), 201
+
+
 @app.get("/api/audit-logs")
 def list_audit_logs_api():
     _, error_response = require_admin()
@@ -3531,13 +22204,79 @@ def list_audit_logs_api():
 
 @app.get("/api/dashboard")
 def dashboard_api():
+    user = session.get("user") or {}
     try:
-        days = max(1, min(365, int(float(request.args.get("range", 30)))))
-    except ValueError:
-        days = 30
-    today = parse_date_input(request.args.get("date", ""))
-    state, _ = read_state()
-    return jsonify({"ok": True, "data": build_dashboard_summary(state, days, today)})
+        with connect_db() as conn:
+            data = build_relational_dashboard(conn, request.args, user)
+    except DashboardOperationError as error:
+        payload = {"ok": False, "error": error.message}
+        if error.code:
+            payload["code"] = error.code
+        return jsonify(payload), error.status_code
+    return jsonify({"ok": True, "data": data})
+
+
+@app.get("/api/alerts")
+def alerts_api():
+    user = session.get("user") or {}
+    try:
+        with connect_db() as conn:
+            data = alert_query_result(conn, request.args, user)
+    except DashboardOperationError as error:
+        payload = {"ok": False, "error": error.message}
+        if error.code:
+            payload["code"] = error.code
+        return jsonify(payload), error.status_code
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/alerts/<alert_id>/read")
+def update_alert_read_api(alert_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get("read"), bool):
+        return jsonify({"ok": False, "error": "Informe o estado de leitura do alerta."}), 400
+    try:
+        data = persist_alert_user_state(alert_id, read=payload["read"])
+    except DashboardOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/alerts/<alert_id>/pin")
+def update_alert_pin_api(alert_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not isinstance(payload.get("pinned"), bool):
+        return jsonify({"ok": False, "error": "Informe o estado de fixação do alerta."}), 400
+    try:
+        data = persist_alert_user_state(alert_id, pinned=payload["pinned"])
+    except DashboardOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/alerts/read-all")
+def mark_all_alerts_read_api():
+    count = mark_all_alerts_read()
+    return jsonify({"ok": True, "data": {"updated": count}})
+
+
+@app.get("/api/customers/<customer_id>/score")
+def customer_credit_score_api(customer_id: str):
+    with connect_db() as conn:
+        customer = conn.execute(
+            "SELECT id FROM customers WHERE store_id = ? AND id = ?",
+            ("matriz", customer_id),
+        ).fetchone()
+        if not customer:
+            return jsonify({"ok": False, "error": "Cliente não encontrado."}), 404
+        data = customer_credit_score(conn, customer_id)
+    return jsonify({"ok": True, "data": data})
 
 
 @app.get("/api/reports")
@@ -3549,6 +22288,327 @@ def reports_api():
     return jsonify({"ok": True, "data": build_reports_summary(state, start, end, today)})
 
 
+@app.get("/api/reports/catalog")
+def reports_catalog_api():
+    user = session.get("user")
+    if not user:
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    is_admin = user.get("role") == "admin"
+    data = []
+    for key, definition in REPORT_DEFINITIONS.items():
+        if definition.get("admin_only") and not is_admin:
+            continue
+        data.append({
+            "key": key,
+            "title": definition["title"],
+            "description": definition["description"],
+            "period": bool(definition.get("period")),
+            "position": bool(definition.get("position")),
+            "formats": list(definition.get("formats") or ()),
+            "filters": [
+                {
+                    "key": filter_key,
+                    "label": REPORT_FILTER_LABELS.get(filter_key, filter_key),
+                }
+                for filter_key in definition.get("filters", ())
+            ],
+        })
+    return jsonify({"ok": True, "data": data})
+
+
+def report_error_response(error: ReportOperationError):
+    body = {"ok": False, "error": error.message}
+    if error.code:
+        body["code"] = error.code
+    return jsonify(body), error.status_code
+
+
+@app.get("/api/reports/<report_key>")
+def report_data_api(report_key: str):
+    user = session.get("user")
+    if not user:
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    try:
+        data = build_report_document(
+            report_key,
+            request.args,
+            is_admin=user.get("role") == "admin",
+        )
+    except ReportOperationError as error:
+        return report_error_response(error)
+    return jsonify({"ok": True, "data": data})
+
+
+@app.get("/api/reports/<report_key>/export")
+def report_export_api(report_key: str):
+    user = session.get("user")
+    if not user:
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    export_format = str(request.args.get("format", "") or "").strip().lower()
+    definition = REPORT_DEFINITIONS.get(report_key)
+    if not definition:
+        return report_error_response(
+            ReportOperationError("Relatório não encontrado.", 404)
+        )
+    if export_format not in definition.get("formats", ()):
+        return report_error_response(
+            ReportOperationError("Formato de exportação inválido.")
+        )
+    try:
+        report = build_report_document(
+            report_key,
+            request.args,
+            is_admin=user.get("role") == "admin",
+            export=True,
+        )
+    except ReportOperationError as error:
+        return report_error_response(error)
+    if export_format == "pdf":
+        content = build_report_pdf(report)
+        mimetype = "application/pdf"
+    else:
+        content = build_report_xlsx(report)
+        mimetype = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    if report_key == "profit":
+        record_audit(
+            "export",
+            "report_profit",
+            "",
+            {
+                "format": export_format,
+                "period": report["metadata"]["period"],
+                "filters": report["metadata"]["filters"],
+            },
+        )
+    safe_key = re.sub(r"[^a-z0-9-]+", "-", report_key.lower()).strip("-")
+    period = report["metadata"]["period"]
+    suffix = (
+        f"{period.get('start') or 'atual'}-{period.get('end') or 'atual'}"
+    )
+    return send_file(
+        io.BytesIO(content),
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=f"mova-sports-{safe_key}-{suffix}.{export_format}",
+        max_age=0,
+    )
+
+
+@app.get("/api/reports/sales/<sale_id>/details")
+def report_sale_details_api(sale_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    try:
+        with connect_db() as conn:
+            document = sale_document_snapshot(conn, sale_id, "matriz")
+    except DocumentOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": document})
+
+
+@app.get("/api/store/operational-settings")
+def operational_store_settings_api():
+    with connect_db() as conn:
+        settings = fetch_store_settings(conn)
+    return jsonify({
+        "ok": True,
+        "data": {
+            "storeName": settings["storeName"],
+            "logoUrl": settings["logoUrl"],
+            "paymentMethods": settings["paymentMethods"],
+        },
+    })
+
+
+@app.get("/api/settings/store")
+def get_store_settings_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    with connect_db() as conn:
+        settings = fetch_store_settings(conn)
+    return jsonify({"ok": True, "data": settings})
+
+
+@app.put("/api/settings/store")
+def update_store_settings_api():
+    user, error_response = require_admin()
+    if error_response:
+        return error_response
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        settings = persist_store_settings(payload, user)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    except RuntimeError as error:
+        if str(error) == "CONFIGURATION_VERSION_CONFLICT":
+            return jsonify({
+                "ok": False,
+                "error": "As configuracoes foram alteradas por outro usuario. Atualize e tente novamente.",
+                "code": "CONFIGURATION_VERSION_CONFLICT",
+            }), 409
+        raise
+    return jsonify({"ok": True, "data": settings})
+
+
+@app.post("/api/settings/store/logo")
+def upload_store_logo_api():
+    user, error_response = require_admin()
+    if error_response:
+        return error_response
+    try:
+        expected_version = int(request.form.get("expectedVersion", ""))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Informe a versao atual das configuracoes."}), 400
+    with connect_db() as conn:
+        current = fetch_store_settings(conn)
+    if current["version"] != expected_version:
+        return jsonify({
+            "ok": False,
+            "error": "As configuracoes foram alteradas por outro usuario. Atualize e tente novamente.",
+            "code": "CONFIGURATION_VERSION_CONFLICT",
+        }), 409
+    try:
+        uploaded = save_store_logo(request.files.get("photo"))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        current = fetch_store_settings(conn, lock=True)
+        if current["version"] != expected_version:
+            return jsonify({
+                "ok": False,
+                "error": "As configuracoes foram alteradas por outro usuario. Atualize e tente novamente.",
+                "code": "CONFIGURATION_VERSION_CONFLICT",
+            }), 409
+        now = utc_now()
+        next_version = current["version"] + 1
+        conn.execute(
+            """
+            INSERT INTO store_settings (
+                store_id, logo_url, version, updated_by_id, updated_by_name,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(store_id) DO UPDATE SET
+                logo_url = excluded.logo_url, version = excluded.version,
+                updated_by_id = excluded.updated_by_id,
+                updated_by_name = excluded.updated_by_name,
+                updated_at = excluded.updated_at
+            """,
+            ("matriz", uploaded["url"], next_version, user["id"], user["name"], now, now),
+        )
+        record_audit(
+            "upload",
+            "store_settings",
+            "matriz",
+            {
+                "field": "logoUrl",
+                "before": current["logoUrl"],
+                "after": uploaded["url"],
+                "size": uploaded["size"],
+                "storage": uploaded["storage"],
+            },
+            conn,
+        )
+        settings = fetch_store_settings(conn)
+    return jsonify({"ok": True, "data": settings})
+
+
+@app.get("/api/me/preferences")
+def get_user_preferences_api():
+    user = session.get("user")
+    with connect_db() as conn:
+        row = conn.execute(
+            "SELECT theme, version, updated_at FROM user_preferences WHERE store_id = ? AND user_id = ?",
+            ("matriz", user["id"]),
+        ).fetchone()
+    return jsonify({"ok": True, "data": user_preference_from_row(row)})
+
+
+@app.put("/api/me/preferences")
+def update_user_preferences_api():
+    user = session.get("user")
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    theme = str(payload.get("theme", "") or "").strip()
+    if theme not in {"light", "dark", "system"}:
+        return jsonify({"ok": False, "error": "Tema invalido."}), 400
+    try:
+        expected_version = int(payload.get("expectedVersion", 0))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Versao de preferencia invalida."}), 400
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        lock_clause = " FOR UPDATE" if USE_POSTGRES else ""
+        row = conn.execute(
+            f"""
+            SELECT theme, version, updated_at
+            FROM user_preferences
+            WHERE store_id = ? AND user_id = ?{lock_clause}
+            """,
+            ("matriz", user["id"]),
+        ).fetchone()
+        current = user_preference_from_row(row)
+        if current["version"] != expected_version:
+            return jsonify({
+                "ok": False,
+                "error": "Preferencia alterada em outra sessao. Atualize e tente novamente.",
+                "code": "PREFERENCE_VERSION_CONFLICT",
+            }), 409
+        if current["theme"] == theme:
+            return jsonify({"ok": True, "data": current})
+        now = utc_now()
+        next_version = current["version"] + 1
+        conn.execute(
+            """
+            INSERT INTO user_preferences (
+                id, store_id, user_id, theme, version, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(store_id, user_id) DO UPDATE SET
+                theme = excluded.theme, version = excluded.version,
+                updated_at = excluded.updated_at
+            """,
+            (os.urandom(16).hex(), "matriz", user["id"], theme, next_version, now, now),
+        )
+        record_audit(
+            "update",
+            "user_preference",
+            user["id"],
+            {"field": "theme", "before": current["theme"], "after": theme},
+            conn,
+        )
+    return jsonify({
+        "ok": True,
+        "data": {"theme": theme, "version": next_version, "updatedAt": now},
+    })
+
+
+@app.get("/api/settings/access-matrix")
+def access_matrix_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    return jsonify({
+        "ok": True,
+        "data": {
+            "profiles": ("admin", "operator"),
+            "permissions": ROLE_PERMISSION_MATRIX,
+            "editable": False,
+        },
+    })
+
+
 @app.post("/api/login")
 def api_login():
     payload = request.get_json(silent=True) or {}
@@ -3556,16 +22616,29 @@ def api_login():
     password = str(payload.get("password", ""))
     if not login or not password:
         return jsonify({"ok": False, "error": "Informe usuário e senha."}), 400
-    if login_blocked(login):
-        return jsonify({"ok": False, "error": "Muitas tentativas de login. Aguarde alguns minutos e tente novamente."}), 429
     try:
         row = fetch_auth_user_by_login(login)
     except AuthenticationDatabaseUnavailable:
         return database_unavailable_response()
+    if row and row_value(row, "blocked_at"):
+        return jsonify({
+            "ok": False,
+            "error": "Usuario bloqueado. Solicite o desbloqueio a um administrador.",
+            "code": "USER_BLOCKED",
+        }), 423
+    if login_blocked(login):
+        return jsonify({"ok": False, "error": "Muitas tentativas de login. Aguarde alguns minutos e tente novamente."}), 429
     if not row or not row["active"] or not password_matches(row["password_hash"], password):
         register_login_failure(login)
+        if row and row["active"] and register_persisted_login_failure(row["id"]):
+            return jsonify({
+                "ok": False,
+                "error": "Usuario bloqueado. Solicite o desbloqueio a um administrador.",
+                "code": "USER_BLOCKED",
+            }), 423
         return jsonify({"ok": False, "error": "Usuário ou senha inválidos."}), 401
     clear_login_failures(login)
+    register_successful_login(row["id"])
     user = public_user(row)
     session.clear()
     session.permanent = True
@@ -3642,11 +22715,14 @@ def change_own_password_api():
 
 @app.get("/api/users")
 def list_users():
-    init_db()
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
     with connect_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, name, login, role, active
+            SELECT id, name, login, role, active, blocked_at,
+                   failed_login_attempts, last_login_at
             FROM users
             WHERE store_id = ?
             ORDER BY name COLLATE NOCASE
@@ -3668,7 +22744,6 @@ def create_user():
     error = validate_user_payload(user, creating=True)
     if error:
         return jsonify({"ok": False, "error": error}), 400
-    init_db()
     with connect_db() as conn:
         duplicate = conn.execute(
             """
@@ -3735,6 +22810,16 @@ def update_user(user_id: str):
         ).fetchone()
         if duplicate:
             return jsonify({"ok": False, "error": "Usuário já cadastrado."}), 409
+        if (
+            row["role"] == "admin"
+            and bool(row["active"])
+            and (user["role"] != "admin" or not user["active"])
+            and active_admin_count(conn, excluding_user_id=user_id) == 0
+        ):
+            return jsonify({
+                "ok": False,
+                "error": "A loja deve manter pelo menos um administrador ativo.",
+            }), 409
         password_hash = generate_password_hash(user["password"]) if user["password"] else row["password_hash"]
         conn.execute(
             """
@@ -3755,7 +22840,8 @@ def update_user(user_id: str):
         )
         updated = conn.execute(
             """
-            SELECT id, name, login, role, active
+            SELECT id, name, login, role, active, blocked_at,
+                   failed_login_attempts, last_login_at
             FROM users
             WHERE store_id = ? AND id = ?
             """,
@@ -3779,47 +22865,106 @@ def delete_user_api(user_id: str):
     init_db()
     with connect_db() as conn:
         row = conn.execute(
-            "SELECT id, role FROM users WHERE store_id = ? AND id = ?",
+            "SELECT id, role, active FROM users WHERE store_id = ? AND id = ?",
             ("matriz", user_id),
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": "Usuário não encontrado."}), 404
         if row["role"] == "admin":
-            admin_count = conn.execute(
-                "SELECT COUNT(*) AS total FROM users WHERE store_id = ? AND role = 'admin' AND active = 1",
-                ("matriz",),
-            ).fetchone()["total"]
-            if admin_count <= 1:
+            if bool(row["active"]) and active_admin_count(conn, excluding_user_id=user_id) == 0:
                 return jsonify({"ok": False, "error": "Não é possível excluir o último administrador."}), 409
-        conn.execute("DELETE FROM users WHERE store_id = ? AND id = ?", ("matriz", user_id))
-        record_audit("delete", "user", user_id, {"role": row["role"]}, conn)
-    sync_user_to_state(deleted_id=user_id)
-    return jsonify({"ok": True})
+        if not row["active"]:
+            return jsonify({"ok": True, "changed": False})
+        conn.execute(
+            "UPDATE users SET active = 0, updated_at = ? WHERE store_id = ? AND id = ?",
+            (utc_now(), "matriz", user_id),
+        )
+        record_audit("deactivate", "user", user_id, {"role": row["role"]}, conn)
+    sync_user_to_state({"id": user_id, "active": False})
+    return jsonify({"ok": True, "changed": True})
+
+
+@app.post("/api/users/<user_id>/unlock")
+def unlock_user_api(user_id: str):
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    with connect_db() as conn:
+        row = conn.execute(
+            "SELECT id, login, blocked_at, failed_login_attempts FROM users WHERE store_id = ? AND id = ?",
+            ("matriz", user_id),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Usuario nao encontrado."}), 404
+        changed = bool(row["blocked_at"] or row["failed_login_attempts"])
+        if changed:
+            conn.execute(
+                """
+                UPDATE users
+                SET failed_login_attempts = 0, blocked_at = NULL, updated_at = ?
+                WHERE store_id = ? AND id = ?
+                """,
+                (utc_now(), "matriz", user_id),
+            )
+            record_audit(
+                "unlock",
+                "user",
+                user_id,
+                {"previousAttempts": row["failed_login_attempts"]},
+                conn,
+            )
+            clear_login_failures(row["login"])
+    return jsonify({"ok": True, "changed": changed})
 
 
 @app.get("/api/state")
 def get_state():
     state, updated_at = read_state()
-    return jsonify({"ok": True, "data": sanitize_credentials(state), "updatedAt": updated_at})
+    safe_state = sanitize_credentials(state)
+    if session.get("user", {}).get("role") != "admin":
+        safe_state["users"] = []
+    return jsonify({"ok": True, "data": safe_state, "updatedAt": updated_at})
 
 
 @app.get("/api/products")
 def list_products():
-    init_db()
     with connect_db() as conn:
         rows = conn.execute(
-            """
-            SELECT id, barcode, name, size, color, gender, category_name AS category,
-                   brand_name AS brand, stock, min_stock AS minStock, description,
-                   active, cost, price, photo, updated_at AS updatedAt
-            FROM products
-            WHERE store_id = ?
-            ORDER BY name COLLATE NOCASE
-            """,
+            f"{PRODUCT_SELECT} WHERE store_id = ? ORDER BY name COLLATE NOCASE",
             ("matriz",),
         ).fetchall()
-    products = [product_from_row(row) for row in rows]
+        state = stored_app_state_from_connection(conn)
+    products = [
+        product_with_availability(product_from_row(row), state)
+        for row in rows
+    ]
     return jsonify({"ok": True, "data": products})
+
+
+@app.get("/api/products/lookup")
+def lookup_product():
+    barcode = normalize_product_code(request.args.get("barcode", ""))
+    if not barcode:
+        return jsonify({"ok": False, "error": "Informe o código do produto."}), 400
+    with connect_db() as conn:
+        row = conn.execute(
+            f"{PRODUCT_SELECT} WHERE store_id = ? AND barcode_normalized = ?",
+            ("matriz", barcode),
+        ).fetchone()
+        state = stored_app_state_from_connection(conn)
+    product = (
+        product_with_availability(product_from_row(row), state)
+        if row
+        else None
+    )
+    return jsonify({
+        "ok": True,
+        "data": {
+            "exists": bool(product),
+            "barcode": barcode,
+            "product": product,
+        },
+    })
 
 
 @app.post("/api/products")
@@ -3827,25 +22972,22 @@ def create_product():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    product = normalize_product_payload(payload)
-    error = validate_product(product)
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
     init_db()
-    with connect_db() as conn:
-        duplicate = conn.execute(
-            """
-            SELECT id FROM products
-            WHERE store_id = ? AND barcode = ? AND id <> ?
-            """,
-            ("matriz", product["barcode"], product["id"]),
-        ).fetchone()
-        if duplicate:
-            return jsonify({"ok": False, "error": "Código de barras já cadastrado."}), 409
-        upsert_product(conn, product)
-        record_audit("create", "product", product["id"], {"product": product}, conn)
-    sync_product_to_state(product=product)
-    return jsonify({"ok": True, "data": product}), 201
+    entry_payload = {
+        "product": payload,
+        "quantity": payload.get("quantity", payload.get("stock")),
+    }
+    key = request.headers.get("Idempotency-Key", "") or payload.get(
+        "idempotencyKey", ""
+    )
+    try:
+        result, replayed = persist_product_entry(entry_payload, key)
+    except ProductEntryOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
+    return jsonify({"ok": True, "data": result["product"]}), 200 if replayed else 201
 
 
 @app.put("/api/products/<product_id>")
@@ -3854,37 +22996,311 @@ def update_product(product_id: str):
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
     init_db()
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, barcode, name, size, color, gender, category_name AS category,
-                   brand_name AS brand, stock, min_stock AS minStock, description,
-                   active, cost, price, photo, updated_at AS updatedAt
-            FROM products
-            WHERE store_id = ? AND id = ?
-            """,
-            ("matriz", product_id),
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "Produto não encontrado."}), 404
-        product = normalize_product_payload(payload, product_from_row(row))
-        product["id"] = product_id
-        error = validate_product(product)
-        if error:
-            return jsonify({"ok": False, "error": error}), 400
-        duplicate = conn.execute(
-            """
-            SELECT id FROM products
-            WHERE store_id = ? AND barcode = ? AND id <> ?
-            """,
-            ("matriz", product["barcode"], product_id),
-        ).fetchone()
-        if duplicate:
-            return jsonify({"ok": False, "error": "Código de barras já cadastrado."}), 409
-        upsert_product(conn, product)
-        record_audit("update", "product", product["id"], {"product": product}, conn)
-    sync_product_to_state(product=product)
+    try:
+        product = persist_product_update(product_id, payload)
+    except ProductEntryOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
     return jsonify({"ok": True, "data": product})
+
+
+@app.get("/api/stock-entries")
+def list_stock_entries():
+    product_id = str(request.args.get("productId", "") or "").strip()
+    try:
+        limit = int(request.args.get("limit", "100") or 100)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Limite inválido."}), 400
+    init_db()
+    return jsonify({
+        "ok": True,
+        "data": list_purchase_stock_entries(product_id=product_id, limit=limit),
+    })
+
+
+@app.get("/api/inventory-movements")
+def list_inventory_movements_api():
+    product_id = str(request.args.get("productId", "") or "").strip()
+    movement_type = str(request.args.get("type", "") or "").strip()
+    try:
+        limit = int(request.args.get("limit", "200") or 200)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Limite inválido."}), 400
+    if limit < 1 or limit > 500:
+        return jsonify({
+            "ok": False,
+            "error": "O limite deve estar entre 1 e 500.",
+        }), 400
+    with connect_db() as conn:
+        movements = inventory_movement_rows(
+            conn,
+            product_id=product_id,
+            movement_type=movement_type,
+            limit=limit,
+        )
+    return jsonify({"ok": True, "data": movements})
+
+
+def inventory_error_response(error: InventoryWorkflowError):
+    response = {"ok": False, "error": error.message}
+    if error.code:
+        response["code"] = error.code
+    return jsonify(response), error.status_code
+
+
+@app.get("/api/inventories")
+def list_inventories_api():
+    try:
+        inventories = list_inventories(
+            search=request.args.get("search", ""),
+            inventory_type=request.args.get("type", ""),
+            status=request.args.get("status", ""),
+            user_id=request.args.get("userId", ""),
+            start_date=request.args.get("startDate", ""),
+            end_date=request.args.get("endDate", ""),
+        )
+    except InventoryWorkflowError as error:
+        return inventory_error_response(error)
+    return jsonify({"ok": True, "data": inventories})
+
+
+@app.post("/api/inventories")
+def create_inventory_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    key = request.headers.get("Idempotency-Key", "") or payload.get(
+        "idempotencyKey", ""
+    )
+    try:
+        inventory, replayed = create_inventory(payload, key)
+    except InventoryWorkflowError as error:
+        return inventory_error_response(error)
+    return jsonify({
+        "ok": True,
+        "data": inventory,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+
+@app.get("/api/inventories/<inventory_id>")
+def inventory_detail_api(inventory_id: str):
+    with connect_db() as conn:
+        inventory = inventory_detail(conn, inventory_id)
+    if not inventory:
+        return jsonify({"ok": False, "error": "Inventário não encontrado."}), 404
+    return jsonify({"ok": True, "data": inventory})
+
+
+@app.get("/api/inventories/<inventory_id>/barcode")
+def inventory_barcode_api(inventory_id: str):
+    try:
+        item = lookup_inventory_barcode(
+            inventory_id,
+            request.args.get("code", ""),
+        )
+    except InventoryWorkflowError as error:
+        return inventory_error_response(error)
+    return jsonify({"ok": True, "data": item})
+
+
+@app.put("/api/inventories/<inventory_id>/items/<item_id>/count")
+def save_inventory_count_api(inventory_id: str, item_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        result = save_inventory_count(inventory_id, item_id, payload)
+    except InventoryWorkflowError as error:
+        return inventory_error_response(error)
+    return jsonify({"ok": True, "data": result})
+
+
+@app.post("/api/inventories/<inventory_id>/finalize")
+def finalize_inventory_api(inventory_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    key = request.headers.get("Idempotency-Key", "") or payload.get(
+        "idempotencyKey", ""
+    )
+    try:
+        inventory, replayed = finalize_inventory(inventory_id, payload, key)
+    except InventoryWorkflowError as error:
+        return inventory_error_response(error)
+    return jsonify({
+        "ok": True,
+        "data": inventory,
+        "replayed": replayed,
+    })
+
+
+@app.post("/api/inventories/<inventory_id>/cancel")
+def cancel_inventory_api(inventory_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        inventory = cancel_inventory(inventory_id, payload)
+    except InventoryWorkflowError as error:
+        return inventory_error_response(error)
+    return jsonify({"ok": True, "data": inventory})
+
+
+@app.post("/api/stock-entries")
+def create_stock_entry():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    key = request.headers.get("Idempotency-Key", "") or payload.get(
+        "idempotencyKey", ""
+    )
+    init_db()
+    try:
+        result, replayed = persist_product_entry(payload, key)
+    except ProductEntryOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
+    return jsonify({"ok": True, "data": result}), 200 if replayed else 201
+
+
+@app.post("/api/stock-entries/<entry_id>/payables")
+def create_stock_entry_payables_api(entry_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        entry, payables = create_entry_payables(entry_id, payload)
+    except PurchaseOperationError as error:
+        return jsonify({"ok": False, "error": error.message, "code": error.code or None}), error.status_code
+    return jsonify({"ok": True, "data": {"entry": entry, "payables": payables}}), 201
+
+
+@app.post("/api/stock-entries/<entry_id>/cancel")
+def cancel_stock_entry_api(entry_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    key = request.headers.get("Idempotency-Key", "") or payload.get("idempotencyKey", "")
+    try:
+        result, replayed = cancel_stock_entry(entry_id, payload, key)
+    except PurchaseOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
+    return jsonify({"ok": True, "data": result}), 200
+
+
+@app.get("/api/supplier-returns")
+def list_supplier_returns_api():
+    supplier_id = str(request.args.get("supplierId", "") or "").strip()
+    entry_id = str(request.args.get("entryId", "") or "").strip()
+    conditions = ["r.store_id = ?"]
+    params: list = ["matriz"]
+    if supplier_id:
+        conditions.append("r.supplier_id = ?")
+        params.append(supplier_id)
+    if entry_id:
+        conditions.append("r.entry_id = ?")
+        params.append(entry_id)
+    with connect_db() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT r.id, r.return_number AS "returnNumber", r.entry_id AS "entryId",
+                   r.supplier_id AS "supplierId", r.supplier_name AS supplier,
+                   r.reason, r.notes, r.total_quantity AS "totalQuantity",
+                   r.total_value AS "totalValue", r.pending_value AS "pendingValue",
+                   r.status, r.financial_status AS "financialStatus",
+                   r.created_at AS "createdAt", r.updated_at AS "updatedAt"
+            FROM supplier_returns r WHERE {' AND '.join(conditions)}
+            ORDER BY r.return_number DESC
+            """,
+            tuple(params),
+        ).fetchall()
+        data = []
+        for row in rows:
+            item = dict(row)
+            item["code"] = f"DEVFORN{int(item['returnNumber']):06d}"
+            item["items"] = [
+                dict(detail)
+                for detail in conn.execute(
+                    """
+                    SELECT id, entry_item_id AS "entryItemId", product_id AS "productId",
+                           product_name AS "productName", barcode, quantity,
+                           unit_cost AS "unitCost", total_cost AS "totalCost",
+                           stock_before AS "stockBefore", stock_after AS "stockAfter"
+                    FROM supplier_return_items WHERE return_id = ? ORDER BY id
+                    """,
+                    (item["id"],),
+                ).fetchall()
+            ]
+            data.append(item)
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/supplier-returns")
+def create_supplier_return_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    key = request.headers.get("Idempotency-Key", "") or payload.get("idempotencyKey", "")
+    try:
+        result, replayed = create_supplier_return(payload, key)
+    except (PurchaseOperationError, ValueError) as error:
+        if isinstance(error, PurchaseOperationError):
+            response = {"ok": False, "error": error.message}
+            if error.code:
+                response["code"] = error.code
+            return jsonify(response), error.status_code
+        return jsonify({"ok": False, "error": "Quantidade inválida."}), 400
+    return jsonify({"ok": True, "data": result}), 200 if replayed else 201
+
+
+@app.post("/api/supplier-returns/<return_id>/cancel")
+def cancel_supplier_return_api(return_id: str):
+    try:
+        result, replayed = cancel_supplier_return(return_id)
+    except PurchaseOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": result, "replayed": replayed})
+
+
+@app.get("/api/supplier-credits")
+def list_supplier_credits_api():
+    supplier_id = str(request.args.get("supplierId", "") or "").strip()
+    with connect_db() as conn:
+        credits = supplier_credit_rows(conn, supplier_id)
+    return jsonify({"ok": True, "data": credits})
+
+
+@app.post("/api/payables/<payable_id>/supplier-credit")
+def apply_supplier_credit_api(payable_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    key = request.headers.get("Idempotency-Key", "") or payload.get("idempotencyKey", "")
+    try:
+        result, replayed = use_supplier_credit(payable_id, payload, key)
+    except PurchaseOperationError as error:
+        response = {"ok": False, "error": error.message}
+        if error.code:
+            response["code"] = error.code
+        return jsonify(response), error.status_code
+    return jsonify({"ok": True, "data": result}), 200
+
+
+@app.post("/api/supplier-credit-usages/<usage_id>/reverse")
+def reverse_supplier_credit_usage_api(usage_id: str):
+    try:
+        result, replayed = reverse_supplier_credit_usage(usage_id)
+    except PurchaseOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": result, "replayed": replayed})
 
 
 @app.delete("/api/products/<product_id>")
@@ -3905,145 +23321,1008 @@ def delete_product_api(product_id: str):
             "SELECT id FROM sale_return_items WHERE product_id = ? LIMIT 1",
             (product_id,),
         ).fetchone()
-        if linked_sale or linked_return:
-            return jsonify({"ok": False, "error": "Produto possui historico de venda, troca ou devolucao e nao pode ser excluido."}), 409
+        linked_entry = conn.execute(
+            "SELECT id FROM stock_entry_items WHERE product_id = ? LIMIT 1",
+            (product_id,),
+        ).fetchone()
+        linked_inventory = conn.execute(
+            "SELECT id FROM inventory_items WHERE product_id = ? LIMIT 1",
+            (product_id,),
+        ).fetchone()
+        if linked_sale or linked_return or linked_entry or linked_inventory:
+            return jsonify({
+                "ok": False,
+                "error": "Produto possui histórico de entrada, venda, troca ou devolução e não pode ser excluído.",
+            }), 409
         conn.execute("DELETE FROM products WHERE store_id = ? AND id = ?", ("matriz", product_id))
         record_audit("delete", "product", product_id, {}, conn)
     sync_product_to_state(deleted_id=product_id)
     return jsonify({"ok": True})
 
 
-@app.get("/api/brands")
-def list_brands():
-    init_db()
+def list_catalog_api(kind: str):
+    try:
+        with connect_db() as conn:
+            items = catalog_rows(conn, kind)
+    except CatalogOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": items})
+
+
+def save_catalog_api(kind: str, identifier: str | None = None):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        item, created = persist_catalog_item(kind, payload, identifier)
+    except CatalogOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": item}), 201 if created else 200
+
+
+def catalog_status_api(kind: str, identifier: str):
+    payload = request.get_json(silent=True) or {}
+    try:
+        item, changed = persist_catalog_status(kind, identifier, str(payload.get("status", "")))
+    except CatalogOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": item, "changed": changed})
+
+
+DOCUMENT_TEMPLATE_VERSION = "mova-docs-1"
+DOCUMENT_FORMATS = {
+    "sale_receipt": frozenset({"thermal", "a4"}),
+    "conditional": frozenset({"thermal", "a4"}),
+    "exchange": frozenset({"thermal", "a4"}),
+    "catalog": frozenset({"a4"}),
+    "product_labels": frozenset({"thermal"}),
+}
+DOCUMENT_SOURCE_TYPES = {
+    "sale_receipt": "sale",
+    "conditional": "conditional",
+    "exchange": "exchange",
+    "catalog": "catalog",
+    "product_labels": "product",
+}
+
+
+class DocumentOperationError(Exception):
+    def __init__(self, message: str, status_code: int = 400, code: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.code = code
+
+
+def document_store_identity(conn, store_id: str = "matriz") -> dict:
+    settings = fetch_store_settings(conn, store_id)
+    logo_path = Path(APP_DIR) / "assets" / "MOVA LOGO.png"
+    address_parts = [
+        settings["address"],
+        settings["addressNumber"],
+        settings["complement"],
+        settings["district"],
+        settings["city"],
+        settings["state"],
+        settings["zip"],
+    ]
+    return {
+        "name": settings["storeName"],
+        "legalName": settings["legalName"],
+        "tradeName": settings["tradeName"],
+        "document": settings["document"] if settings["printPreferences"]["showDocument"] else "",
+        "phone": settings["phone"] if settings["printPreferences"]["showPhone"] else "",
+        "whatsapp": settings["whatsapp"] if settings["printPreferences"]["showWhatsapp"] else "",
+        "email": settings["email"] if settings["printPreferences"]["showEmail"] else "",
+        "address": ", ".join(item for item in address_parts if item)
+        if settings["printPreferences"]["showAddress"]
+        else "",
+        "receiptFooter": settings["receiptFooter"],
+        "logoUrl": settings["logoUrl"] or (
+            "/assets/MOVA%20LOGO.png" if logo_path.is_file() else ""
+        ),
+    }
+
+
+def relational_reserved_stock(conn, store_id: str = "matriz") -> dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT items.product_id AS "productId",
+               COALESCE(SUM(
+                   items.original_quantity
+                   - items.returned_quantity
+                   - items.sold_quantity
+               ), 0) AS reserved
+        FROM conditional_items items
+        JOIN conditionals conditional ON conditional.id = items.conditional_id
+        WHERE conditional.store_id = ?
+          AND conditional.status = 'open'
+        GROUP BY items.product_id
+        """,
+        (store_id,),
+    ).fetchall()
+    return {
+        str(row["productId"]): max(0, int(row["reserved"] or 0))
+        for row in rows
+    }
+
+
+def sanitized_catalog_product(product: dict, available: int) -> dict:
+    return {
+        "id": str(product.get("id", "")),
+        "name": str(product.get("name", "") or ""),
+        "brand": str(product.get("brand", "") or ""),
+        "category": str(product.get("category", "") or ""),
+        "size": str(product.get("size", "") or ""),
+        "color": str(product.get("color", "") or ""),
+        "description": str(product.get("description", "") or ""),
+        "price": money_round(product.get("price", 0)),
+        "photo": str(product.get("photo", "") or ""),
+        "availability": "last_unit" if available == 1 else "available",
+        "availabilityLabel": "Última unidade" if available == 1 else "Disponível",
+    }
+
+
+def normalize_catalog_query(source) -> dict:
+    query = str(source.get("query", "") or "").strip()
+    category = str(source.get("category", "") or "").strip()
+    brand = str(source.get("brand", "") or "").strip()
+    size = str(source.get("size", "") or "").strip()
+    color = str(source.get("color", "") or "").strip()
+    order = str(source.get("order", "name") or "name").strip().lower()
+    if order not in {"name", "price_asc", "price_desc"}:
+        raise DocumentOperationError("Ordenação do catálogo é inválida.")
+    try:
+        minimum = (
+            None
+            if str(source.get("minPrice", "") or "").strip() == ""
+            else float(source.get("minPrice"))
+        )
+        maximum = (
+            None
+            if str(source.get("maxPrice", "") or "").strip() == ""
+            else float(source.get("maxPrice"))
+        )
+    except (TypeError, ValueError, OverflowError) as error:
+        raise DocumentOperationError("Faixa de preço inválida.") from error
+    if minimum is not None and (not math.isfinite(minimum) or minimum < 0):
+        raise DocumentOperationError("Preço mínimo inválido.")
+    if maximum is not None and (not math.isfinite(maximum) or maximum < 0):
+        raise DocumentOperationError("Preço máximo inválido.")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise DocumentOperationError(
+            "O preço mínimo não pode ser maior que o preço máximo."
+        )
+    return {
+        "query": query,
+        "category": category,
+        "brand": brand,
+        "size": size,
+        "color": color,
+        "minPrice": None if minimum is None else money_round(minimum),
+        "maxPrice": None if maximum is None else money_round(maximum),
+        "order": order,
+    }
+
+
+def catalog_query_result(conn, filters: dict, store_id: str = "matriz") -> dict:
+    rows = conn.execute(
+        f"{PRODUCT_SELECT} WHERE store_id = ? AND active = 1 ORDER BY LOWER(name), id",
+        (store_id,),
+    ).fetchall()
+    reserved = relational_reserved_stock(conn, store_id)
+    available_items = []
+    for row in rows:
+        product = product_from_row(row)
+        available = max(
+            0,
+            int(product.get("stock", 0) or 0)
+            - reserved.get(str(product.get("id", "")), 0),
+        )
+        if available <= 0:
+            continue
+        item = sanitized_catalog_product(product, available)
+        searchable = " ".join(
+            str(item.get(field, "") or "")
+            for field in ("name", "brand", "category", "color", "size")
+        )
+        if filters["query"]:
+            searchable_normalized = normalized_search_text(searchable)
+            query_terms = normalized_search_text(filters["query"]).split()
+            if not all(term in searchable_normalized for term in query_terms):
+                continue
+        if filters["category"] and item["category"] != filters["category"]:
+            continue
+        if filters["brand"] and item["brand"] != filters["brand"]:
+            continue
+        if filters["size"] and item["size"] != filters["size"]:
+            continue
+        if filters["color"] and item["color"] != filters["color"]:
+            continue
+        if filters["minPrice"] is not None and item["price"] < filters["minPrice"]:
+            continue
+        if filters["maxPrice"] is not None and item["price"] > filters["maxPrice"]:
+            continue
+        available_items.append(item)
+    if filters["order"] == "price_asc":
+        available_items.sort(key=lambda item: (item["price"], normalized_search_text(item["name"])))
+    elif filters["order"] == "price_desc":
+        available_items.sort(key=lambda item: (-item["price"], normalized_search_text(item["name"])))
+    else:
+        available_items.sort(key=lambda item: normalized_search_text(item["name"]))
+    return {
+        "items": available_items,
+        "total": len(available_items),
+        "filters": {
+            field: sorted(
+                {item[field] for item in available_items if item[field]},
+                key=normalized_search_text,
+            )
+            for field in ("category", "brand", "size", "color")
+        },
+        "query": filters,
+    }
+
+
+def sale_document_snapshot(conn, sale_id: str, store_id: str = "matriz") -> dict:
+    sale = conn.execute(
+        """
+        SELECT id, sale_number AS "saleNumber", customer_id AS "customerId",
+               customer_name AS "customerName", subtotal, discount, addition,
+               total, change_amount AS "changeAmount", user_id AS "userId",
+               user_name AS "userName", conditional_id AS "conditionalId",
+               status, created_at AS "createdAt", updated_at AS "updatedAt"
+        FROM sales WHERE store_id = ? AND id = ?
+        """,
+        (store_id, sale_id),
+    ).fetchone()
+    if not sale:
+        raise DocumentOperationError("Operação não encontrada.", 404, "OPERATION_NOT_FOUND")
+    data = dict(sale)
+    customer = None
+    if data["customerId"]:
+        customer_row = conn.execute(
+            """
+            SELECT name, cpf, whatsapp, is_default AS "isDefault"
+            FROM customers WHERE store_id = ? AND id = ?
+            """,
+            (store_id, data["customerId"]),
+        ).fetchone()
+        if customer_row:
+            customer = dict(customer_row)
+            customer["isDefault"] = bool(customer["isDefault"])
+            customer["cpf"] = ""
+    data["customer"] = customer
+    data["items"] = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT product_id AS "productId", barcode, name, brand, size, color,
+                   quantity, practiced_unit_price AS "practicedUnitPrice",
+                   unit_discount AS "unitDiscount",
+                   allocated_global_discount AS "allocatedGlobalDiscount",
+                   final_unit_price AS "finalUnitPrice",
+                   net_total AS "netTotal", total
+            FROM sale_items WHERE sale_id = ? ORDER BY id
+            """,
+            (sale_id,),
+        ).fetchall()
+    ]
+    data["payments"] = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT method, amount, installments, tendered_amount AS "tenderedAmount",
+                   change_amount AS "changeAmount", modality_name AS "modalityName",
+                   gross_amount AS "grossAmount", status
+            FROM sale_payments WHERE sale_id = ? ORDER BY id
+            """,
+            (sale_id,),
+        ).fetchall()
+    ]
+    data["storeCreditInstallments"] = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT installment, amount, due_date AS "dueDate", status
+            FROM receivables
+            WHERE store_id = ? AND sale_id = ? AND method = 'storeCredit'
+            ORDER BY due_date, installment, id
+            """,
+            (store_id, sale_id),
+        ).fetchall()
+    ]
+    data["linkedReturns"] = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM sale_returns WHERE store_id = ? AND sale_id = ? ORDER BY created_at, id",
+            (store_id, sale_id),
+        ).fetchall()
+    ]
+    data["linkedExchanges"] = [
+        str(row["id"])
+        for row in conn.execute(
+            "SELECT id FROM exchanges WHERE store_id = ? AND sale_id = ? ORDER BY created_at, id",
+            (store_id, sale_id),
+        ).fetchall()
+    ]
+    return data
+
+
+def conditional_document_snapshot(
+    conn,
+    conditional_id: str,
+    store_id: str = "matriz",
+) -> dict:
+    data = conditional_document(conn, conditional_id, store_id)
+    if not data:
+        raise DocumentOperationError("Operação não encontrada.", 404, "OPERATION_NOT_FOUND")
+    safe = dict(data)
+    safe["items"] = [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"unitCost"}
+        }
+        for item in data.get("items", [])
+    ]
+    return safe
+
+
+def exchange_document_snapshot(conn, exchange_id: str, store_id: str = "matriz") -> dict:
+    data = exchange_document(conn, exchange_id, store_id)
+    if not data:
+        raise DocumentOperationError("Operação não encontrada.", 404, "OPERATION_NOT_FOUND")
+    safe = dict(data)
+    safe["returnedItems"] = [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"unitCost", "costTotal"}
+        }
+        for item in data.get("returnedItems", [])
+    ]
+    safe["newItems"] = [
+        {
+            key: value
+            for key, value in item.items()
+            if key not in {"unitCost", "costTotal", "stockBefore", "stockAfter"}
+        }
+        for item in data.get("newItems", [])
+    ]
+    return safe
+
+
+def product_label_snapshot(conn, items, store_id: str = "matriz") -> dict:
+    if not isinstance(items, list) or not items:
+        raise DocumentOperationError("Selecione ao menos um produto para as etiquetas.")
+    if len(items) > 100:
+        raise DocumentOperationError("Selecione no máximo 100 produtos por lote.")
+    requested: list[tuple[str, int]] = []
+    total_labels = 0
+    for item in items:
+        if not isinstance(item, dict):
+            raise DocumentOperationError("Item de etiqueta inválido.")
+        product_id = str(item.get("productId", "") or "").strip()
+        try:
+            copies = int(item.get("copies", 1) or 1)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise DocumentOperationError("Quantidade de etiquetas inválida.") from error
+        if not product_id or copies < 1 or copies > 50:
+            raise DocumentOperationError("Cada produto permite de 1 a 50 etiquetas.")
+        total_labels += copies
+        requested.append((product_id, copies))
+    if total_labels > 200:
+        raise DocumentOperationError("O lote permite no máximo 200 etiquetas.")
+    labels = []
+    for product_id, copies in requested:
+        row = conn.execute(
+            f"{PRODUCT_SELECT} WHERE store_id = ? AND id = ?",
+            (store_id, product_id),
+        ).fetchone()
+        if not row:
+            raise DocumentOperationError("Produto da etiqueta não encontrado.", 404)
+        product = product_from_row(row)
+        try:
+            barcode_svg = Code128(
+                product["barcode"],
+                writer=SVGWriter(),
+            ).render({
+                "module_width": 0.26,
+                "module_height": 12,
+                "quiet_zone": 2,
+                "font_size": 8,
+                "text_distance": 2,
+            }).decode("utf-8")
+        except (TypeError, ValueError) as error:
+            raise DocumentOperationError(
+                "Não foi possível gerar o código de barras da etiqueta.",
+                422,
+                "BARCODE_GENERATION_FAILED",
+            ) from error
+        labels.append({
+            "productId": product["id"],
+            "barcode": product["barcode"],
+            "name": product["name"],
+            "brand": product["brand"],
+            "size": product["size"],
+            "color": product["color"],
+            "price": money_round(product["price"]),
+            "copies": copies,
+            "barcodeSvg": barcode_svg,
+        })
+    return {"items": labels, "totalLabels": total_labels}
+
+
+def document_filename(document_type: str, operation_number: str, generated_at: str) -> str:
+    if document_type == "catalog":
+        suffix = sale_operational_date(generated_at).isoformat()
+        return f"catalogo-{suffix}.pdf"
+    if document_type == "product_labels":
+        suffix = sale_operational_date(generated_at).isoformat()
+        return f"etiquetas-{suffix}.pdf"
+    prefixes = {
+        "sale_receipt": "venda",
+        "conditional": "condicional",
+        "exchange": "troca",
+    }
+    safe_number = re.sub(r"[^0-9A-Za-z_-]+", "-", operation_number).strip("-")
+    return f"{prefixes[document_type]}-{safe_number or 'documento'}.pdf"
+
+
+def generated_document_from_row(row) -> dict:
+    data = dict(row)
+    try:
+        snapshot = json.loads(data.pop("snapshotJson"))
+    except (TypeError, json.JSONDecodeError):
+        snapshot = {}
+    data["snapshot"] = snapshot if isinstance(snapshot, dict) else {}
+    data["copyNumber"] = int(data.get("copyNumber", 1) or 1)
+    data["secondCopy"] = data["copyNumber"] > 1
+    return data
+
+
+def document_row(conn, document_id: str, store_id: str = "matriz"):
+    return conn.execute(
+        """
+        SELECT id, document_type AS "documentType",
+               source_type AS "sourceType", source_id AS "sourceId",
+               operation_number AS "operationNumber", format,
+               template_version AS "templateVersion",
+               copy_number AS "copyNumber", filename,
+               snapshot_json AS "snapshotJson",
+               generated_by_id AS "generatedById",
+               generated_by_name AS "generatedByName",
+               generated_at AS "generatedAt"
+        FROM generated_documents
+        WHERE store_id = ? AND id = ?
+        """,
+        (store_id, document_id),
+    ).fetchone()
+
+
+def build_document_snapshot(
+    conn,
+    document_type: str,
+    source_id: str,
+    options: dict,
+    store_id: str,
+) -> tuple[dict, str]:
+    if document_type == "sale_receipt":
+        operation = sale_document_snapshot(conn, source_id, store_id)
+        number = str(operation.get("saleNumber") or operation.get("id") or "")
+    elif document_type == "conditional":
+        operation = conditional_document_snapshot(conn, source_id, store_id)
+        number = str(operation.get("conditionalNumber") or operation.get("id") or "")
+    elif document_type == "exchange":
+        operation = exchange_document_snapshot(conn, source_id, store_id)
+        number = str(operation.get("exchangeNumber") or operation.get("id") or "")
+    elif document_type == "catalog":
+        filters = normalize_catalog_query(options.get("filters") or {})
+        operation = catalog_query_result(conn, filters, store_id)
+        number = sale_operational_date(utc_now()).isoformat()
+    else:
+        operation = product_label_snapshot(conn, options.get("items"), store_id)
+        number = sale_operational_date(utc_now()).isoformat()
+    return {
+        "store": document_store_identity(conn, store_id),
+        "operation": operation,
+    }, number
+
+
+def persist_generated_document(
+    document_type: str,
+    source_id: str,
+    format_name: str,
+    options: dict,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    if document_type not in DOCUMENT_FORMATS:
+        raise DocumentOperationError("Tipo de documento inválido.")
+    if format_name not in DOCUMENT_FORMATS[document_type]:
+        raise DocumentOperationError(
+            "Formato não permitido para este documento.",
+            400,
+            "DOCUMENT_FORMAT_NOT_ALLOWED",
+        )
+    if document_type not in {"catalog", "product_labels"} and not source_id:
+        raise DocumentOperationError("Informe a operação de origem.")
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise DocumentOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    normalized_options = options if isinstance(options, dict) else {}
+    request_payload = {
+        "documentType": document_type,
+        "sourceId": source_id,
+        "format": format_name,
+        "options": normalized_options,
+    }
+    request_hash = operation_request_hash(request_payload)
+    generated_at = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (operation_lock_key("document", store_id, key),),
+            )
+        replay = conn.execute(
+            """
+            SELECT id, request_hash AS "requestHash"
+            FROM generated_documents
+            WHERE store_id = ? AND idempotency_key = ?
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise DocumentOperationError(
+                    "A chave de idempotência já foi utilizada com outros dados.",
+                    409,
+                    "IDEMPOTENCY_KEY_CONFLICT",
+                )
+            row = document_row(conn, str(replay["id"]), store_id)
+            return generated_document_from_row(row), True
+        snapshot, operation_number = build_document_snapshot(
+            conn,
+            document_type,
+            source_id,
+            normalized_options,
+            store_id,
+        )
+        copy_number = 1
+        if document_type not in {"catalog", "product_labels"}:
+            copy_row = conn.execute(
+                """
+                SELECT COALESCE(MAX(copy_number), 0) AS total
+                FROM generated_documents
+                WHERE store_id = ? AND document_type = ? AND source_id = ?
+                """,
+                (store_id, document_type, source_id),
+            ).fetchone()
+            copy_number = int(copy_row["total"] or 0) + 1
+        document_id = os.urandom(16).hex()
+        filename = document_filename(document_type, operation_number, generated_at)
+        conn.execute(
+            """
+            INSERT INTO generated_documents (
+                id, store_id, document_type, source_type, source_id,
+                operation_number, format, template_version, copy_number,
+                filename, snapshot_json, generated_by_id, generated_by_name,
+                idempotency_key, request_hash, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                document_id,
+                store_id,
+                document_type,
+                DOCUMENT_SOURCE_TYPES[document_type],
+                source_id or None,
+                operation_number,
+                format_name,
+                DOCUMENT_TEMPLATE_VERSION,
+                copy_number,
+                filename,
+                json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+                user.get("id", ""),
+                user.get("name", ""),
+                key,
+                request_hash,
+                generated_at,
+            ),
+        )
+        record_audit(
+            "generate",
+            "document",
+            document_id,
+            {
+                "documentType": document_type,
+                "sourceType": DOCUMENT_SOURCE_TYPES[document_type],
+                "sourceId": source_id,
+                "format": format_name,
+                "copyNumber": copy_number,
+            },
+            conn,
+        )
+        row = document_row(conn, document_id, store_id)
+    return generated_document_from_row(row), False
+
+
+def persist_document_reprint(
+    document_id: str,
+    idempotency_key: str,
+    store_id: str = "matriz",
+) -> tuple[dict, bool]:
+    key = str(idempotency_key or "").strip()
+    if not key or len(key) > 160:
+        raise DocumentOperationError(
+            "Informe uma chave de idempotência válida.",
+            400,
+            "IDEMPOTENCY_KEY_REQUIRED",
+        )
+    request_hash = operation_request_hash({"documentId": document_id})
+    generated_at = utc_now()
+    user = session.get("user") or {}
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        else:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(?)",
+                (operation_lock_key("document-reprint", store_id, key),),
+            )
+        replay = conn.execute(
+            """
+            SELECT id, request_hash AS "requestHash"
+            FROM generated_documents
+            WHERE store_id = ? AND idempotency_key = ?
+            """,
+            (store_id, key),
+        ).fetchone()
+        if replay:
+            if replay["requestHash"] != request_hash:
+                raise DocumentOperationError(
+                    "A chave de idempotência já foi utilizada com outros dados.",
+                    409,
+                    "IDEMPOTENCY_KEY_CONFLICT",
+                )
+            return generated_document_from_row(
+                document_row(conn, str(replay["id"]), store_id)
+            ), True
+        original = document_row(conn, document_id, store_id)
+        if not original:
+            raise DocumentOperationError("Documento não encontrado.", 404)
+        original_data = generated_document_from_row(original)
+        copy_row = conn.execute(
+            """
+            SELECT COALESCE(MAX(copy_number), 0) AS total
+            FROM generated_documents
+            WHERE store_id = ? AND document_type = ?
+              AND COALESCE(source_id, '') = COALESCE(?, '')
+            """,
+            (
+                store_id,
+                original_data["documentType"],
+                original_data.get("sourceId"),
+            ),
+        ).fetchone()
+        copy_number = int(copy_row["total"] or 0) + 1
+        new_id = os.urandom(16).hex()
+        conn.execute(
+            """
+            INSERT INTO generated_documents (
+                id, store_id, document_type, source_type, source_id,
+                operation_number, format, template_version, copy_number,
+                filename, snapshot_json, generated_by_id, generated_by_name,
+                idempotency_key, request_hash, generated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                new_id,
+                store_id,
+                original_data["documentType"],
+                original_data["sourceType"],
+                original_data.get("sourceId") or None,
+                original_data.get("operationNumber"),
+                original_data["format"],
+                original_data["templateVersion"],
+                copy_number,
+                original_data["filename"],
+                json.dumps(
+                    original_data["snapshot"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                user.get("id", ""),
+                user.get("name", ""),
+                key,
+                request_hash,
+                generated_at,
+            ),
+        )
+        record_audit(
+            "reprint",
+            "document",
+            new_id,
+            {
+                "originalDocumentId": document_id,
+                "documentType": original_data["documentType"],
+                "sourceId": original_data.get("sourceId"),
+                "copyNumber": copy_number,
+            },
+            conn,
+        )
+        row = document_row(conn, new_id, store_id)
+    return generated_document_from_row(row), False
+
+
+@app.get("/api/catalog/products")
+def catalog_products_api():
+    try:
+        filters = normalize_catalog_query(request.args)
+        with connect_db() as conn:
+            result = catalog_query_result(conn, filters)
+    except DocumentOperationError as error:
+        return jsonify({"ok": False, "error": error.message, "code": error.code or None}), error.status_code
+    return jsonify({"ok": True, "data": result})
+
+
+@app.get("/api/catalog/products/<product_id>")
+def catalog_product_detail_api(product_id: str):
+    with connect_db() as conn:
+        result = catalog_query_result(
+            conn,
+            normalize_catalog_query({}),
+        )
+    product = next((item for item in result["items"] if item["id"] == product_id), None)
+    if not product:
+        return jsonify({"ok": False, "error": "Produto não encontrado ou indisponível."}), 404
+    return jsonify({"ok": True, "data": product})
+
+
+@app.get("/api/documents")
+def list_generated_documents_api():
+    document_type = str(request.args.get("type", "") or "").strip()
+    params: list = ["matriz"]
+    condition = ""
+    if document_type:
+        if document_type not in DOCUMENT_FORMATS:
+            return jsonify({"ok": False, "error": "Tipo de documento inválido."}), 400
+        condition = " AND document_type = ?"
+        params.append(document_type)
     with connect_db() as conn:
         rows = conn.execute(
-            "SELECT name FROM brands WHERE store_id = ? ORDER BY name COLLATE NOCASE",
-            ("matriz",),
+            f"""
+            SELECT id, document_type AS "documentType",
+                   source_type AS "sourceType", source_id AS "sourceId",
+                   operation_number AS "operationNumber", format,
+                   template_version AS "templateVersion",
+                   copy_number AS "copyNumber", filename,
+                   snapshot_json AS "snapshotJson",
+                   generated_by_id AS "generatedById",
+                   generated_by_name AS "generatedByName",
+                   generated_at AS "generatedAt"
+            FROM generated_documents
+            WHERE store_id = ?{condition}
+            ORDER BY generated_at DESC, id DESC
+            LIMIT 100
+            """,
+            tuple(params),
         ).fetchall()
-    return jsonify({"ok": True, "data": [row["name"] for row in rows]})
+    return jsonify({
+        "ok": True,
+        "data": [generated_document_from_row(row) for row in rows],
+    })
+
+
+@app.get("/api/documents/<document_id>")
+def generated_document_detail_api(document_id: str):
+    with connect_db() as conn:
+        row = document_row(conn, document_id)
+    if not row:
+        return jsonify({"ok": False, "error": "Documento não encontrado."}), 404
+    return jsonify({"ok": True, "data": generated_document_from_row(row)})
+
+
+@app.post("/api/documents")
+def create_generated_document_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        result, replayed = persist_generated_document(
+            str(payload.get("type", "") or "").strip(),
+            str(payload.get("sourceId", "") or "").strip(),
+            str(payload.get("format", "") or "").strip().lower(),
+            payload.get("options") if isinstance(payload.get("options"), dict) else {},
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except DocumentOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": result, "replayed": replayed}), 200 if replayed else 201
+
+
+@app.post("/api/documents/<document_id>/reprint")
+def reprint_generated_document_api(document_id: str):
+    try:
+        result, replayed = persist_document_reprint(
+            document_id,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except DocumentOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": result, "replayed": replayed}), 200 if replayed else 201
+
+
+@app.get("/api/brands")
+def list_brands():
+    return list_catalog_api("brands")
 
 
 @app.post("/api/brands")
 def create_brand():
-    return upsert_simple_name_api("brands")
+    return save_catalog_api("brands")
 
 
-@app.put("/api/brands/<path:previous_name>")
-def update_brand(previous_name: str):
-    return upsert_simple_name_api("brands", previous_name)
+@app.put("/api/brands/<path:identifier>")
+def update_brand(identifier: str):
+    return save_catalog_api("brands", identifier)
 
 
-@app.delete("/api/brands/<path:name>")
-def delete_brand(name: str):
-    return delete_simple_name_api("brands", name)
+@app.post("/api/brands/<path:identifier>/status")
+def update_brand_status(identifier: str):
+    return catalog_status_api("brands", identifier)
+
+
+@app.delete("/api/brands/<path:identifier>")
+def delete_brand(identifier: str):
+    try:
+        item, changed = persist_catalog_status("brands", identifier, "deactivated")
+    except CatalogOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": item, "changed": changed})
 
 
 @app.get("/api/categories")
 def list_categories():
-    init_db()
-    with connect_db() as conn:
-        rows = conn.execute(
-            "SELECT name FROM categories WHERE store_id = ? ORDER BY name COLLATE NOCASE",
-            ("matriz",),
-        ).fetchall()
-    return jsonify({"ok": True, "data": [row["name"] for row in rows]})
+    return list_catalog_api("categories")
 
 
 @app.post("/api/categories")
 def create_category():
-    return upsert_simple_name_api("categories")
+    return save_catalog_api("categories")
 
 
-@app.put("/api/categories/<path:previous_name>")
-def update_category(previous_name: str):
-    return upsert_simple_name_api("categories", previous_name)
+@app.put("/api/categories/<path:identifier>")
+def update_category(identifier: str):
+    return save_catalog_api("categories", identifier)
 
 
-@app.delete("/api/categories/<path:name>")
-def delete_category(name: str):
-    return delete_simple_name_api("categories", name)
+@app.post("/api/categories/<path:identifier>/status")
+def update_category_status(identifier: str):
+    return catalog_status_api("categories", identifier)
 
 
-def upsert_simple_name_api(kind: str, previous_name: str | None = None):
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    name = str(payload.get("name", "")).strip()
-    if not name:
-        return jsonify({"ok": False, "error": "Nome é obrigatório."}), 400
-    table, product_field = simple_table_config(kind)
-    now = utc_now()
-    item_id = f"matriz:{product_field}:{name.casefold()}"
-    previous_id = f"matriz:{product_field}:{previous_name.casefold()}" if previous_name else item_id
-    init_db()
-    with connect_db() as conn:
-        duplicate = conn.execute(
-            f"SELECT id FROM {table} WHERE store_id = ? AND name = ? AND id <> ?",
-            ("matriz", name, previous_id),
-        ).fetchone()
-        if duplicate:
-            return jsonify({"ok": False, "error": "Nome já cadastrado."}), 409
-        if previous_name:
-            row = conn.execute(
-                f"SELECT id FROM {table} WHERE store_id = ? AND name = ?",
-                ("matriz", previous_name),
-            ).fetchone()
-            if not row:
-                return jsonify({"ok": False, "error": "Cadastro não encontrado."}), 404
-            conn.execute(f"DELETE FROM {table} WHERE store_id = ? AND name = ?", ("matriz", previous_name))
-            column = "brand_name" if kind == "brands" else "category_name"
-            conn.execute(f"UPDATE products SET {column} = ?, updated_at = ? WHERE store_id = ? AND {column} = ?", (name, now, "matriz", previous_name))
-        conn.execute(
-            f"""
-            INSERT INTO {table} (id, store_id, name, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at
-            """,
-            (item_id, "matriz", name, now),
-        )
-        record_audit("update" if previous_name else "create", kind, name, {"name": name, "previous": previous_name}, conn)
-    sync_simple_name_to_state(kind, name=name, previous=previous_name)
-    return jsonify({"ok": True, "data": name}), 201 if not previous_name else 200
+@app.delete("/api/categories/<path:identifier>")
+def delete_category(identifier: str):
+    try:
+        item, changed = persist_catalog_status("categories", identifier, "deactivated")
+    except CatalogOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
+    return jsonify({"ok": True, "data": item, "changed": changed})
 
 
-def delete_simple_name_api(kind: str, name: str):
-    table, product_field = simple_table_config(kind)
-    column = "brand_name" if kind == "brands" else "category_name"
-    init_db()
-    with connect_db() as conn:
-        linked = conn.execute(
-            f"SELECT id FROM products WHERE store_id = ? AND {column} = ? LIMIT 1",
-            ("matriz", name),
-        ).fetchone()
-        if linked:
-            return jsonify({"ok": False, "error": "Cadastro em uso por produto e não pode ser excluído."}), 409
-        row = conn.execute(
-            f"SELECT id FROM {table} WHERE store_id = ? AND name = ?",
-            ("matriz", name),
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "Cadastro não encontrado."}), 404
-        conn.execute(f"DELETE FROM {table} WHERE store_id = ? AND name = ?", ("matriz", name))
-        record_audit("delete", kind, name, {"name": name}, conn)
-    sync_simple_name_to_state(kind, deleted_name=name)
-    return jsonify({"ok": True})
+@app.get("/api/sizes")
+def list_sizes():
+    return list_catalog_api("sizes")
+
+
+@app.post("/api/sizes")
+def create_size():
+    return save_catalog_api("sizes")
+
+
+@app.put("/api/sizes/<path:identifier>")
+def update_size(identifier: str):
+    return save_catalog_api("sizes", identifier)
+
+
+@app.post("/api/sizes/<path:identifier>/status")
+def update_size_status(identifier: str):
+    return catalog_status_api("sizes", identifier)
+
+
+@app.get("/api/colors")
+def list_colors():
+    return list_catalog_api("colors")
+
+
+@app.post("/api/colors")
+def create_color():
+    return save_catalog_api("colors")
+
+
+@app.put("/api/colors/<path:identifier>")
+def update_color(identifier: str):
+    return save_catalog_api("colors", identifier)
+
+
+@app.post("/api/colors/<path:identifier>/status")
+def update_color_status(identifier: str):
+    return catalog_status_api("colors", identifier)
+
+
+@app.get("/api/expense-categories")
+def list_expense_categories():
+    return list_catalog_api("expense-categories")
+
+
+@app.post("/api/expense-categories")
+def create_expense_category():
+    return save_catalog_api("expense-categories")
+
+
+@app.put("/api/expense-categories/<path:identifier>")
+def update_expense_category(identifier: str):
+    return save_catalog_api("expense-categories", identifier)
+
+
+@app.post("/api/expense-categories/<path:identifier>/status")
+def update_expense_category_status(identifier: str):
+    return catalog_status_api("expense-categories", identifier)
 
 
 @app.get("/api/suppliers")
 def list_suppliers():
-    init_db()
+    today = datetime.now(STORE_TIMEZONE).date().isoformat()
+    status_filter = str(request.args.get("status", "all") or "all").strip()
+    search = normalized_search_text(request.args.get("search", ""))
     with connect_db() as conn:
         rows = conn.execute(
-            """
-            SELECT id, name, cnpj, phone, email, address, updated_at AS updatedAt
-            FROM suppliers
-            WHERE store_id = ?
-            ORDER BY name COLLATE NOCASE
+            supplier_select_sql()
+            + """
+              WHERE s.store_id = ?
+              GROUP BY s.id, s.name, s.trade_name, s.document_normalized, s.cnpj,
+                       s.phone, s.whatsapp, s.email, s.zip, s.address,
+                       s.address_number, s.district, s.city, s.state, s.notes,
+                       s.status, s.created_at, s.updated_at
+              ORDER BY LOWER(s.name)
             """,
-            ("matriz",),
+            (today, "matriz"),
         ).fetchall()
-    return jsonify({"ok": True, "data": [dict(row) for row in rows]})
+    suppliers = [supplier_with_metrics_from_row(row) for row in rows]
+    if status_filter in SUPPLIER_STATUSES:
+        suppliers = [item for item in suppliers if item["status"] == status_filter]
+    if search:
+        suppliers = [
+            item
+            for item in suppliers
+            if search in normalized_search_text(
+                " ".join((
+                    item["name"],
+                    item["tradeName"],
+                    item["document"],
+                    item["phone"],
+                    item["whatsapp"],
+                ))
+            )
+        ]
+    return jsonify({"ok": True, "data": suppliers})
 
 
 @app.post("/api/suppliers")
@@ -4055,11 +24334,20 @@ def create_supplier():
     error = validate_supplier(supplier)
     if error:
         return jsonify({"ok": False, "error": error}), 400
-    init_db()
     with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        if supplier_document_duplicate(
+            conn,
+            supplier["document"],
+            exclude_id=supplier["id"],
+        ):
+            return jsonify({"ok": False, "error": "CPF ou CNPJ já cadastrado."}), 409
         upsert_supplier(conn, supplier)
-        record_audit("create", "supplier", supplier["id"], {"supplier": supplier}, conn)
-    sync_supplier_to_state(supplier=supplier)
+        update_state_collection_in_transaction(
+            conn, "suppliers", supplier, item_id=supplier["id"]
+        )
+        record_audit("create", "supplier", supplier["id"], {"name": supplier["name"]}, conn)
     return jsonify({"ok": True, "data": supplier}), 201
 
 
@@ -4068,11 +24356,17 @@ def update_supplier(supplier_id: str):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    init_db()
     with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
             """
-            SELECT id, name, cnpj, phone, email, address, updated_at AS updatedAt
+            SELECT id, name, trade_name AS "tradeName",
+                   COALESCE(document_normalized, cnpj, '') AS document,
+                   COALESCE(cnpj, '') AS cnpj, phone, whatsapp, email, zip,
+                   address, address_number AS "addressNumber", district, city,
+                   state, notes, status, created_at AS "createdAt",
+                   updated_at AS "updatedAt"
             FROM suppliers
             WHERE store_id = ? AND id = ?
             """,
@@ -4085,49 +24379,250 @@ def update_supplier(supplier_id: str):
         error = validate_supplier(supplier)
         if error:
             return jsonify({"ok": False, "error": error}), 400
+        if supplier_document_duplicate(
+            conn,
+            supplier["document"],
+            exclude_id=supplier_id,
+        ):
+            return jsonify({"ok": False, "error": "CPF ou CNPJ já cadastrado."}), 409
         upsert_supplier(conn, supplier)
-        record_audit("update", "supplier", supplier["id"], {"supplier": supplier}, conn)
-    sync_supplier_to_state(supplier=supplier)
+        update_state_collection_in_transaction(
+            conn, "suppliers", supplier, item_id=supplier["id"]
+        )
+        record_audit("update", "supplier", supplier["id"], {"name": supplier["name"]}, conn)
     return jsonify({"ok": True, "data": supplier})
+
+
+def change_supplier_status(supplier_id: str, status: str, reason: str, confirmed: bool):
+    if status not in SUPPLIER_STATUSES:
+        return jsonify({"ok": False, "error": "Situação do fornecedor inválida."}), 400
+    today = datetime.now(STORE_TIMEZONE).date().isoformat()
+    with connect_db() as conn:
+        if not USE_POSTGRES:
+            conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            supplier_select_sql()
+            + """
+              WHERE s.store_id = ? AND s.id = ?
+              GROUP BY s.id, s.name, s.trade_name, s.document_normalized, s.cnpj,
+                       s.phone, s.whatsapp, s.email, s.zip, s.address,
+                       s.address_number, s.district, s.city, s.state, s.notes,
+                       s.status, s.created_at, s.updated_at
+            """,
+            (today, "matriz", supplier_id),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "Fornecedor não encontrado."}), 404
+        supplier = supplier_with_metrics_from_row(row)
+        if supplier["status"] == status:
+            return jsonify({"ok": True, "data": supplier, "changed": False})
+        if status == "deactivated" and supplier["openAmount"] > 0 and not confirmed:
+            return jsonify({
+                "ok": False,
+                "error": "Confirme a desativação do fornecedor com vínculos ativos.",
+                "code": "confirmation_required",
+                "summary": {
+                    "openAmount": supplier["openAmount"],
+                    "overdueAmount": supplier["overdueAmount"],
+                    "creditAvailable": supplier["creditAvailable"],
+                },
+            }), 409
+        if status == "active" and supplier["document"]:
+            if supplier_document_duplicate(
+                conn,
+                supplier["document"],
+                exclude_id=supplier_id,
+            ):
+                return jsonify({"ok": False, "error": "CPF ou CNPJ já cadastrado."}), 409
+        previous_status = supplier["status"]
+        now = utc_now()
+        conn.execute(
+            "UPDATE suppliers SET status = ?, updated_at = ? WHERE store_id = ? AND id = ?",
+            (status, now, "matriz", supplier_id),
+        )
+        user = session.get("user") or {}
+        conn.execute(
+            """
+            INSERT INTO supplier_status_history (
+                id, store_id, supplier_id, previous_status, new_status, reason,
+                user_id, user_name, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                os.urandom(16).hex(),
+                "matriz",
+                supplier_id,
+                previous_status,
+                status,
+                reason,
+                user.get("id"),
+                user.get("name"),
+                now,
+            ),
+        )
+        supplier.update({"status": status, "updatedAt": now})
+        update_state_collection_in_transaction(
+            conn, "suppliers", supplier, item_id=supplier_id
+        )
+        record_audit(
+            "status",
+            "supplier",
+            supplier_id,
+            {"previousStatus": previous_status, "status": status, "reason": reason},
+            conn,
+        )
+    return jsonify({"ok": True, "data": supplier, "changed": True})
+
+
+@app.post("/api/suppliers/<supplier_id>/status")
+def update_supplier_status(supplier_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    return change_supplier_status(
+        supplier_id,
+        str(payload.get("status", "") or "").strip(),
+        str(payload.get("reason", "") or "").strip(),
+        payload.get("confirmed") is True,
+    )
 
 
 @app.delete("/api/suppliers/<supplier_id>")
 def delete_supplier_api(supplier_id: str):
-    init_db()
+    return change_supplier_status(supplier_id, "deactivated", "", False)
+
+
+@app.get("/api/suppliers/<supplier_id>")
+def supplier_detail(supplier_id: str):
+    today = datetime.now(STORE_TIMEZONE).date().isoformat()
     with connect_db() as conn:
         row = conn.execute(
-            "SELECT id, name FROM suppliers WHERE store_id = ? AND id = ?",
-            ("matriz", supplier_id),
+            supplier_select_sql()
+            + """
+              WHERE s.store_id = ? AND s.id = ?
+              GROUP BY s.id, s.name, s.trade_name, s.document_normalized, s.cnpj,
+                       s.phone, s.whatsapp, s.email, s.zip, s.address,
+                       s.address_number, s.district, s.city, s.state, s.notes,
+                       s.status, s.created_at, s.updated_at
+            """,
+            (today, "matriz", supplier_id),
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": "Fornecedor não encontrado."}), 404
-        linked_payable = conn.execute(
-            "SELECT id FROM payables WHERE store_id = ? AND supplier = ? LIMIT 1",
-            ("matriz", row["name"]),
-        ).fetchone()
-        if linked_payable:
-            return jsonify({"ok": False, "error": "Fornecedor possui conta a pagar vinculada e nao pode ser excluido."}), 409
-        conn.execute("DELETE FROM suppliers WHERE store_id = ? AND id = ?", ("matriz", supplier_id))
-        record_audit("delete", "supplier", supplier_id, {}, conn)
-    sync_supplier_to_state(deleted_id=supplier_id)
-    return jsonify({"ok": True})
+        supplier = supplier_with_metrics_from_row(row)
+        payable_rows = conn.execute(
+            """
+            SELECT id, supplier, category, amount, issue_date AS "issueDate",
+                   due_date AS "dueDate", notes, paid_amount AS "paidAmount",
+                   fee, discount, status, paid_at AS "paidAt",
+                   created_at AS "createdAt", updated_at AS "updatedAt",
+                   supplier_id AS "supplierId",
+                   expense_category_id AS "expenseCategoryId"
+            FROM payables
+            WHERE store_id = ?
+              AND (supplier_id = ? OR (supplier_id IS NULL AND supplier = ?))
+            ORDER BY due_date DESC, created_at DESC
+            """,
+            ("matriz", supplier_id, supplier["name"]),
+        ).fetchall()
+        history_rows = conn.execute(
+            """
+            SELECT previous_status AS "previousStatus", new_status AS "newStatus",
+                   reason, user_name AS "userName", created_at AS "createdAt"
+            FROM supplier_status_history
+            WHERE store_id = ? AND supplier_id = ?
+            ORDER BY created_at DESC
+            """,
+            ("matriz", supplier_id),
+        ).fetchall()
+        entry_rows = conn.execute(
+            """
+            SELECT id FROM stock_entries
+            WHERE store_id = ? AND supplier_id = ?
+            ORDER BY entry_number DESC
+            """,
+            ("matriz", supplier_id),
+        ).fetchall()
+        return_rows = conn.execute(
+            """
+            SELECT id, return_number AS "returnNumber", entry_id AS "entryId",
+                   total_quantity AS "totalQuantity", total_value AS "totalValue",
+                   pending_value AS "pendingValue", status,
+                   financial_status AS "financialStatus", created_at AS "createdAt"
+            FROM supplier_returns
+            WHERE store_id = ? AND supplier_id = ?
+            ORDER BY return_number DESC
+            """,
+            ("matriz", supplier_id),
+        ).fetchall()
+        credits = supplier_credit_rows(conn, supplier_id)
+        payables = [enrich_payable(conn, payable_from_row(item)) for item in payable_rows]
+        entries = [
+            entry
+            for item in entry_rows
+            if (entry := stock_entry_details(conn, item["id"])) is not None
+        ]
+    return jsonify({
+        "ok": True,
+        "data": {
+            "supplier": supplier,
+            "payables": payables,
+            "statusHistory": [dict(row) for row in history_rows],
+            "entries": entries,
+            "returns": [
+                {**dict(item), "code": f"DEVFORN{int(item['returnNumber']):06d}"}
+                for item in return_rows
+            ],
+            "credits": credits,
+            "guarantees": [],
+        },
+    })
 
 
 @app.get("/api/customers")
 def list_customers():
-    init_db()
     with connect_db() as conn:
         rows = conn.execute(
+            f"{CUSTOMER_SELECT} WHERE store_id = ? ORDER BY is_default, LOWER(name)",
+            ("matriz",),
+        ).fetchall()
+        receivable_rows = conn.execute(
             """
-            SELECT id, code, name, cpf, rg, birth, whatsapp, email, address,
-                   city, district, zip, credit_limit AS "limit", status, updated_at AS updatedAt
-            FROM customers
-            WHERE store_id = ?
-            ORDER BY name COLLATE NOCASE
+            SELECT customer_id AS "customerId", method, amount, received, status,
+                   due_date AS "dueDate"
+            FROM receivables
+            WHERE store_id = ? AND customer_id IS NOT NULL
             """,
             ("matriz",),
         ).fetchall()
-    return jsonify({"ok": True, "data": [dict(row) for row in rows]})
+    receivables_by_customer: dict[str, list[dict]] = {}
+    for row in receivable_rows:
+        receivable = dict(row)
+        receivables_by_customer.setdefault(receivable.pop("customerId"), []).append(receivable)
+    customers = []
+    for row in rows:
+        customer = customer_from_row(row)
+        summary = customer_summary_from_rows(
+            customer,
+            [],
+            receivables_by_customer.get(customer["id"], []),
+        )
+        customer["openCredit"] = summary["openCredit"]
+        customer["overdueCredit"] = summary["overdueCredit"]
+        customer["availableCredit"] = summary["availableCredit"]
+        customers.append(customer)
+    return jsonify({"ok": True, "data": customers})
+
+
+@app.get("/api/customers/<customer_id>")
+def get_customer(customer_id: str):
+    init_db()
+    try:
+        data = load_customer_details(customer_id)
+    except CustomerOperationError as error:
+        return customer_operation_error_response(error)
+    return jsonify({"ok": True, "data": data})
 
 
 @app.post("/api/customers")
@@ -4135,25 +24630,15 @@ def create_customer():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    customer = normalize_customer_payload(payload)
-    error = validate_customer(customer)
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
     init_db()
-    with connect_db() as conn:
-        duplicate = conn.execute(
-            """
-            SELECT id FROM customers
-            WHERE store_id = ? AND cpf = ? AND cpf <> '' AND id <> ?
-            """,
-            ("matriz", customer["cpf"], customer["id"]),
-        ).fetchone()
-        if duplicate:
-            return jsonify({"ok": False, "error": "CPF já cadastrado."}), 409
-        upsert_customer(conn, customer)
-        record_audit("create", "customer", customer["id"], {"customer": customer}, conn)
-    sync_customer_to_state(customer=customer)
-    return jsonify({"ok": True, "data": customer}), 201
+    try:
+        customer, warnings = persist_customer_creation(
+            payload,
+            bool(payload.get("duplicateAcknowledged")),
+        )
+    except CustomerOperationError as error:
+        return customer_operation_error_response(error)
+    return jsonify({"ok": True, "data": customer, "warnings": warnings}), 201
 
 
 @app.put("/api/customers/<customer_id>")
@@ -4162,76 +24647,194 @@ def update_customer(customer_id: str):
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
     init_db()
-    with connect_db() as conn:
-        row = conn.execute(
-            """
-            SELECT id, code, name, cpf, rg, birth, whatsapp, email, address,
-                   city, district, zip, credit_limit AS "limit", status, updated_at AS updatedAt
-            FROM customers
-            WHERE store_id = ? AND id = ?
-            """,
-            ("matriz", customer_id),
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "Cliente não encontrado."}), 404
-        customer = normalize_customer_payload(payload, customer_from_row(row))
-        customer["id"] = customer_id
-        error = validate_customer(customer)
-        if error:
-            return jsonify({"ok": False, "error": error}), 400
-        duplicate = conn.execute(
-            """
-            SELECT id FROM customers
-            WHERE store_id = ? AND cpf = ? AND cpf <> '' AND id <> ?
-            """,
-            ("matriz", customer["cpf"], customer_id),
-        ).fetchone()
-        if duplicate:
-            return jsonify({"ok": False, "error": "CPF já cadastrado."}), 409
-        upsert_customer(conn, customer)
-        record_audit("update", "customer", customer["id"], {"customer": customer}, conn)
-    sync_customer_to_state(customer=customer)
-    return jsonify({"ok": True, "data": customer})
+    try:
+        customer, warnings = persist_customer_update(
+            customer_id,
+            payload,
+            bool(payload.get("duplicateAcknowledged")),
+        )
+    except CustomerOperationError as error:
+        return customer_operation_error_response(error)
+    return jsonify({"ok": True, "data": customer, "warnings": warnings})
+
+
+@app.post("/api/customers/<customer_id>/status")
+def change_customer_status(customer_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    init_db()
+    try:
+        customer, changed = persist_customer_status(
+            customer_id,
+            payload.get("status", ""),
+            payload.get("reason", ""),
+        )
+    except CustomerOperationError as error:
+        return customer_operation_error_response(error)
+    return jsonify({"ok": True, "data": customer, "changed": changed})
 
 
 @app.delete("/api/customers/<customer_id>")
 def delete_customer_api(customer_id: str):
-    init_db()
+    del customer_id
+    return jsonify({
+        "ok": False,
+        "error": "Clientes não podem ser excluídos. Utilize a desativação para preservar o histórico.",
+        "code": "CUSTOMER_DELETION_NOT_ALLOWED",
+    }), 409
+
+
+@app.get("/api/card-modalities")
+def list_card_modalities_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
     with connect_db() as conn:
-        row = conn.execute(
-            "SELECT id FROM customers WHERE store_id = ? AND id = ?",
-            ("matriz", customer_id),
-        ).fetchone()
-        if not row:
-            return jsonify({"ok": False, "error": "Cliente não encontrado."}), 404
-        linked_sale = conn.execute(
-            "SELECT id FROM sales WHERE store_id = ? AND customer_id = ? LIMIT 1",
-            ("matriz", customer_id),
-        ).fetchone()
-        linked_receivable = conn.execute(
-            "SELECT id FROM receivables WHERE store_id = ? AND customer_id = ? LIMIT 1",
-            ("matriz", customer_id),
-        ).fetchone()
-        linked_payment = conn.execute(
-            "SELECT id FROM receivable_payments WHERE store_id = ? AND customer_id = ? LIMIT 1",
-            ("matriz", customer_id),
-        ).fetchone()
-        if linked_sale or linked_receivable or linked_payment:
-            return jsonify({"ok": False, "error": "Cliente possui histórico financeiro e não pode ser excluído."}), 409
-        conn.execute("DELETE FROM customers WHERE store_id = ? AND id = ?", ("matriz", customer_id))
-        record_audit("delete", "customer", customer_id, {}, conn)
-    sync_customer_to_state(deleted_id=customer_id)
-    return jsonify({"ok": True})
+        modalities = latest_card_modalities(conn)
+    return jsonify({"ok": True, "data": modalities})
+
+
+@app.post("/api/card-modalities")
+def create_card_modality_api():
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        modality = normalize_card_modality_payload(payload)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    validation_error = validate_card_modality(modality)
+    if validation_error:
+        return jsonify({"ok": False, "error": validation_error}), 400
+    with connect_db() as conn:
+        duplicate_error = check_card_modality_uniqueness(conn, modality)
+        if duplicate_error:
+            return jsonify({"ok": False, "error": duplicate_error}), 409
+        insert_card_modality(conn, modality)
+        record_audit(
+            "create",
+            "card_modality",
+            modality["cardModalityId"],
+            {"modality": modality},
+            conn,
+        )
+    return jsonify({"ok": True, "data": modality}), 201
+
+
+@app.put("/api/card-modalities/<card_modality_id>")
+def update_card_modality_api(card_modality_id: str):
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    with connect_db() as conn:
+        current = get_current_card_modality(conn, card_modality_id)
+        if not current:
+            return jsonify({"ok": False, "error": "Modalidade não encontrada."}), 404
+        try:
+            updated = normalize_card_modality_payload(payload, current)
+        except ValueError as error:
+            return jsonify({"ok": False, "error": str(error)}), 400
+        validation_error = validate_card_modality(updated)
+        if validation_error:
+            return jsonify({"ok": False, "error": validation_error}), 400
+        duplicate_error = check_card_modality_uniqueness(
+            conn,
+            updated,
+            exclude_card_modality_id=card_modality_id,
+        )
+        if duplicate_error:
+            return jsonify({"ok": False, "error": duplicate_error}), 409
+        result = save_card_modality_change(conn, card_modality_id, updated)
+        record_audit(
+            "update",
+            "card_modality",
+            card_modality_id,
+            {"before": current, "after": result},
+            conn,
+        )
+    return jsonify({"ok": True, "data": result})
+
+
+def change_card_modality_status(card_modality_id: str, status: str):
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    with connect_db() as conn:
+        current = get_current_card_modality(conn, card_modality_id)
+        if not current:
+            return jsonify({"ok": False, "error": "Modalidade não encontrada."}), 404
+        if current["status"] == status:
+            label = "ativa" if status == "active" else "inativa"
+            return jsonify({
+                "ok": False,
+                "error": f"Modalidade já está {label}.",
+            }), 400
+        try:
+            updated = normalize_card_modality_payload(
+                {**current, **payload, "status": status},
+                current,
+            )
+        except ValueError as error:
+            return jsonify({"ok": False, "error": str(error)}), 400
+        validation_error = validate_card_modality(updated)
+        if validation_error:
+            return jsonify({"ok": False, "error": validation_error}), 400
+        result = save_card_modality_change(conn, card_modality_id, updated)
+        record_audit(
+            "update",
+            "card_modality",
+            card_modality_id,
+            {"before": current, "after": result},
+            conn,
+        )
+    return jsonify({"ok": True, "data": result})
+
+
+@app.post("/api/card-modalities/<card_modality_id>/activate")
+def activate_card_modality_api(card_modality_id: str):
+    return change_card_modality_status(card_modality_id, "active")
+
+
+@app.post("/api/card-modalities/<card_modality_id>/deactivate")
+def deactivate_card_modality_api(card_modality_id: str):
+    return change_card_modality_status(card_modality_id, "inactive")
+
+
+@app.get("/api/card-modalities/<card_modality_id>/history")
+def card_modality_history_api(card_modality_id: str):
+    _, error_response = require_admin()
+    if error_response:
+        return error_response
+    with connect_db() as conn:
+        current = get_current_card_modality(conn, card_modality_id)
+        if not current:
+            return jsonify({"ok": False, "error": "Modalidade não encontrada."}), 404
+        history = get_card_modality_history(conn, card_modality_id)
+    return jsonify({"ok": True, "data": [current, *history]})
 
 
 @app.get("/api/sales")
 def list_sales():
-    init_db()
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatÃ³rio."}), 401
     with connect_db() as conn:
         sales = conn.execute(
             """
             SELECT id, customer_id AS customerId, customer_name AS customerName,
-                   subtotal, discount, total, cost_total AS costTotal,
+                   sale_number AS saleNumber, subtotal, discount, addition,
+                   total, cost_total AS costTotal, change_amount AS changeAmount,
+                   user_id AS userId, user_name AS userName,
+                   conditional_id AS conditionalId,
                    status, created_at AS createdAt, updated_at AS updatedAt
             FROM sales
             WHERE store_id = ?
@@ -4242,7 +24845,19 @@ def list_sales():
         items = conn.execute(
             """
             SELECT sale_id AS saleId, product_id AS productId, barcode, name, brand,
-                   quantity, unit_cost AS unitCost, unit_price AS unitPrice, total
+                   brand_id AS brandId, category_id AS categoryId, category,
+                   size_id AS sizeId, size, color_id AS colorId, color, gender,
+                   quantity, unit_cost AS unitCost,
+                   original_unit_price AS originalUnitPrice,
+                   practiced_unit_price AS practicedUnitPrice,
+                   unit_discount AS unitDiscount, unit_addition AS unitAddition,
+                   final_unit_price AS finalUnitPrice,
+                   unit_price AS unitPrice, total,
+                   allocated_global_discount AS allocatedGlobalDiscount,
+                   allocated_global_addition AS allocatedGlobalAddition,
+                   net_total AS netTotal, stock_before AS stockBefore,
+                   stock_after AS stockAfter,
+                   conditional_item_id AS conditionalItemId
             FROM sale_items
             WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)
             ORDER BY id
@@ -4251,7 +24866,15 @@ def list_sales():
         ).fetchall()
         payments = conn.execute(
             """
-            SELECT sale_id AS saleId, method, amount, installments, status, created_at AS createdAt
+            SELECT sale_id AS saleId, method, amount, installments, status,
+                   tendered_amount AS tenderedAmount,
+                   change_amount AS changeAmount,
+                   card_modality_id AS cardModalityId,
+                   card_modality_version_id AS cardModalityVersionId,
+                   modality_name AS modalityName, tax_percent AS taxPercent,
+                   receivable_days AS receivableDays,
+                   gross_amount AS grossAmount, fee_amount AS feeAmount,
+                   net_amount AS netAmount, created_at AS createdAt
             FROM sale_payments
             WHERE sale_id IN (SELECT id FROM sales WHERE store_id = ?)
             ORDER BY id
@@ -4278,88 +24901,151 @@ def list_sales():
     return jsonify({"ok": True, "data": data})
 
 
+@app.get("/api/sales/card-modalities")
+def list_sale_card_modalities():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigat\u00f3rio."}), 401
+    with connect_db() as conn:
+        data = available_sale_card_modalities(conn)
+    return jsonify({"ok": True, "data": data})
+
+
 @app.post("/api/sales")
 def create_sale():
     if not session.get("user"):
-        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+        return jsonify({"ok": False, "error": "Login obrigat\u00f3rio."}), 401
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    init_db()
-    product_ids = [str(item.get("productId", "")).strip() for item in (payload.get("items") or []) if item.get("productId")]
-    if not product_ids:
-        return jsonify({"ok": False, "error": "Adicione produtos."}), 400
-    placeholders = ",".join("?" for _ in product_ids)
-    with connect_db() as conn:
-        product_rows = conn.execute(
-            f"""
-            SELECT id, barcode, name, size, color, gender, category_name AS category,
-                   brand_name AS brand, stock, min_stock AS minStock, description,
-                   active, cost, price, photo, updated_at AS updatedAt
-            FROM products
-            WHERE store_id = ? AND id IN ({placeholders})
-            """,
-            ("matriz", *product_ids),
-        ).fetchall()
-        products_by_id = {row["id"]: row for row in product_rows}
-        sale_id = str(payload.get("id") or "").strip() or next_sale_code_db(conn)
-        existing = conn.execute("SELECT id FROM sales WHERE store_id = ? AND id = ?", ("matriz", sale_id)).fetchone()
-        if existing:
-            sale_id = next_sale_code_db(conn)
-        state, _ = read_state()
-        reserved_by_product = conditional_reserved_quantities(state)
-        sale, error = build_sale_from_payload(payload, products_by_id, sale_id, reserved_by_product)
-        if error:
-            return jsonify({"ok": False, "error": error}), 400
-
-        store_credit = money_round(sum(payment["amount"] for payment in sale["payments"] if payment["method"] == "storeCredit"))
-        customer_row = None
-        if store_credit > 0:
-            if not sale["customerId"]:
-                return jsonify({"ok": False, "error": "Crediário exige cliente cadastrado."}), 400
-            customer_row = conn.execute(
-                """
-                SELECT id, name, credit_limit AS "limit", status
-                FROM customers
-                WHERE store_id = ? AND id = ?
-                """,
-                ("matriz", sale["customerId"]),
-            ).fetchone()
-            if not customer_row:
-                return jsonify({"ok": False, "error": "Cliente não encontrado."}), 400
-            if customer_row["status"] == "blocked":
-                return jsonify({"ok": False, "error": "Cliente bloqueado para crediário."}), 409
-            open_debt = conn.execute(
-                """
-                SELECT COALESCE(SUM(amount - received), 0) AS total
-                FROM receivables
-                WHERE store_id = ? AND customer_id = ? AND method = 'storeCredit' AND status <> 'cancelled'
-                """,
-                ("matriz", sale["customerId"]),
-            ).fetchone()["total"]
-            if float(open_debt or 0) + store_credit > float(customer_row["limit"] or 0) and session.get("user", {}).get("role") != "admin":
-                return jsonify({"ok": False, "error": "Limite de crédito ultrapassado."}), 409
-            sale["customerName"] = customer_row["name"]
-
-        installments = max(1, int(float(payload.get("storeCreditInstallments", 1) or 1)))
-        cash, receivables = build_financial_from_sale(sale, installments)
-        updated_products = []
-        for item in sale["items"]:
-            row = products_by_id[item["productId"]]
-            product = product_from_row(row)
-            product["stock"] = int(product["stock"] or 0) - int(item["quantity"] or 0)
-            product["updatedAt"] = utc_now()
-            updated_products.append(product)
-
-    sync_sale_to_state(sale, updated_products, cash, receivables)
-    record_audit("create", "sale", sale["id"], {"total": sale["total"], "items": sale["items"], "payments": sale["payments"]})
-    return jsonify({"ok": True, "data": {"sale": sale, "products": updated_products, "cash": cash, "receivables": receivables}}), 201
+        return jsonify({"ok": False, "error": "Envie um JSON v\u00e1lido."}), 400
+    try:
+        result, replayed = persist_sale_creation(
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (SaleOperationError, InventoryOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": result}), 200 if replayed else 201
 
 
 @app.post("/api/sales/<sale_id>/cancel")
 def cancel_sale_api(sale_id: str):
     if not session.get("user"):
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    reason = str(payload.get("reason", "") or "").strip()
+    if not reason:
+        return jsonify({
+            "ok": False,
+            "error": "Informe o motivo do cancelamento.",
+        }), 400
+    key = (
+        request.headers.get("Idempotency-Key", "")
+        or payload.get("idempotencyKey", "")
+    )
+    key = str(key or "").strip()
+    if not key or len(key) > 160:
+        return jsonify({
+            "ok": False,
+            "error": "Informe uma chave de idempotencia valida.",
+            "code": "IDEMPOTENCY_KEY_REQUIRED",
+        }), 400
+    cancellation_hash = operation_request_hash({
+        "saleId": sale_id,
+        "reason": reason,
+        "notes": str(payload.get("notes", "") or "").strip(),
+        "_cancelSale": True,
+    })
+    try:
+        with connect_db() as conn:
+            replay = conn.execute(
+                """
+                SELECT request_hash AS "requestHash",
+                       response_json AS "responseJson"
+                FROM sale_cancellations
+                WHERE store_id = ? AND idempotency_key = ?
+                """,
+                ("matriz", key),
+            ).fetchone()
+            if replay:
+                if str(replay["requestHash"] or "") != cancellation_hash:
+                    raise ReturnExchangeWarrantyError(
+                        "A chave de idempotencia ja foi usada com outros dados.",
+                        409,
+                        "IDEMPOTENCY_CONFLICT",
+                    )
+                result = json.loads(replay["responseJson"])
+                return jsonify({
+                    "ok": True,
+                    "data": {
+                        "sale": result["sale"],
+                        "products": result["products"],
+                        "cash": result["cash"],
+                        "receivables": result["receivables"],
+                        "inventoryMovements": result["inventoryMovements"],
+                        "return": result["return"],
+                        "cancellation": result["cancellation"],
+                    },
+                    "replayed": True,
+                })
+            _, available_items = returnable_sale_items(
+                conn,
+                sale_id,
+                store_id="matriz",
+            )
+            if any(
+                item["availableQuantity"] != item["soldQuantity"]
+                for item in available_items
+            ):
+                raise ReturnExchangeWarrantyError(
+                    (
+                        "A venda possui devolucao, troca ou garantia vinculada. "
+                        "Conclua a conciliacao do pos-venda antes do cancelamento."
+                    ),
+                    409,
+                    "SALE_AFTER_SALES_CONFLICT",
+                )
+        result, replayed = persist_sale_return(
+            {
+                "saleId": sale_id,
+                "reason": reason,
+                "notes": str(payload.get("notes", "") or "").strip(),
+                "_cancelSale": True,
+                "items": [
+                    {
+                        "saleItemId": item["saleItemId"],
+                        "quantity": item["soldQuantity"],
+                        "physicalCondition": "resellable",
+                    }
+                    for item in available_items
+                ],
+            },
+            key,
+        )
+    except (ReturnExchangeWarrantyError, FinancialOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": {
+            "sale": result["sale"],
+            "products": result["products"],
+            "cash": result["cash"],
+            "receivables": result["receivables"],
+            "inventoryMovements": result["inventoryMovements"],
+            "return": result["return"],
+            "cancellation": result["cancellation"],
+        },
+        "replayed": replayed,
+    })
+
     init_db()
     with connect_db() as conn:
         sale_row = conn.execute(
@@ -4386,6 +25072,37 @@ def cancel_sale_api(sale_id: str):
             """,
             (sale_id,),
         ).fetchall()
+        after_sales_conflict = conn.execute(
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1 FROM sale_returns
+                    WHERE store_id = ? AND sale_id = ? AND status = 'completed'
+                ) AS has_return,
+                EXISTS(
+                    SELECT 1 FROM exchanges
+                    WHERE store_id = ? AND sale_id = ? AND status = 'completed'
+                ) AS has_exchange,
+                EXISTS(
+                    SELECT 1 FROM warranties
+                    WHERE store_id = ? AND sale_id = ?
+                      AND status NOT IN ('resolved', 'cancelled')
+                ) AS has_warranty
+            """,
+            ("matriz", sale_id, "matriz", sale_id, "matriz", sale_id),
+        ).fetchone()
+        if any(
+            bool(after_sales_conflict[key])
+            for key in after_sales_conflict.keys()
+        ):
+            return jsonify({
+                "ok": False,
+                "error": (
+                    "A venda possui devolucao, troca ou garantia vinculada. "
+                    "Conclua a conciliacao do pos-venda antes do cancelamento."
+                ),
+                "code": "SALE_AFTER_SALES_CONFLICT",
+            }), 409
         payments = conn.execute(
             """
             SELECT method, amount, installments, status, created_at AS createdAt
@@ -4401,8 +25118,12 @@ def cancel_sale_api(sale_id: str):
             placeholders = ",".join("?" for _ in product_ids)
             product_rows = conn.execute(
                 f"""
-                SELECT id, barcode, name, size, color, gender, category_name AS category,
-                       brand_name AS brand, stock, min_stock AS minStock, description,
+                SELECT id, barcode, name, size, size_id AS "sizeId", color,
+                       color_id AS "colorId", gender, category_name AS category,
+                       category_id AS "categoryId", brand_name AS brand,
+                       brand_id AS "brandId",
+                       COALESCE((SELECT name FROM suppliers WHERE suppliers.id = products.supplier_id), '') AS supplier,
+                       supplier_id AS "supplierId", stock, min_stock AS minStock, description,
                        active, cost, price, photo, updated_at AS updatedAt
                 FROM products
                 WHERE store_id = ? AND id IN ({placeholders})
@@ -4432,56 +25153,85 @@ def cancel_sale_api(sale_id: str):
             "refId": sale_id,
             "createdAt": utc_now(),
         })
-    sale, receivables = sync_cancel_sale_to_state(sale_id, updated_products, cash)
+    try:
+        sale, receivables, inventory_movements = sync_cancel_sale_to_state(
+            sale_id,
+            updated_products,
+            cash,
+            [dict(item) for item in items],
+        )
+    except InventoryOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
     if not sale:
         sale = dict(sale_row)
         sale["status"] = "cancelled"
         sale["items"] = [dict(item) for item in items]
         sale["payments"] = [dict(payment) for payment in payments]
     record_audit("cancel", "sale", sale_id, {"cashRefund": cash_refund, "items": sale.get("items", [])})
-    return jsonify({"ok": True, "data": {"sale": sale, "products": updated_products, "cash": cash, "receivables": receivables}})
+    return jsonify({"ok": True, "data": {
+        "sale": sale,
+        "products": updated_products,
+        "cash": cash,
+        "receivables": receivables,
+        "inventoryMovements": inventory_movements,
+    }})
 
 
 @app.get("/api/returns")
 def list_returns():
-    init_db()
     with connect_db() as conn:
-        returns = conn.execute(
-            """
-            SELECT id, sale_id AS saleId, customer_name AS customerName,
-                   total, reason, notes, created_at AS createdAt
-            FROM sale_returns
-            WHERE store_id = ?
-            ORDER BY created_at DESC
-            """,
-            ("matriz",),
-        ).fetchall()
-        items = conn.execute(
-            """
-            SELECT return_id AS returnId, product_id AS productId, product_name AS productName,
-                   action, quantity, unit_price AS unitPrice, total
-            FROM sale_return_items
-            WHERE return_id IN (SELECT id FROM sale_returns WHERE store_id = ?)
-            ORDER BY id
-            """,
-            ("matriz",),
-        ).fetchall()
-    items_by_return: dict[str, list[dict]] = {}
-    for item in items:
-        row = dict(item)
-        items_by_return.setdefault(row.pop("returnId"), []).append(row)
-    data = []
-    for return_row in returns:
-        row = dict(return_row)
-        row["items"] = items_by_return.get(row["id"], [])
-        data.append(row)
-    return jsonify({"ok": True, "data": data})
+        identifiers = [
+            str(row["id"])
+            for row in conn.execute(
+                """
+                SELECT id FROM sale_returns
+                WHERE store_id = ?
+                ORDER BY created_at DESC, return_number DESC
+                """,
+                ("matriz",),
+            ).fetchall()
+        ]
+        data = [
+            return_document(conn, identifier) for identifier in identifiers
+        ]
+    return jsonify({"ok": True, "data": [item for item in data if item]})
 
 
 @app.get("/api/conditionals")
 def list_conditionals():
-    state, _ = read_state()
-    data = sorted(state.get("conditionals", []) or [], key=lambda item: item.get("createdAt", ""), reverse=True)
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    with connect_db() as conn:
+        identifiers = [
+            str(row["id"])
+            for row in conn.execute(
+                """
+                SELECT id FROM conditionals
+                WHERE store_id = ?
+                ORDER BY checked_out_at DESC, conditional_number DESC
+                """,
+                ("matriz",),
+            ).fetchall()
+        ]
+        relational = [
+            conditional_document(conn, identifier) for identifier in identifiers
+        ]
+        state = locked_app_state(conn)
+    known = {str(item["id"]) for item in relational if item}
+    legacy = [
+        item
+        for item in (state.get("conditionals", []) or [])
+        if str(item.get("id", "")) not in known
+    ]
+    data = sorted(
+        [item for item in relational if item] + legacy,
+        key=lambda item: item.get("checkedOutAt", item.get("createdAt", "")),
+        reverse=True,
+    )
     return jsonify({"ok": True, "data": data})
 
 
@@ -4492,17 +25242,22 @@ def create_conditional_api():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    state, _ = read_state()
-    conditional_id = str(payload.get("id") or "").strip() or next_conditional_code(state)
-    if any(str(item.get("id", "")) == conditional_id for item in state.get("conditionals", []) or []):
-        conditional_id = next_conditional_code(state)
-    conditional, error = build_conditional_from_payload(payload, state, conditional_id)
-    if error:
-        return jsonify({"ok": False, "error": error}), 400
-    state["conditionals"] = [conditional, *[item for item in state.get("conditionals", []) if item.get("id") != conditional["id"]]]
-    write_app_state_only(state)
-    record_audit("create", "conditional", conditional["id"], {"conditional": conditional})
-    return jsonify({"ok": True, "data": conditional}), 201
+    try:
+        result, replayed = persist_conditional_creation(
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (ConditionalOperationError, InventoryOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result["conditional"],
+        "replayed": replayed,
+    }), 200 if replayed else 201
 
 
 @app.put("/api/conditionals/<conditional_id>")
@@ -4512,137 +25267,350 @@ def update_conditional_api(conditional_id: str):
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    state, _ = read_state()
-    conditionals = state.get("conditionals", []) or []
-    conditional = next((item for item in conditionals if str(item.get("id", "")) == conditional_id), None)
+    with connect_db() as conn:
+        conditional = conditional_document(conn, conditional_id)
     if not conditional:
-        return jsonify({"ok": False, "error": "Condicional não encontrado."}), 404
-    if conditional.get("status") == "finalized":
-        return jsonify({"ok": False, "error": "Condicional já finalizado."}), 409
-
-    selected_ids = {str(item.get("productId", "")) for item in payload.get("finalItems") or []}
-    final_items = [item for item in conditional.get("items", []) or [] if str(item.get("productId", "")) in selected_ids]
-    updated = {
-        **conditional,
-        "status": "finalized",
-        "finalItems": final_items,
-        "finalizedAt": utc_now(),
-        "updatedAt": utc_now(),
+        return jsonify({
+            "ok": False,
+            "error": "Condicional legado deve ser conciliado antes do retorno.",
+            "code": "LEGACY_CONDITIONAL_RECONCILIATION_REQUIRED",
+        }), 409
+    selected_ids = {
+        str(item.get("productId", ""))
+        for item in payload.get("finalItems") or []
     }
-    state["conditionals"] = [updated if str(item.get("id", "")) == conditional_id else item for item in conditionals]
-    write_app_state_only(state)
-    record_audit("update", "conditional", conditional_id, {"finalItems": final_items, "status": "finalized"})
-    return jsonify({"ok": True, "data": updated})
+    items = [
+        {
+            "conditionalItemId": item["id"],
+            "productId": item["productId"],
+            "returnedQuantity": (
+                0 if item["productId"] in selected_ids
+                else item["actionableQuantity"]
+            ),
+            "purchaseQuantity": (
+                item["actionableQuantity"]
+                if item["productId"] in selected_ids
+                else 0
+            ),
+        }
+        for item in conditional["items"]
+        if item["actionableQuantity"] > 0
+    ]
+    try:
+        result, replayed = persist_conditional_return(
+            conditional_id,
+            {"items": items},
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (ConditionalOperationError, InventoryOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result["conditional"],
+        "saleDraft": result["saleDraft"],
+        "replayed": replayed,
+    })
 
 
-@app.post("/api/returns")
-def create_return_api():
+@app.post("/api/conditionals/<conditional_id>/returns")
+def create_conditional_return_api(conditional_id: str):
     if not session.get("user"):
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    sale_id = str(payload.get("saleId", "")).strip()
-    items_payload = payload.get("items") or []
-    if not sale_id or not items_payload:
-        return jsonify({"ok": False, "error": "Informe a venda e os itens da devolução."}), 400
-    init_db()
+    try:
+        result, replayed = persist_conditional_return(
+            conditional_id,
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (ConditionalOperationError, InventoryOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+
+@app.post("/api/conditionals/<conditional_id>/cancel")
+def cancel_conditional_api(conditional_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        conditional = persist_conditional_cancellation(
+            conditional_id,
+            payload.get("reason", ""),
+        )
+    except ConditionalOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": conditional})
+
+
+@app.post("/api/returns")
+def create_return_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        result, replayed = persist_sale_return(
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (
+        ReturnExchangeWarrantyError,
+        InventoryOperationError,
+        FinancialOperationError,
+    ) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+@app.get("/api/sales/<sale_id>/after-sales")
+def sale_after_sales_api(sale_id: str):
     with connect_db() as conn:
-        sale_row = conn.execute(
-            """
-            SELECT id, customer_name AS customerName, status
-            FROM sales
-            WHERE store_id = ? AND id = ?
-            """,
-            ("matriz", sale_id),
-        ).fetchone()
-        if not sale_row:
-            return jsonify({"ok": False, "error": "Venda não encontrada."}), 404
-        if sale_row["status"] == "cancelled":
-            return jsonify({"ok": False, "error": "Venda cancelada não pode ter devolução."}), 409
-        sold_rows = conn.execute(
-            """
-            SELECT product_id AS productId, name, unit_price AS unitPrice, quantity
-            FROM sale_items
-            WHERE sale_id = ?
-            """,
-            (sale_id,),
-        ).fetchall()
-        sold_by_product = {row["productId"]: row for row in sold_rows}
-        return_items = []
-        for item in items_payload:
-            product_id = str(item.get("productId", "")).strip()
-            action = str(item.get("action", "")).strip()
-            quantity = max(0, int(float(item.get("quantity", 0) or 0)))
-            sold = sold_by_product.get(product_id)
-            if action not in {"return", "exchange"} or not sold or quantity <= 0 or quantity > int(sold["quantity"] or 0):
-                return jsonify({"ok": False, "error": "Item de devolução inválido."}), 400
-            unit_price = float(item.get("unitPrice", sold["unitPrice"]) or 0)
-            return_items.append({
-                "productId": product_id,
-                "productName": str(item.get("productName", sold["name"]) or ""),
-                "action": action,
-                "quantity": quantity,
-                "unitPrice": unit_price,
-                "total": money_round(quantity * unit_price),
-            })
-        if not return_items:
-            return jsonify({"ok": False, "error": "Informe ao menos um item para devolver."}), 400
+        try:
+            sale, items = returnable_sale_items(conn, sale_id)
+        except ReturnExchangeWarrantyError as error:
+            return jsonify({
+                "ok": False,
+                "error": error.message,
+                "code": error.code or None,
+            }), error.status_code
+        returns = [
+            return_document(conn, str(row["id"]))
+            for row in conn.execute(
+                """
+                SELECT id FROM sale_returns
+                WHERE store_id = ? AND sale_id = ?
+                ORDER BY created_at DESC
+                """,
+                ("matriz", sale_id),
+            ).fetchall()
+        ]
+        exchanges = [
+            exchange_document(conn, str(row["id"]))
+            for row in conn.execute(
+                """
+                SELECT id FROM exchanges
+                WHERE store_id = ? AND sale_id = ?
+                ORDER BY created_at DESC
+                """,
+                ("matriz", sale_id),
+            ).fetchall()
+        ]
+        warranties = [
+            warranty_document(conn, str(row["id"]))
+            for row in conn.execute(
+                """
+                SELECT id FROM warranties
+                WHERE store_id = ? AND sale_id = ?
+                ORDER BY created_at DESC
+                """,
+                ("matriz", sale_id),
+            ).fetchall()
+        ]
+    return jsonify({"ok": True, "data": {
+        "sale": sale,
+        "items": items,
+        "returns": [item for item in returns if item],
+        "exchanges": [item for item in exchanges if item],
+        "warranties": [item for item in warranties if item],
+    }})
 
-        product_ids = [item["productId"] for item in return_items]
-        placeholders = ",".join("?" for _ in product_ids)
-        product_rows = conn.execute(
-            f"""
-            SELECT id, barcode, name, size, color, gender, category_name AS category,
-                   brand_name AS brand, stock, min_stock AS minStock, description,
-                   active, cost, price, photo, updated_at AS updatedAt
-            FROM products
-            WHERE store_id = ? AND id IN ({placeholders})
-            """,
-            ("matriz", *product_ids),
-        ).fetchall()
-        products_by_id = {row["id"]: row for row in product_rows}
-        updated_products = []
-        for item in return_items:
-            row = products_by_id.get(item["productId"])
-            if not row:
-                continue
-            product = product_from_row(row)
-            product["stock"] = int(product["stock"] or 0) + int(item["quantity"] or 0)
-            product["updatedAt"] = utc_now()
-            updated_products.append(product)
 
-        return_doc = {
-            "id": str(payload.get("id") or os.urandom(16).hex()),
-            "saleId": sale_id,
-            "customerName": sale_row["customerName"] or "",
-            "items": return_items,
-            "total": money_round(sum(item["total"] for item in return_items)),
-            "reason": str(payload.get("reason", "") or "").strip(),
-            "notes": str(payload.get("notes", "") or "").strip(),
-            "createdAt": str(payload.get("createdAt") or utc_now()),
-        }
+@app.get("/api/exchanges")
+def list_exchanges_api():
+    with connect_db() as conn:
+        data = [
+            exchange_document(conn, str(row["id"]))
+            for row in conn.execute(
+                """
+                SELECT id FROM exchanges
+                WHERE store_id = ?
+                ORDER BY created_at DESC, exchange_number DESC
+                """,
+                ("matriz",),
+            ).fetchall()
+        ]
+    return jsonify({"ok": True, "data": [item for item in data if item]})
 
-    sync_return_to_state(return_doc, updated_products)
-    record_audit("create", "return", return_doc["id"], {"return": return_doc})
-    return jsonify({"ok": True, "data": {"return": return_doc, "products": updated_products}}), 201
+
+@app.post("/api/exchanges")
+def create_exchange_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        result, replayed = persist_exchange(
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (ReturnExchangeWarrantyError, InventoryOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+
+@app.post("/api/exchanges/<exchange_id>/cancel")
+def cancel_exchange_api(exchange_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        result, replayed = persist_exchange_cancellation(
+            exchange_id,
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except (ReturnExchangeWarrantyError, InventoryOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    })
+
+
+@app.get("/api/warranties")
+def list_warranties_api():
+    status = str(request.args.get("status", "") or "").strip()
+    customer_id = str(request.args.get("customerId", "") or "").strip()
+    conditions = ["store_id = ?"]
+    params: list = ["matriz"]
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+    if customer_id:
+        conditions.append("customer_id = ?")
+        params.append(customer_id)
+    with connect_db() as conn:
+        identifiers = [
+            str(row["id"])
+            for row in conn.execute(
+                f"""
+                SELECT id FROM warranties
+                WHERE {' AND '.join(conditions)}
+                ORDER BY created_at DESC, warranty_number DESC
+                """,
+                tuple(params),
+            ).fetchall()
+        ]
+        data = [
+            warranty_document(conn, identifier) for identifier in identifiers
+        ]
+    return jsonify({"ok": True, "data": [item for item in data if item]})
+
+
+@app.post("/api/warranties")
+def create_warranty_api():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        result, replayed = persist_warranty_creation(
+            payload,
+            request.headers.get("Idempotency-Key", ""),
+        )
+    except ReturnExchangeWarrantyError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+
+@app.post("/api/warranties/<warranty_id>/events")
+def create_warranty_event_api(warranty_id: str):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        document = persist_warranty_event(warranty_id, payload)
+    except ReturnExchangeWarrantyError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": {"warranty": document}})
 
 
 @app.get("/api/cash-movements")
 def list_cash_movements():
-    init_db()
     with connect_db() as conn:
         rows = conn.execute(
             """
             SELECT id, direction, type, description, method, amount,
-                   ref_id AS refId, created_at AS createdAt
+                   ref_id AS refId, expense_category_id AS "expenseCategoryId",
+                   origin_type AS "originType", origin_id AS "originId",
+                   user_id AS "userId", user_name AS "userName",
+                   resulting_balance AS "resultingBalance",
+                   reversal_of_id AS "reversalOfId",
+                   reversed_at AS "reversedAt",
+                   idempotency_key AS "idempotencyKey",
+                   created_at AS createdAt
             FROM cash_movements
             WHERE store_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at, id
             """,
             ("matriz",),
         ).fetchall()
-    return jsonify({"ok": True, "data": [dict(row) for row in rows]})
+    data = []
+    balance = 0.0
+    for row in rows:
+        movement = cash_movement_from_row(row)
+        balance = money_round(
+            balance
+            + (
+                movement["amount"]
+                if movement["direction"] == "in"
+                else -movement["amount"]
+            )
+        )
+        if movement["resultingBalance"] is None:
+            movement["resultingBalance"] = balance
+        data.append(movement)
+    return jsonify({"ok": True, "data": list(reversed(data))})
 
 
 @app.post("/api/cash-movements")
@@ -4661,8 +25629,51 @@ def create_cash_movement_api():
         return jsonify({"ok": False, "error": "Descrição é obrigatória."}), 400
     if movement["direction"] == "out" and movement["type"] in {"", "manual"}:
         return jsonify({"ok": False, "error": "Tipo de despesa obrigatorio para saidas."}), 400
-    persist_cash_movement(movement)
+    allowed_methods = (
+        {"cash", "pix"}
+        if movement["direction"] == "in"
+        else {"cash", "pix", "debit"}
+    )
+    if movement["method"] not in allowed_methods:
+        return jsonify({
+            "ok": False,
+            "error": "Forma de pagamento invalida para esta movimentacao.",
+        }), 400
+    movement["createdAt"] = utc_now()
+    movement["originType"] = "manual"
+    movement["originId"] = movement["id"]
+    try:
+        persist_cash_movement(movement)
+    except (CatalogOperationError, FinancialOperationError) as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
     return jsonify({"ok": True, "data": {"cash": [movement], "receivables": []}}), 201
+
+
+@app.post("/api/cash-movements/<movement_id>/reverse")
+def reverse_cash_movement_api(movement_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatorio."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        result, replayed = persist_cash_reversal(
+            movement_id,
+            payload,
+            request.headers.get("Idempotency-Key", "")
+            or payload.get("idempotencyKey", ""),
+        )
+    except FinancialOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
 
 
 @app.get("/api/cash-closings")
@@ -4718,61 +25729,108 @@ def create_cash_closing_api():
 def create_card_receipt_api():
     if not session.get("user"):
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    return jsonify({
+        "ok": False,
+        "error": (
+            "O recebimento manual sem vínculo foi descontinuado. "
+            "Utilize a conciliação de recebíveis de cartão."
+        ),
+        "code": "CARD_RECONCILIATION_REQUIRED",
+    }), 409
+
+
+@app.get("/api/card-reconciliations/receivables")
+def list_card_reconciliation_receivables_api():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    try:
+        data = list_card_receivables_data(request.args)
+    except ReceivableOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/card-reconciliations")
+def create_card_reconciliation_api():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    description = str(payload.get("description", "") or "Recebimento de cartão").strip()
-    created_at = str(payload.get("createdAt") or utc_now())
-    credit = money_round(payload.get("credit", 0))
-    debit = money_round(payload.get("debit", 0))
-    generic_amount = money_round(payload.get("amount", 0))
-    movements = []
-    if credit > 0:
-        movements.append(normalize_cash_movement_payload({
-            "direction": "in",
-            "type": payload.get("type", "conta bancária"),
-            "description": f"{description} - Crédito",
-            "method": "card",
-            "amount": credit,
-            "createdAt": created_at,
-        }))
-    if debit > 0:
-        movements.append(normalize_cash_movement_payload({
-            "direction": "in",
-            "type": payload.get("type", "conta bancária"),
-            "description": f"{description} - Débito",
-            "method": "card",
-            "amount": debit,
-            "createdAt": created_at,
-        }))
-    if generic_amount > 0 and not movements:
-        movements.append(normalize_cash_movement_payload({
-            "direction": "in",
-            "type": payload.get("type", "receber cartoes"),
-            "description": description,
-            "method": "card",
-            "amount": generic_amount,
-            "createdAt": created_at,
-        }))
-    total = money_round(sum(movement["amount"] for movement in movements))
-    if total <= 0:
-        return jsonify({"ok": False, "error": "Informe um valor recebido."}), 400
-    receivables = sync_cash_movements_to_state(movements, settle_card_amount=total)
-    record_audit("create", "card_receipt", "", {"total": total, "movements": movements, "receivables": receivables})
-    return jsonify({"ok": True, "data": {"cash": movements, "receivables": receivables}}), 201
+    try:
+        result, replayed = persist_card_reconciliation(
+            payload,
+            request.headers.get("Idempotency-Key", "")
+            or payload.get("idempotencyKey", ""),
+        )
+    except (ReceivableOperationError, FinancialOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+
+@app.get("/api/card-reconciliations/<reconciliation_id>")
+def get_card_reconciliation_api(reconciliation_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    try:
+        with connect_db() as conn:
+            data = card_reconciliation_document(conn, reconciliation_id)
+    except ReceivableOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/card-reconciliations/<reconciliation_id>/reversal")
+def reverse_card_reconciliation_api(reconciliation_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        result, replayed = reverse_card_reconciliation(
+            reconciliation_id,
+            payload,
+            request.headers.get("Idempotency-Key", "")
+            or payload.get("idempotencyKey", ""),
+        )
+    except (ReceivableOperationError, FinancialOperationError) as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
 
 
 @app.get("/api/receivables")
 def list_receivables():
-    init_db()
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
     with connect_db() as conn:
         rows = conn.execute(
-            """
-            SELECT id, sale_id AS saleId, customer_id AS customerId, customer_name AS customerName,
-                   method, amount, received, status, due_date AS dueDate,
-                   paid_at AS paidAt, last_payment_at AS lastPaymentAt,
-                   installment, created_at AS createdAt, updated_at AS updatedAt
-            FROM receivables
+            f"""
+            {RECEIVABLE_SELECT}
             WHERE store_id = ?
             ORDER BY COALESCE(due_date, created_at), created_at
             """,
@@ -4780,9 +25838,41 @@ def list_receivables():
         ).fetchall()
         payment_rows = conn.execute(
             """
-            SELECT id, receivable_id AS receivableId, sale_id AS saleId, customer_id AS customerId,
-                   method, amount, created_at AS createdAt, note
+            SELECT id, receivable_id AS receivableId, sale_id AS saleId,
+                   customer_id AS customerId, method, amount,
+                   principal_amount AS principalAmount,
+                   settled_amount AS settledAmount,
+                   interest_amount AS interestAmount,
+                   fine_amount AS fineAmount, addition_amount AS additionAmount,
+                   discount_amount AS discountAmount, user_id AS userId,
+                   user_name AS userName, modality_name AS modalityName,
+                   gross_amount AS grossAmount, fee_amount AS feeAmount,
+                   net_amount AS netAmount, created_at AS createdAt, note,
+                   status, reconciliation_id AS reconciliationId,
+                   reversed_at AS reversedAt, reversal_reason AS reversalReason
             FROM receivable_payments
+            WHERE store_id = ?
+            ORDER BY created_at, id
+            """,
+            ("matriz",),
+        ).fetchall()
+        renegotiation_rows = conn.execute(
+            """
+            SELECT id, receivable_id AS receivableId, sale_id AS saleId,
+                   customer_id AS customerId,
+                   previous_due_date AS previousDueDate,
+                   new_due_date AS newDueDate,
+                   previous_open_amount AS previousOpenAmount,
+                   new_open_amount AS newOpenAmount,
+                   payment_amount AS paymentAmount,
+                   settled_amount AS settledAmount,
+                   interest_amount AS interestAmount,
+                   fine_amount AS fineAmount,
+                   addition_amount AS additionAmount,
+                   discount_amount AS discountAmount, method,
+                   payment_id AS paymentId, reason, user_id AS userId,
+                   user_name AS userName, created_at AS createdAt
+            FROM receivable_renegotiations
             WHERE store_id = ?
             ORDER BY created_at, id
             """,
@@ -4792,10 +25882,18 @@ def list_receivables():
     for payment in payment_rows:
         row = dict(payment)
         payments_by_receivable.setdefault(row.pop("receivableId"), []).append(row)
+    renegotiations_by_receivable: dict[str, list[dict]] = {}
+    for renegotiation in renegotiation_rows:
+        row = dict(renegotiation)
+        renegotiations_by_receivable.setdefault(
+            row.pop("receivableId"),
+            [],
+        ).append(row)
     data = []
     for row in rows:
-        item = dict(row)
+        item = receivable_from_row(row)
         item["payments"] = payments_by_receivable.get(item["id"], [])
+        item["renegotiations"] = renegotiations_by_receivable.get(item["id"], [])
         data.append(item)
     return jsonify({"ok": True, "data": data})
 
@@ -4807,101 +25905,50 @@ def pay_receivables_api():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
-    customer_id = str(payload.get("customerId", "") or "").strip()
-    method = str(payload.get("method", "") or "").strip()
-    created_at = str(payload.get("createdAt") or utc_now())
-    rows = payload.get("payments") or []
-    if method not in {"cash", "pix", "debit", "credit"}:
-        return jsonify({"ok": False, "error": "Forma de pagamento inválida."}), 400
-    if not customer_id or not rows:
-        return jsonify({"ok": False, "error": "Informe cliente e parcelas."}), 400
+    try:
+        result, replayed = persist_receivable_payment(
+            payload,
+            request.headers.get("Idempotency-Key")
+            or payload.get("idempotencyKey"),
+        )
+    except ReceivableOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    })
 
-    state, _ = read_state()
-    customer = next((item for item in state.get("customers", []) if item.get("id") == customer_id), None)
-    if not customer:
-        return jsonify({"ok": False, "error": "Cliente não encontrado."}), 404
 
-    payments_by_id = {
-        str(item.get("receivableId", "") or ""): money_round(item.get("amount", 0))
-        for item in rows
-        if money_round(item.get("amount", 0)) > 0
-    }
-    if not payments_by_id:
-        return jsonify({"ok": False, "error": "Informe pelo menos um valor para receber."}), 400
-
-    changed_receivables = []
-    total = 0.0
-    for receivable in state.get("receivables", []):
-        amount = payments_by_id.get(receivable.get("id"))
-        if not amount:
-            continue
-        if receivable.get("customerId") != customer_id or receivable.get("method") != "storeCredit" or receivable.get("status") == "cancelled":
-            return jsonify({"ok": False, "error": "Parcela inválida para este cliente."}), 400
-        balance = money_round(float(receivable.get("amount") or 0) - float(receivable.get("received") or 0))
-        if amount > balance + 0.01:
-            return jsonify({"ok": False, "error": "Valor recebido maior que o saldo da parcela."}), 400
-        receivable["received"] = money_round(float(receivable.get("received") or 0) + amount)
-        receivable["lastPaymentAt"] = created_at
-        receivable["updatedAt"] = created_at
-        payment_entry = {
-            "id": os.urandom(16).hex(),
-            "receivableId": receivable.get("id", ""),
-            "saleId": receivable.get("saleId", ""),
-            "customerId": customer_id,
-            "method": method,
-            "amount": amount,
-            "createdAt": created_at,
-            "note": str(payload.get("description", "") or "").strip(),
-        }
-        receivable["payments"] = [*receivable.get("payments", []), payment_entry]
-        if money_round(float(receivable.get("amount") or 0) - float(receivable.get("received") or 0)) <= 0.01:
-            receivable["status"] = "paid"
-            receivable["paidAt"] = created_at
-        else:
-            receivable["status"] = "open"
-        changed_receivables.append(receivable)
-        total = money_round(total + amount)
-
-    if len(changed_receivables) != len(payments_by_id):
-        return jsonify({"ok": False, "error": "Uma ou mais parcelas não foram encontradas."}), 404
-
-    cash = []
-    created_receivables = []
-    description = str(payload.get("description", "") or f"Recebimento crediário - {customer.get('name', '')}").strip()
-    if method in {"cash", "pix"}:
-        cash.append(normalize_cash_movement_payload({
-            "direction": "in",
-            "type": "crediario",
-            "description": description,
-            "method": method,
-            "amount": total,
-            "refId": customer_id,
-            "createdAt": created_at,
-        }))
-        state["cash"] = [*cash, *state.get("cash", [])]
-    else:
-        created = {
-            "id": os.urandom(16).hex(),
-            "saleId": "",
-            "customerId": customer_id,
-            "customerName": customer.get("name", ""),
-            "method": method,
-            "amount": total,
-            "received": 0,
-            "status": "cardPending",
-            "dueDate": created_at[:10],
-            "paidAt": "",
-            "lastPaymentAt": "",
-            "installment": "",
-            "createdAt": created_at,
-            "updatedAt": created_at,
-        }
-        created_receivables.append(created)
-        state["receivables"] = [created, *state.get("receivables", [])]
-
-    write_state(state)
-    record_audit("pay", "receivable", customer_id, {"customerId": customer_id, "method": method, "total": total, "receivables": changed_receivables, "cash": cash, "createdReceivables": created_receivables})
-    return jsonify({"ok": True, "data": {"receivables": [*changed_receivables, *created_receivables], "cash": cash}})
+@app.post("/api/receivables/<receivable_id>/renegotiations")
+def renegotiate_receivable_api(receivable_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatório."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON válido."}), 400
+    try:
+        result, replayed = persist_receivable_renegotiation(
+            receivable_id,
+            payload,
+            request.headers.get("Idempotency-Key")
+            or payload.get("idempotencyKey"),
+        )
+    except ReceivableOperationError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    })
 
 
 @app.get("/api/payables")
@@ -4913,14 +25960,46 @@ def list_payables():
             SELECT id, supplier, category, amount, issue_date AS issueDate,
                    due_date AS dueDate, notes, paid_amount AS paidAmount,
                    fee, discount, status, paid_at AS paidAt, created_at AS createdAt,
-                   updated_at AS updatedAt
+                   updated_at AS updatedAt, supplier_id AS "supplierId",
+                   expense_category_id AS "expenseCategoryId",
+                   open_amount AS "openAmount", interest, fine, recurring,
+                   recurring_day AS "recurringDay",
+                   recurring_series_id AS "recurringSeriesId",
+                   recurrence_month AS "recurrenceMonth",
+                   generated_from_id AS "generatedFromId", version,
+                   cancelled_at AS "cancelledAt",
+                   cancellation_reason AS "cancellationReason"
             FROM payables
             WHERE store_id = ?
             ORDER BY due_date, created_at
             """,
             ("matriz",),
         ).fetchall()
-    return jsonify({"ok": True, "data": [payable_from_row(row) for row in rows]})
+        data = []
+        for row in rows:
+            payable = enrich_payable(conn, payable_from_row(row))
+            payments, events = payable_relational_details(conn, payable["id"])
+            payable["payments"] = payments
+            payable["events"] = events
+            data.append(payable)
+    return jsonify({"ok": True, "data": data})
+
+
+@app.post("/api/payables/recurrences/generate")
+def generate_payable_recurrences_api():
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatorio."}), 401
+    payload = request.get_json(silent=True)
+    payload = payload if isinstance(payload, dict) else {}
+    try:
+        created = persist_payable_recurrences(payload.get("targetMonth", ""))
+    except PayablePaymentError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": created}), 201 if created else 200
 
 
 @app.post("/api/payables")
@@ -4934,7 +26013,10 @@ def create_payable_api():
     error = validate_payable(payable)
     if error:
         return jsonify({"ok": False, "error": error}), 400
-    persist_payable_creation(payable)
+    try:
+        persist_payable_creation(payable)
+    except CatalogOperationError as error:
+        return jsonify({"ok": False, "error": error.message}), error.status_code
     return jsonify({"ok": True, "data": payable}), 201
 
 
@@ -4957,12 +26039,79 @@ def update_payable_api(payable_id: str):
 def pay_payable_api(payable_id: str):
     if not session.get("user"):
         return jsonify({"ok": False, "error": "Login obrigatório."}), 401
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
     try:
-        payable, cash = persist_payable_payment(payable_id, payload)
+        payable, cash, replayed = persist_payable_payment_v14(
+            payable_id,
+            payload,
+            request.headers.get("Idempotency-Key", "")
+            or payload.get("idempotencyKey", ""),
+        )
     except PayablePaymentError as error:
-        return jsonify({"ok": False, "error": error.message}), error.status_code
-    return jsonify({"ok": True, "data": {"payable": payable, "cash": cash}})
+        body = {
+            "ok": False,
+            "error": error.message,
+        }
+        if error.code:
+            body["code"] = error.code
+        return jsonify(body), error.status_code
+    body = {
+        "ok": True,
+        "data": {"payable": payable, "cash": cash},
+    }
+    if replayed:
+        body["replayed"] = True
+    return jsonify(body)
+
+
+@app.post("/api/payables/<payable_id>/payments/<payment_id>/reverse")
+def reverse_payable_payment_api(payable_id: str, payment_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatorio."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        result, replayed = persist_payable_payment_reversal(
+            payable_id,
+            payment_id,
+            payload,
+            request.headers.get("Idempotency-Key", "")
+            or payload.get("idempotencyKey", ""),
+        )
+    except PayablePaymentError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({
+        "ok": True,
+        "data": result,
+        "replayed": replayed,
+    }), 200 if replayed else 201
+
+
+@app.post("/api/payables/<payable_id>/cancel")
+def cancel_payable_api(payable_id: str):
+    if not session.get("user"):
+        return jsonify({"ok": False, "error": "Login obrigatorio."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "Envie um JSON valido."}), 400
+    try:
+        payable = persist_payable_cancellation(payable_id, payload)
+    except PayablePaymentError as error:
+        return jsonify({
+            "ok": False,
+            "error": error.message,
+            "code": error.code or None,
+        }), error.status_code
+    return jsonify({"ok": True, "data": payable})
 
 
 @app.put("/api/state")

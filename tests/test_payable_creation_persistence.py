@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from database_migrations.runner import run_database_migrations
 from environment_config import EnvironmentConfig
 import server
 
@@ -86,7 +87,23 @@ class PayableCreationPersistenceTest(unittest.TestCase):
         server.DATABASE_URL = ""
         server.DB_PATH = os.path.join(self.temp_dir.name, "payable-creation.db")
         os.environ["MOVA_ADMIN_PASSWORD"] = self.ADMIN_PASSWORD
-        server.init_db()
+        run_database_migrations(
+            test_mode=True,
+            sqlite_path=server.DB_PATH,
+            create_database=True,
+        )
+        with server.connect_db() as conn:
+            conn.execute(
+                "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?)",
+                ("matriz", "Matriz", server.utc_now()),
+            )
+            conn.execute(
+                "INSERT INTO app_state (id, data, updated_at) VALUES (1, ?, ?)",
+                (
+                    json.dumps(server.default_state(), ensure_ascii=False),
+                    server.utc_now(),
+                ),
+            )
 
         self.baseline_payable = self.payable_record("payable-baseline")
         state = server.default_state()
@@ -344,7 +361,7 @@ class PayableCreationPersistenceTest(unittest.TestCase):
         self.assertEqual(json.loads(audit["details"])["payable"]["id"], payable["id"])
 
         after_state = self.raw_state()
-        self.assertEqual(after_state["payables"], [self.baseline_payable, payable])
+        self.assertEqual(after_state["payables"], [payable, self.baseline_payable])
         self.assertEqual(
             {key: value for key, value in after_state.items() if key != "payables"},
             {key: value for key, value in before_state.items() if key != "payables"},
@@ -461,7 +478,7 @@ class PayableCreationPersistenceTest(unittest.TestCase):
         self.assertTrue(any(sql.startswith("INSERT INTO payables") for sql in statements))
         self.assertTrue(any(sql.startswith("INSERT INTO app_state") for sql in statements))
         self.assertTrue(any(sql.startswith("INSERT INTO audit_logs") for sql in statements))
-        self.assertEqual(fake_connection.saved_state["payables"], [self.baseline_payable, payable])
+        self.assertEqual(fake_connection.saved_state["payables"], [payable, self.baseline_payable])
         self.assertEqual(fake_connection.saved_state["products"], existing_state["products"])
         for sql, params in fake_connection.calls:
             if params:

@@ -212,6 +212,9 @@ class FakePostgresAdapter:
     def validate_current_schema(self):
         return SchemaValidation(bool(self._working()["schema"]), () if self._working()["schema"] else ("schema",))
 
+    def validate_v1_schema(self):
+        return self.validate_current_schema()
+
     def business_row_count(self):
         return self.state.business_rows
 
@@ -237,12 +240,15 @@ class PostgreSQLRunnerTests(unittest.TestCase):
     def test_migrate_applies_records_locks_commits_and_closes(self):
         state = FakePostgresState()
         result = run_database_migrations(environ=AUTHORIZED_ENV, adapter_factory=factory_for(state))
-        self.assertEqual(result["applied"], [1])
-        self.assertEqual(state.apply_calls, [1])
-        self.assertEqual(state.lock_calls, 1)
-        self.assertEqual(state.commit_calls, 1)
-        self.assertEqual(len(state.history), 1)
-        self.assertEqual(state.history[0].checksum, MIGRATIONS[0].checksum)
+        self.assertEqual(result["applied"], list(range(1, 19)))
+        self.assertEqual(state.apply_calls, list(range(1, 19)))
+        self.assertEqual(state.lock_calls, len(MIGRATIONS))
+        self.assertEqual(state.commit_calls, len(MIGRATIONS))
+        self.assertEqual(len(state.history), len(MIGRATIONS))
+        self.assertEqual(
+            [item.checksum for item in state.history],
+            [item.checksum for item in MIGRATIONS],
+        )
         self.assertEqual(state.close_calls, 2)
 
     def test_failure_rolls_back_and_closes_without_history(self):
@@ -264,8 +270,18 @@ class PostgreSQLRunnerTests(unittest.TestCase):
         self.assertEqual(state.apply_calls, [])
 
     def test_future_version_blocks_before_apply(self):
-        row = AppliedMigration(2, "Future", "2026-07-18T12:00:00Z", "0" * 64, 1)
-        state = FakePostgresState(schema=True, history=[row])
+        history = [
+            AppliedMigration(
+                migration.version,
+                migration.description,
+                "2026-07-18T12:00:00Z",
+                migration.checksum,
+                1,
+            )
+            for migration in MIGRATIONS
+        ]
+        history.append(AppliedMigration(19, "Future", "2026-07-18T12:00:00Z", "0" * 64, 1))
+        state = FakePostgresState(schema=True, history=history)
         with self.assertRaises(MigrationError) as context:
             run_database_migrations(environ=AUTHORIZED_ENV, adapter_factory=factory_for(state))
         self.assertEqual(context.exception.code, "future_version")

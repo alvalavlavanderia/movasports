@@ -226,6 +226,8 @@ def run_database_bootstrap(
 
         if store_created:
             adapter.insert_store(STORE_ID, store_name.strip(), now)
+            adapter.insert_default_customer(STORE_ID, now)
+            adapter.insert_default_expense_categories(STORE_ID, now)
         if app_state_created:
             adapter.insert_app_state(empty_app_state_json(), now)
         if admin_created:

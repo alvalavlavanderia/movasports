@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from database_migrations.runner import run_database_migrations
 from environment_config import EnvironmentConfig
 import server
 
@@ -30,7 +31,23 @@ class PayablePersistenceIntegrationTest(unittest.TestCase):
         server.DB_PATH = os.path.join(self.temp_dir.name, "payable-integration.db")
         server.app.config["TESTING"] = False
         os.environ["MOVA_ADMIN_PASSWORD"] = self.ADMIN_PASSWORD
-        server.init_db()
+        run_database_migrations(
+            test_mode=True,
+            sqlite_path=server.DB_PATH,
+            create_database=True,
+        )
+        with server.connect_db() as conn:
+            conn.execute(
+                "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?)",
+                ("matriz", "Matriz", server.utc_now()),
+            )
+            conn.execute(
+                "INSERT INTO app_state (id, data, updated_at) VALUES (1, ?, ?)",
+                (
+                    json.dumps(server.default_state(), ensure_ascii=False),
+                    server.utc_now(),
+                ),
+            )
 
         self.baseline_cash = {
             "id": "cash-integration-marker",
@@ -38,7 +55,7 @@ class PayablePersistenceIntegrationTest(unittest.TestCase):
             "type": "opening",
             "description": "Marcador de integracao",
             "method": "cash",
-            "amount": 10.0,
+            "amount": 1000.0,
             "refId": "",
             "createdAt": "2026-07-18T10:00:00+00:00",
         }
@@ -253,8 +270,8 @@ class PayablePersistenceIntegrationTest(unittest.TestCase):
         self.assertEqual(movement_count_after_edit, 1)
         self.assertEqual(final_payment.status_code, 200)
         self.assertEqual(final_payment.get_json()["data"]["payable"]["status"], "paid")
-        self.assertEqual(edit_paid.status_code, 200)
-        self.assertEqual(edit_paid.get_json()["data"]["status"], "paid")
+        self.assertEqual(edit_paid.status_code, 400)
+        self.assertIn("nao pode ser editada", edit_paid.get_json()["error"])
         self.assertEqual(len(self.raw_movements()), 2)
         self.assertEqual([item["amount"] for item in self.raw_movements()], [25.0, 75.0])
 

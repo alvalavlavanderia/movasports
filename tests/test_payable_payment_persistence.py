@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from database_migrations.migrations.v014_financial_ledger import MIGRATION_014
+from database_migrations.migrations.v015_card_reconciliation import MIGRATION_015
 from environment_config import EnvironmentConfig
 import server
 
@@ -110,6 +112,11 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         server.app.config["TESTING"] = False
         os.environ["MOVA_ADMIN_PASSWORD"] = self.ADMIN_PASSWORD
         server.init_db()
+        with sqlite3.connect(server.DB_PATH) as connection:
+            for statement in MIGRATION_014.sqlite_statements:
+                connection.execute(statement)
+            for statement in MIGRATION_015.sqlite_statements:
+                connection.execute(statement)
 
         self.payable = self.payable_record("payable-target")
         self.other_payable = self.payable_record("payable-other", amount=250.0)
@@ -119,7 +126,7 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
             "type": "opening",
             "description": "Saldo inicial de teste",
             "method": "cash",
-            "amount": 10.0,
+            "amount": 1000.0,
             "refId": "",
             "createdAt": "2026-07-17T10:00:00+00:00",
         }
@@ -174,6 +181,7 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
             "id": payable_id,
             "supplier": "Fornecedor Teste",
             "category": "Aluguel",
+            "expenseCategoryId": "matriz:expense-category:aluguel",
             "amount": amount,
             "issueDate": "2026-07-01",
             "dueDate": "2026-07-20",
@@ -195,14 +203,15 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
             """
             INSERT INTO payables (
                 id, store_id, supplier, category, amount, issue_date, due_date,
-                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                notes, paid_amount, fee, discount, status, paid_at, created_at, updated_at,
+                expense_category_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payable["id"], "matriz", payable["supplier"], payable["category"], payable["amount"],
                 payable["issueDate"], payable["dueDate"], payable["notes"], payable["paidAmount"],
                 payable["fee"], payable["discount"], payable["status"], payable["paidAt"],
-                payable["createdAt"], payable["updatedAt"],
+                payable["createdAt"], payable["updatedAt"], payable["expenseCategoryId"],
             ),
         )
 
@@ -315,14 +324,19 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual(payable["fee"], 10.0)
         self.assertEqual(payable["discount"], 20.0)
         self.assertEqual(payable["status"], "paid")
-        self.assertEqual(payable["paidAt"], "2026-07-18T15:30:00+00:00")
+        self.assertTrue(payable["paidAt"])
+        self.assertNotEqual(payable["paidAt"], "2026-07-18T15:30:00+00:00")
         self.assertEqual(cash[0]["direction"], "out")
-        self.assertEqual(cash[0]["type"], "contas a pagar")
+        self.assertEqual(cash[0]["type"], "Aluguel")
+        self.assertEqual(
+            cash[0]["expenseCategoryId"],
+            "matriz:expense-category:aluguel",
+        )
         self.assertEqual(cash[0]["description"], "Aluguel - Pagamento final")
         self.assertEqual(cash[0]["method"], "cash")
         self.assertEqual(cash[0]["amount"], 90.0)
         self.assertEqual(cash[0]["refId"], "payable-target")
-        self.assertEqual(cash[0]["createdAt"], "2026-07-18T15:30:00+00:00")
+        self.assertEqual(cash[0]["createdAt"], payable["paidAt"])
         write_mock.assert_not_called()
         business_mock.assert_not_called()
         payable_mock.assert_not_called()
@@ -337,7 +351,7 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual(movements[-1]["store_id"], "matriz")
 
         after_state = self.raw_state()
-        self.assertEqual(after_state["payables"], [self.other_payable, payable])
+        self.assertEqual(after_state["payables"], [payable, self.other_payable])
         self.assertEqual(after_state["cash"], [cash[0], self.baseline_movement])
         self.assertEqual(
             {key: value for key, value in after_state.items() if key not in {"payables", "cash"}},
@@ -347,7 +361,9 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual((audit["action"], audit["module"], audit["ref_id"]), ("pay", "payable", "payable-target"))
         self.assertEqual(audit["user_id"], "operator-payable-payment")
         details = json.loads(audit["details"])
-        self.assertEqual(details, {"payable": payable, "cash": cash})
+        self.assertEqual(details["payable"], payable)
+        self.assertEqual(details["cash"], cash)
+        self.assertTrue(details["paymentId"])
 
         after_counts = self.table_counts()
         for table, count in before_counts.items():
@@ -364,7 +380,7 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.get_json()["data"]["payable"]["paidAmount"], 30.0)
         self.assertEqual(first.get_json()["data"]["payable"]["status"], "pending")
-        self.assertEqual(first.get_json()["data"]["payable"]["paidAt"], "2026-07-18T10:00:00+00:00")
+        self.assertEqual(first.get_json()["data"]["payable"]["paidAt"], "")
         self.assertEqual(second.get_json()["data"]["payable"]["paidAmount"], 50.0)
         self.assertEqual(second.get_json()["data"]["payable"]["status"], "pending")
         self.assertEqual(final.get_json()["data"]["payable"]["paidAmount"], 100.0)
@@ -396,12 +412,16 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual(invalid.status_code, 200)
         self.assertEqual(invalid.get_json()["data"]["payable"]["paidAmount"], 40.0)
 
-    def test_rounding_tolerance_and_unvalidated_method_are_preserved(self):
+    def test_rounding_tolerance_and_official_payment_methods_are_preserved(self):
         self.authenticate()
-        partial = self.post_payment({"amount": 33.336, "method": "wire"})
+        invalid_method = self.post_payment({"amount": 33.336, "method": "wire"})
+        self.assertEqual(invalid_method.status_code, 400)
+        self.assertEqual(self.raw_payable()["paid_amount"], 0.0)
+
+        partial = self.post_payment({"amount": 33.336, "method": "debit"})
         self.assertEqual(partial.status_code, 200)
         self.assertEqual(partial.get_json()["data"]["cash"][0]["amount"], 33.34)
-        self.assertEqual(partial.get_json()["data"]["cash"][0]["method"], "wire")
+        self.assertEqual(partial.get_json()["data"]["cash"][0]["method"], "debit")
 
         tolerance_payable = self.payable_record("payable-tolerance", amount=10.0)
         self.replace_payable(tolerance_payable)
@@ -410,13 +430,13 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual(tolerance.get_json()["data"]["payable"]["paidAmount"], 10.01)
         self.assertEqual(tolerance.get_json()["data"]["payable"]["status"], "paid")
 
-    def test_cancelled_and_overdue_accounts_keep_permissive_behavior(self):
+    def test_cancelled_is_blocked_and_overdue_can_be_paid(self):
         self.authenticate()
         cancelled = self.payable_record("payable-target", status="cancelled")
         self.replace_payable(cancelled)
         cancelled_response = self.post_payment({"amount": 40.0})
-        self.assertEqual(cancelled_response.status_code, 200)
-        self.assertEqual(cancelled_response.get_json()["data"]["payable"]["status"], "pending")
+        self.assertEqual(cancelled_response.status_code, 409)
+        self.assertEqual(self.raw_payable()["status"], "cancelled")
 
         overdue = self.payable_record("payable-overdue", amount=30.0, dueDate="2020-01-01")
         self.replace_payable(overdue)
@@ -461,10 +481,14 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
                 self.assertEqual(self.raw_state(), before_state)
                 self.assertEqual(self.table_counts(), before_counts)
 
-    def test_json_list_preserves_existing_internal_error_behavior(self):
+    def test_json_list_returns_controlled_validation_error(self):
         self.authenticate()
         response = self.post_payment("[1]", raw=True)
-        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json(),
+            {"ok": False, "error": "Envie um JSON valido."},
+        )
         self.assertEqual(self.raw_payable()["paid_amount"], 0.0)
         self.assertEqual(len(self.raw_movements()), 1)
 
@@ -533,7 +557,7 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         ):
             payable, cash = server.persist_payable_payment("payable-target", {
                 "amount": 25.0,
-                "method": "credit",
+                "method": "debit",
                 "paidAt": "2026-07-18T16:00:00+00:00",
             })
 
@@ -582,6 +606,171 @@ class PayablePaymentPersistenceTest(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 409)
         self.assertEqual(len([item for item in self.raw_movements() if item["ref_id"] == "payable-target"]), 1)
+
+    def test_discount_can_close_payable_without_cash_movement(self):
+        self.authenticate()
+        before_movements = self.raw_movements()
+        response = self.post_payment({
+            "amount": 0,
+            "discount": 100,
+            "method": "pix",
+            "idempotencyKey": "payable-discount-close",
+        })
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payable = response.get_json()["data"]["payable"]
+        self.assertEqual(payable["status"], "paid")
+        self.assertEqual(payable["openAmount"], 0.0)
+        self.assertEqual(payable["discount"], 100.0)
+        self.assertEqual(response.get_json()["data"]["cash"], [])
+        self.assertEqual(self.raw_movements(), before_movements)
+        with sqlite3.connect(server.DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            payment = conn.execute(
+                """
+                SELECT amount, discount_amount, cash_movement_id, status
+                FROM payable_payments
+                WHERE payable_id = ?
+                """,
+                ("payable-target",),
+            ).fetchone()
+        self.assertEqual(payment["amount"], 0.0)
+        self.assertEqual(payment["discount_amount"], 100.0)
+        self.assertIsNone(payment["cash_movement_id"])
+        self.assertEqual(payment["status"], "active")
+
+    def test_payment_reversal_restores_balance_and_is_idempotent(self):
+        self.authenticate()
+        payment = self.post_payment({
+            "amount": 35,
+            "interest": 4,
+            "fine": 1,
+            "discount": 5,
+            "method": "cash",
+            "idempotencyKey": "payable-payment-to-reverse",
+        })
+        self.assertEqual(payment.status_code, 200, payment.get_json())
+        payment_id = payment.get_json()["data"]["payable"]["payments"][0]["id"]
+        headers = {"Idempotency-Key": "payable-payment-reversal"}
+        payload = {"reason": "Pagamento registrado em duplicidade"}
+
+        first = self.client.post(
+            f"/api/payables/payable-target/payments/{payment_id}/reverse",
+            json=payload,
+            headers=headers,
+        )
+        replay = self.client.post(
+            f"/api/payables/payable-target/payments/{payment_id}/reverse",
+            json=payload,
+            headers=headers,
+        )
+
+        self.assertEqual(first.status_code, 201, first.get_json())
+        self.assertEqual(replay.status_code, 200, replay.get_json())
+        self.assertFalse(first.get_json()["replayed"])
+        self.assertTrue(replay.get_json()["replayed"])
+        payable = first.get_json()["data"]["payable"]
+        self.assertEqual(payable["paidAmount"], 0.0)
+        self.assertEqual(payable["interest"], 0.0)
+        self.assertEqual(payable["fine"], 0.0)
+        self.assertEqual(payable["discount"], 0.0)
+        self.assertEqual(payable["openAmount"], 100.0)
+        reversal = first.get_json()["data"]["cash"][0]
+        self.assertEqual(reversal["direction"], "in")
+        self.assertEqual(reversal["amount"], 35.0)
+        with sqlite3.connect(server.DB_PATH) as conn:
+            count = conn.execute(
+                """
+                SELECT COUNT(*) FROM payable_payments
+                WHERE payable_id = ? AND status = 'reversed'
+                """,
+                ("payable-target",),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_only_unpaid_payable_can_be_cancelled(self):
+        self.authenticate()
+        cancelled = self.client.post(
+            "/api/payables/payable-target/cancel",
+            json={"reason": "Conta lancada indevidamente"},
+        )
+        self.assertEqual(cancelled.status_code, 200, cancelled.get_json())
+        self.assertEqual(cancelled.get_json()["data"]["status"], "cancelled")
+        self.assertEqual(cancelled.get_json()["data"]["openAmount"], 0.0)
+
+        replacement = self.payable_record("payable-paid-part", amount=60.0)
+        self.replace_payable(replacement)
+        paid = self.post_payment(
+            {"amount": 10, "idempotencyKey": "partial-before-cancel"},
+            payable_id="payable-paid-part",
+        )
+        self.assertEqual(paid.status_code, 200, paid.get_json())
+        blocked = self.client.post(
+            "/api/payables/payable-paid-part/cancel",
+            json={"reason": "Tentativa apos pagamento"},
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.get_json())
+        self.assertEqual(blocked.get_json()["code"], "PAYABLE_HAS_PAYMENTS")
+
+    def test_monthly_recurrence_generates_one_occurrence_per_month(self):
+        self.authenticate()
+        current_month = server.datetime.now(
+            server.STORE_TIMEZONE
+        ).strftime("%Y-%m")
+        target_month = server.payable_recurrence_month_after(current_month)
+        with server.connect_db() as conn:
+            conn.execute(
+                """
+                UPDATE payables
+                SET recurring = 1, recurring_day = 31,
+                    recurring_series_id = ?, recurrence_month = ?,
+                    open_amount = amount
+                WHERE id = ?
+                """,
+                ("series-rent", current_month, "payable-target"),
+            )
+
+        sentinels = self.persistence_sentinels()
+        with sentinels[0], sentinels[1], sentinels[2]:
+            first = self.client.post(
+                "/api/payables/recurrences/generate",
+                json={"targetMonth": target_month},
+            )
+            replay = self.client.post(
+                "/api/payables/recurrences/generate",
+                json={"targetMonth": target_month},
+            )
+
+        self.assertEqual(first.status_code, 201, first.get_json())
+        self.assertEqual(replay.status_code, 200, replay.get_json())
+        self.assertEqual(len(first.get_json()["data"]), 1)
+        self.assertEqual(replay.get_json()["data"], [])
+        generated = first.get_json()["data"][0]
+        self.assertEqual(generated["recurrenceMonth"], target_month)
+        self.assertEqual(generated["recurringSeriesId"], "series-rent")
+        self.assertEqual(generated["generatedFromId"], "payable-target")
+        self.assertEqual(generated["openAmount"], 100.0)
+        self.assertEqual(
+            generated["dueDate"],
+            server.payable_recurrence_date(target_month, 31),
+        )
+        with sqlite3.connect(server.DB_PATH) as conn:
+            occurrence_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM payables
+                WHERE recurring_series_id = ? AND recurrence_month = ?
+                """,
+                ("series-rent", target_month),
+            ).fetchone()[0]
+            event_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM payable_events
+                WHERE payable_id = ? AND event_type = 'recurrence'
+                """,
+                (generated["id"],),
+            ).fetchone()[0]
+        self.assertEqual(occurrence_count, 1)
+        self.assertEqual(event_count, 1)
 
 
 if __name__ == "__main__":

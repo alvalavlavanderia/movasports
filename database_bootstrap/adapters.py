@@ -5,6 +5,11 @@ from pathlib import Path
 from typing import Callable
 
 from database_migrations.adapters import PostgreSQLAdapter, SQLiteAdapter
+from database_migrations.migrations.v003_supplier_auxiliary_catalogs import (
+    EXPENSE_CATEGORY_NAMES,
+    _normalized_name,
+    _slug,
+)
 from database_migrations.runner import DatabaseTarget
 
 
@@ -45,6 +50,41 @@ class BootstrapSQLiteAdapter(SQLiteAdapter):
         self.connection.execute(
             "INSERT INTO app_state (id, data, updated_at) VALUES (1, ?, ?)",
             (data, updated_at),
+        )
+
+    def insert_default_customer(self, store_id: str, created_at: str) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO customers (
+                id, store_id, code, name, cpf, rg, birth, whatsapp, email,
+                address, city, district, zip, credit_limit, status, updated_at,
+                address_number, state, notes, is_default, created_at
+            )
+            VALUES (?, ?, 'PADRAO', 'Cliente padrao', '', '', '', '', '', '',
+                    '', '', '', 0, 'active', ?, '', '', '', 1, ?)
+            """,
+            (f"{store_id}:customer:default", store_id, created_at, created_at),
+        )
+
+    def insert_default_expense_categories(self, store_id: str, created_at: str) -> None:
+        self.connection.executemany(
+            """
+            INSERT INTO expense_categories (
+                id, store_id, name, normalized_name, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'active', ?, ?)
+            """,
+            [
+                (
+                    f"{store_id}:expense-category:{_slug(name)}",
+                    store_id,
+                    name,
+                    _normalized_name(name),
+                    created_at,
+                    created_at,
+                )
+                for name in EXPENSE_CATEGORY_NAMES
+            ],
         )
 
     def insert_admin(
@@ -108,6 +148,41 @@ class BootstrapPostgreSQLAdapter(PostgreSQLAdapter):
             (data, updated_at),
         )
         cursor.close()
+
+    def insert_default_customer(self, store_id: str, created_at: str) -> None:
+        cursor = self._execute(
+            """
+            INSERT INTO customers (
+                id, store_id, code, name, cpf, rg, birth, whatsapp, email,
+                address, city, district, zip, credit_limit, status, updated_at,
+                address_number, state, notes, is_default, created_at
+            )
+            VALUES (%s, %s, 'PADRAO', 'Cliente padrao', '', '', '', '', '', '',
+                    '', '', '', 0, 'active', %s, '', '', '', 1, %s)
+            """,
+            (f"{store_id}:customer:default", store_id, created_at, created_at),
+        )
+        cursor.close()
+
+    def insert_default_expense_categories(self, store_id: str, created_at: str) -> None:
+        for name in EXPENSE_CATEGORY_NAMES:
+            cursor = self._execute(
+                """
+                INSERT INTO expense_categories (
+                    id, store_id, name, normalized_name, status, created_at, updated_at
+                )
+                VALUES (%s, %s, %s, %s, 'active', %s, %s)
+                """,
+                (
+                    f"{store_id}:expense-category:{_slug(name)}",
+                    store_id,
+                    name,
+                    _normalized_name(name),
+                    created_at,
+                    created_at,
+                ),
+            )
+            cursor.close()
 
     def insert_admin(
         self,

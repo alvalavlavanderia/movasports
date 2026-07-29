@@ -26,9 +26,9 @@ No servico `web`, configure:
 ```text
 APP_ENV=production
 MOVA_SECRET_KEY=troque-por-uma-chave-grande-com-pelo-menos-32-caracteres
-MOVA_ADMIN_NAME=Administrador
-MOVA_ADMIN_LOGIN=admin
-MOVA_ADMIN_PASSWORD=troque-por-uma-senha-forte
+MOVA_ALLOW_MIGRATIONS=false
+MOVA_ALLOW_DATA_IMPORT_RESET=false
+MOVA_ALLOW_BOOTSTRAP=false
 MOVA_SESSION_HOURS=12
 MOVA_LOGIN_ATTEMPTS=5
 MOVA_LOGIN_WINDOW_SECONDS=900
@@ -36,7 +36,10 @@ MOVA_LOGIN_WINDOW_SECONDS=900
 
 Nao precisa configurar `MOVA_DB` para PostgreSQL.
 
-Use uma senha forte antes do primeiro deploy, porque o usuario inicial e criado quando o banco ainda nao existe.
+Nao mantenha senha inicial no ambiente de uma instalacao existente. Em banco
+realmente novo, migrations e bootstrap devem ser executados explicitamente,
+conforme `docs/BUSINESS_RELEASE_READINESS.md` e
+`docs/database_bootstrap.md`.
 
 ## 3. Start command
 
@@ -64,9 +67,31 @@ O retorno esperado e:
 }
 ```
 
-Depois entre no sistema com o login configurado em `MOVA_ADMIN_LOGIN` e `MOVA_ADMIN_PASSWORD`.
+Confira tambem:
 
-## 5. Fotos de produtos
+```text
+/api/readiness
+```
+
+Depois entre com um usuario ja existente. O healthcheck confirma o processo;
+readiness confirma a compatibilidade estrutural do banco.
+
+## 5. Migrations
+
+O deploy nao executa migrations no startup. Antes de publicar uma versao que
+exija schema novo:
+
+1. consulte `python -m database_migrations status`;
+2. crie snapshot ou backup logico;
+3. autorize migrations somente no processo administrativo;
+4. aplique as pendencias com confirmacao de producao;
+5. retorne `MOVA_ALLOW_MIGRATIONS=false`;
+6. valide novamente o status e `/api/readiness`.
+
+Nunca aplique baseline ou migration por suposicao. Banco legado, checksum
+divergente, lacuna ou versao futura exigem interrupcao e diagnostico.
+
+## 6. Fotos de produtos e logo
 
 O PostgreSQL resolve a persistencia dos cadastros, vendas e financeiro.
 
@@ -88,6 +113,8 @@ CLOUDINARY_API_SECRET=seu-api-secret
 CLOUDINARY_FOLDER=mova-sports/products
 ```
 
-Quando essas variaveis existem, as novas fotos sao enviadas para o Cloudinary e o banco salva a URL publica da imagem. Sem essas variaveis, o sistema continua usando armazenamento local.
+Quando essas variaveis existem, as novas fotos e a logo da loja sao enviadas
+para o Cloudinary e o banco salva a URL publica da imagem. Sem essas variaveis,
+o sistema continua usando armazenamento local.
 
 Se ainda nao quiser configurar Cloudinary, remova as variaveis `CLOUDINARY_*` do Railway. O sistema continuara funcionando, mas fotos enviadas podem nao sobreviver a redeploys.

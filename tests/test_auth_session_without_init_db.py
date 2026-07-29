@@ -194,7 +194,10 @@ class AuthSessionWithoutInitDbTest(unittest.TestCase):
             inactive = self.client.post("/api/login", json={"login": "inactive-auth", "password": self.PASSWORD})
 
         self.assertEqual(valid.status_code, 200)
-        self.assertEqual(set(valid.get_json()["user"]), {"id", "name", "login", "role", "active"})
+        self.assertEqual(
+            set(valid.get_json()["user"]),
+            {"id", "name", "login", "role", "active", "blocked"},
+        )
         for response in (missing, wrong, inactive):
             self.assertEqual(response.status_code, 401)
             self.assertEqual(response.get_json(), {"ok": False, "error": "Usuário ou senha inválidos."})
@@ -285,6 +288,7 @@ class AuthSessionWithoutInitDbTest(unittest.TestCase):
             "login": "login-atualizado",
             "role": "operator",
             "active": True,
+            "blocked": False,
         }
         self.assertEqual(response.get_json()["user"], expected)
         self.assertEqual(self.session_user(), expected)

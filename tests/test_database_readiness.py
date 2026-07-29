@@ -8,6 +8,19 @@ from contextlib import contextmanager
 from unittest import mock
 
 from environment_config import EnvironmentConfig
+from database_migrations.migrations.v002_customer_business_rules import MIGRATION_002
+from database_migrations.migrations.v006_transactional_inventory import MIGRATION_006
+from database_migrations.migrations.v007_inventory_counts import MIGRATION_007
+from database_migrations.migrations.v008_card_modalities import MIGRATION_008
+from database_migrations.migrations.v009_card_modality_history import MIGRATION_009
+from database_migrations.migrations.v010_transactional_sales import MIGRATION_010
+from database_migrations.migrations.v011_store_credit_business_rules import MIGRATION_011
+from database_migrations.migrations.v012_transactional_conditionals import MIGRATION_012
+from database_migrations.migrations.v013_returns_exchanges_warranties import MIGRATION_013
+from database_migrations.migrations.v014_financial_ledger import MIGRATION_014
+from database_migrations.migrations.v015_card_reconciliation import MIGRATION_015
+from database_migrations.migrations.v016_catalog_documents import MIGRATION_016
+from database_migrations.migrations.v017_alert_user_states import MIGRATION_017
 import server
 
 
@@ -137,6 +150,28 @@ class DatabaseReadinessTest(unittest.TestCase):
         server.init_db()
         gc.collect()
 
+    def prepare_current_schema(self):
+        self.prepare_legacy_schema()
+        with sqlite3.connect(server.DB_PATH) as connection:
+            connection.row_factory = sqlite3.Row
+            for migration in (
+                MIGRATION_002,
+                MIGRATION_006,
+                MIGRATION_007,
+                MIGRATION_008,
+                MIGRATION_009,
+                MIGRATION_010,
+                MIGRATION_011,
+                MIGRATION_012,
+                MIGRATION_013,
+                MIGRATION_014,
+                MIGRATION_015,
+                MIGRATION_016,
+                MIGRATION_017,
+            ):
+                for statement in migration.sqlite_statements:
+                    connection.execute(statement)
+
     @contextmanager
     def structural_sentinels(self):
         forbidden = AssertionError("Readiness executou rotina estrutural.")
@@ -191,11 +226,11 @@ class DatabaseReadinessTest(unittest.TestCase):
         self.assertFalse(os.path.exists(missing_path))
 
     def test_readiness_is_public_and_does_not_touch_session_or_structural_helpers(self):
-        self.prepare_legacy_schema()
+        self.prepare_current_schema()
         session_user = {"id": "stale", "name": "Stale", "login": "stale", "role": "admin"}
         with self.client.session_transaction() as flask_session:
             flask_session["user"] = session_user
-        with self.structural_sentinels(), self.assertLogs(server.app.logger, level="WARNING"):
+        with self.structural_sentinels():
             response = self.client.get("/api/readiness")
         self.assert_ready(response)
         with self.client.session_transaction() as flask_session:
@@ -227,15 +262,14 @@ class DatabaseReadinessTest(unittest.TestCase):
                 connection.execute(f'DROP TABLE "{missing_table}"')
             self.assert_not_ready(self.client.get("/api/readiness"))
 
-    def test_legacy_schema_is_ready_and_emits_warning(self):
+    def test_legacy_schema_is_not_ready_after_customer_schema_upgrade(self):
         self.prepare_legacy_schema()
-        with self.structural_sentinels(), self.assertLogs(server.app.logger, level="WARNING") as logs:
+        with self.structural_sentinels():
             response = self.client.get("/api/readiness")
-        self.assert_ready(response)
-        self.assertTrue(any("schema legado" in message for message in logs.output))
+        self.assert_not_ready(response)
 
     def test_missing_discount_and_required_unique_index_return_503(self):
-        self.prepare_legacy_schema()
+        self.prepare_current_schema()
         with sqlite3.connect(server.DB_PATH) as connection:
             connection.execute("ALTER TABLE payables RENAME TO payables_with_discount")
             connection.execute(
@@ -246,13 +280,13 @@ class DatabaseReadinessTest(unittest.TestCase):
         for index_name in server.REQUIRED_SCHEMA_INDEXES:
             with self.subTest(index=index_name):
                 server.DB_PATH = os.path.join(self.temp_dir.name, f"missing-{index_name}.db")
-                self.prepare_legacy_schema()
+                self.prepare_current_schema()
                 with sqlite3.connect(server.DB_PATH) as connection:
                     connection.execute(f'DROP INDEX "{index_name}"')
                 self.assert_not_ready(self.client.get("/api/readiness"))
 
     def test_versioned_schema_accepts_current_and_maximum_version(self):
-        self.prepare_legacy_schema()
+        self.prepare_current_schema()
         self.add_schema_versions([1, server.REQUIRED_SCHEMA_VERSION])
         self.assert_ready(self.client.get("/api/readiness"))
 
@@ -266,18 +300,22 @@ class DatabaseReadinessTest(unittest.TestCase):
         for name, versions, column in cases:
             with self.subTest(name=name):
                 server.DB_PATH = os.path.join(self.temp_dir.name, f"version-{name}.db")
-                self.prepare_legacy_schema()
+                self.prepare_current_schema()
                 self.add_schema_versions(versions, column)
                 self.assert_not_ready(self.client.get("/api/readiness"))
 
         server.DB_PATH = os.path.join(self.temp_dir.name, "version-outdated.db")
-        self.prepare_legacy_schema()
+        self.prepare_current_schema()
         self.add_schema_versions([server.REQUIRED_SCHEMA_VERSION])
-        with mock.patch.object(server, "REQUIRED_SCHEMA_VERSION", 2):
+        with mock.patch.object(
+            server,
+            "REQUIRED_SCHEMA_VERSION",
+            server.REQUIRED_SCHEMA_VERSION + 1,
+        ):
             self.assert_not_ready(self.client.get("/api/readiness"))
 
     def test_version_table_without_version_column_returns_503(self):
-        self.prepare_legacy_schema()
+        self.prepare_current_schema()
         with sqlite3.connect(server.DB_PATH) as connection:
             connection.execute(
                 "CREATE TABLE schema_migrations (revision INTEGER, applied_at TEXT NOT NULL)"
@@ -299,7 +337,7 @@ class DatabaseReadinessTest(unittest.TestCase):
         self.assertNotIn("sqlite", body.lower())
 
     def test_sqlite_inspection_is_read_only_and_closes_explicitly(self):
-        self.prepare_legacy_schema()
+        self.prepare_current_schema()
         statements = []
         opened = []
         original_connect = sqlite3.connect

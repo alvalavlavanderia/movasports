@@ -25,17 +25,16 @@ python server.py
 
 ## Usuario inicial
 
-Antes de criar um banco novo, configure explicitamente o administrador inicial:
+O servidor nao cria administrador durante importacao WSGI, health, readiness,
+login ou startup do Gunicorn.
 
-```powershell
-$env:MOVA_ADMIN_NAME="Administrador"
-$env:MOVA_ADMIN_LOGIN="admin"
-$env:MOVA_ADMIN_PASSWORD="uma-senha-forte"
-python server.py
-```
+Em banco realmente novo, aplique primeiro as migrations e use o bootstrap
+administrativo explicito descrito em `docs/database_bootstrap.md`. A senha deve
+ser fornecida somente por uma variavel temporaria indicada ao comando; nunca
+como argumento, log ou configuracao permanente.
 
-Sem `MOVA_ADMIN_PASSWORD`, o sistema inicia normalmente, mas nao cria o administrador.
-Instalacoes existentes nao reconstroem usuarios a partir do estado legado.
+Instalacoes existentes preservam os usuarios e hashes atuais e nao devem
+executar bootstrap novamente.
 
 ## Producao
 
@@ -44,14 +43,12 @@ Em producao, configure:
 ```powershell
 $env:APP_ENV="production"
 $env:MOVA_SECRET_KEY="uma-chave-grande-com-pelo-menos-32-caracteres"
-$env:MOVA_ADMIN_PASSWORD="uma-senha-forte"
 python server.py
 ```
 
 Regras aplicadas em producao:
 
 - `MOVA_SECRET_KEY` precisa ter pelo menos 32 caracteres.
-- `MOVA_ADMIN_PASSWORD` precisa ter pelo menos 8 caracteres e nao pode ser uma senha comum.
 - Cookie de sessao usa `Secure`, `HttpOnly` e `SameSite=Lax`.
 - O sistema bloqueia temporariamente excesso de tentativas de login.
 - Headers basicos de seguranca sao enviados em todas as respostas.
@@ -60,8 +57,6 @@ Opcional:
 
 ```powershell
 $env:MOVA_DB="C:\caminho\para\loja.db"
-$env:MOVA_ADMIN_LOGIN="admin"
-$env:MOVA_ADMIN_NAME="Administrador"
 $env:MOVA_SESSION_HOURS="12"
 $env:MOVA_LOGIN_ATTEMPTS="5"
 $env:MOVA_LOGIN_WINDOW_SECONDS="900"
@@ -83,9 +78,6 @@ Variaveis recomendadas para deploy:
 APP_ENV=production
 MOVA_SECRET_KEY=uma-chave-grande-com-pelo-menos-32-caracteres
 DATABASE_URL=postgresql://...
-MOVA_ADMIN_LOGIN=admin
-MOVA_ADMIN_NAME=Administrador
-MOVA_ADMIN_PASSWORD=uma-senha-forte
 MOVA_DB_BUSY_TIMEOUT_MS=5000
 ```
 
@@ -101,8 +93,9 @@ Para Railway, este projeto possui:
 
 ## Dados
 
-Quando aberto pelo servidor, o sistema sincroniza os dados com `loja.db`.
-Ao abrir o `index.html` direto, ele ainda usa o armazenamento local do navegador como fallback.
+O ERP exige acesso pelo backend Flask em HTTP/HTTPS. Abrir `index.html` por
+`file:` nao permite autenticacao nem libera a interface. O navegador nao e
+fonte de credenciais ou sessao.
 
 ## Banco de dados
 

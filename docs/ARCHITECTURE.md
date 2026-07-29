@@ -12,6 +12,7 @@ Este documento descreve a arquitetura encontrada no repositório no momento da a
 - **Persistência local:** SQLite, usando o arquivo `loja.db`.
 - **Persistência em produção:** PostgreSQL quando a variável `DATABASE_URL` está configurada.
 - **Uploads de imagens:** armazenamento local em `uploads/products` ou Cloudinary quando configurado.
+- **Exportacao de relatorios:** XLSX com `openpyxl` e PDF com `reportlab`.
 - **Deploy:** Railway, com configuração em `railway.json` e `Procfile`.
 - **PWA:** há `app.webmanifest` e `sw.js`, mas o service worker apenas limpa caches no `activate`.
 
@@ -41,6 +42,7 @@ Estrutura relevante encontrada:
 ├── style.css                # Estilos da interface web
 ├── script.js                # Lógica frontend web
 ├── server.py                # Backend Flask e acesso a dados
+├── report_exports.py        # Geracao de relatorios PDF e XLSX
 ├── environment_config.py    # Ambiente efetivo e capacidades sensíveis
 ├── wsgi.py                  # Entrada WSGI para produção
 ├── Procfile                 # Start command para plataformas web
@@ -86,7 +88,8 @@ Responsabilidades encontradas no arquivo:
 - sincronização entre tabelas relacionais e `app_state`;
 - autenticação e controle de sessão;
 - APIs de produtos, clientes, fornecedores, marcas, categorias e usuários;
-- APIs de vendas, devoluções, condicionais, recebíveis, contas a pagar, caixa e relatórios;
+- APIs de vendas, devoluções, trocas, garantias, condicionais, recebíveis, contas a pagar, caixa e relatórios;
+- consultas relacionais paginadas e exportacoes PDF/XLSX dos relatorios oficiais;
 - upload de fotos de produtos;
 - auditoria;
 - importação, exportação, reset e backup.
@@ -94,6 +97,7 @@ Responsabilidades encontradas no arquivo:
 Arquivos auxiliares:
 
 - `environment_config.py`: reconhece o ambiente e centraliza capacidades sensíveis sem ler ou expor credenciais.
+- `report_exports.py`: transforma o contrato tabular dos relatorios em PDF e XLSX, sem consultar ou alterar o banco.
 - `wsgi.py`: importa somente `app`, sem inicializar banco, executar migrations ou alterar dados durante a importação.
 - `requirements.txt`: dependências Python.
 - `Procfile`: comando Gunicorn.
@@ -121,7 +125,7 @@ Configurações SQLite confirmadas:
 - `PRAGMA journal_mode = WAL`;
 - `PRAGMA synchronous = NORMAL`.
 
-Tabelas criadas pelo `init_db()`:
+Tabelas funcionais do schema versionado atual:
 
 - `stores`
 - `app_state`
@@ -129,9 +133,36 @@ Tabelas criadas pelo `init_db()`:
 - `audit_logs`
 - `brands`
 - `categories`
+- `sizes`
+- `colors`
+- `expense_categories`
 - `suppliers`
+- `supplier_status_history`
 - `customers`
+- `customer_status_history`
+- `customer_credit_limit_history`
 - `products`
+- `stock_entry_sequences`
+- `stock_entries`
+- `stock_entry_items`
+- `stock_movements`
+- `stock_entry_payables`
+- `stock_entry_cancellations`
+- `purchase_stock_movements`
+- `supplier_return_sequences`
+- `supplier_returns`
+- `supplier_return_items`
+- `supplier_return_allocations`
+- `supplier_credits`
+- `supplier_credit_usages`
+- `supplier_credit_allocations`
+- `inventory_movements`
+- `inventory_sequences`
+- `inventories`
+- `inventory_items`
+- `inventory_count_events`
+- `card_modalities`
+- `card_modality_history`
 - `sales`
 - `sale_items`
 - `sale_payments`
@@ -139,13 +170,74 @@ Tabelas criadas pelo `init_db()`:
 - `cash_closings`
 - `receivables`
 - `receivable_payments`
+- `receivable_renegotiations`
+- `card_reconciliations`
+- `card_reconciliation_items`
 - `sale_returns`
 - `sale_return_items`
+- `sale_return_allocations`
+- `sale_return_receivable_reductions`
+- `exchange_sequences`
+- `exchanges`
+- `exchange_return_items`
+- `exchange_new_items`
+- `exchange_payments`
+- `exchange_cancellations`
+- `warranty_sequences`
+- `warranties`
+- `warranty_photos`
+- `warranty_events`
+- `conditional_sequences`
+- `conditionals`
+- `conditional_items`
+- `conditional_returns`
+- `conditional_return_items`
+- `conditional_sale_links`
 - `payables`
+- `payable_payments`
+- `payable_events`
+- `bank_receipts`
+- `sale_cancellations`
+- `generated_documents`
+- `schema_migrations`
 
 O sistema também mantém um registro JSON em `app_state`, usado para compatibilidade/sincronização com o formato de estado do frontend.
 
-Não foram encontrados arquivos separados de migration. A criação/evolução de schema acontece dentro de `init_db()` com `CREATE TABLE IF NOT EXISTS` e alguns `ALTER TABLE` condicionais.
+As migrations versionadas ficam em `database_migrations/migrations/` e são
+registradas em `database_migrations/registry.py`. A versão 1 preserva o schema
+histórico congelado; a versão 2 adiciona os campos e históricos necessários ao
+módulo Clientes; a versão 3 adiciona os campos de Fornecedores, os cadastros
+auxiliares de tamanho, cor e categoria de despesa, os vínculos persistentes em
+Produtos, Contas a Pagar e saídas manuais do Caixa e o histórico de situação do
+fornecedor; a versão 4 adiciona o código normalizado e as datas imutáveis do
+produto, o documento de Entrada, seus itens, a sequência numérica por loja e os
+movimentos de estoque gerados pelas Entradas; a versao 5 adiciona os vinculos
+entre Entradas e Contas a Pagar, os cancelamentos de Entrada, as devolucoes ao
+fornecedor, seus efeitos financeiros e os creditos de fornecedor; a versao 6
+adiciona o livro transacional unificado de estoque, incluindo snapshots,
+origem e saldos real, reservado e disponivel; a versao 7 adiciona abertura,
+itens, eventos de contagem e sequencias do inventario fisico, cujos ajustes
+utilizam o mesmo livro transacional; a versao 8 adiciona as modalidades de
+Debito e Credito; a versao 9 adiciona identificadores estaveis e o historico
+de vigencias dessas modalidades; a versao 10 adiciona a venda transacional,
+snapshots comerciais, idempotencia e efeitos financeiros; a versao 11
+adiciona saldo aberto, ajustes, idempotencia de recebimentos e historico de
+renegociacao do Crediario; a versao 12 adiciona Condicionais relacionais,
+itens com snapshots, retornos parciais, reservas e vinculos atomicos com
+Vendas; e a versao 13 amplia devolucoes e adiciona alocacoes financeiras,
+reducoes de recebiveis, trocas, cancelamentos de troca, garantias, fotos,
+eventos e a origem de reposicao de garantia nas Entradas; e a versao 14
+adiciona o ledger financeiro continuo, estornos rastreaveis, pagamentos e
+eventos de Contas a Pagar, recorrencias mensais, recebimentos bancarios e
+cancelamentos integrais de Venda; e a versao 15 adiciona agrupadores e itens
+de conciliacao de cartoes, vinculos de pagamento, diferencas e estornos
+rastreaveis; e a versao 16 adiciona documentos gerados com snapshot
+historico, origem, formato, numero da via, usuario e idempotencia. O framework
+suporta SQLite e PostgreSQL e não executa
+migrations automaticamente durante requisições HTTP ou importação WSGI.
+
+O `init_db()` permanece como inicializador legado de compatibilidade e não
+substitui a aplicação explícita das migrations versionadas.
 
 ## 6. Como Funciona a Autenticação
 
@@ -173,10 +265,15 @@ Há controle de excesso de tentativas de login em memória, usando `MOVA_LOGIN_A
 Usuário inicial:
 
 - não existe senha padrão para o administrador em nenhum ambiente;
-- `MOVA_ADMIN_PASSWORD` deve ser configurada explicitamente antes do primeiro bootstrap;
-- sem essa variável, a aplicação continua iniciando, mas o administrador não é criado;
-- em produção, a senha configurada precisa atender validações mínimas.
-- a credencial inicial é transformada em hash diretamente na tabela `users` quando há evidência de banco novo;
+- o bootstrap aprovado é executado somente pela CLI `database_bootstrap`, após
+  migrations e validação estrutural;
+- a senha é fornecida por uma variável temporária cujo nome é informado ao
+  comando, nunca como argumento ou configuração permanente;
+- o bootstrap exige `MOVA_ALLOW_BOOTSTRAP=true` e confirmações explícitas;
+- a credencial inicial é transformada em hash diretamente na tabela `users`
+  quando há evidência de banco novo;
+- o caminho legado de `init_db()` ainda reconhece `MOVA_ADMIN_PASSWORD`, mas
+  essa variável não deve ser configurada no deploy de instalação existente;
 - `app_state` não é fonte de autenticação nem de reconstrução da tabela `users`.
 
 Credenciais:
@@ -269,11 +366,12 @@ Variáveis importantes confirmadas:
 - `APP_ENV`
 - `MOVA_ALLOW_MIGRATIONS`
 - `MOVA_ALLOW_DATA_IMPORT_RESET`
+- `MOVA_ALLOW_BOOTSTRAP`
 - `MOVA_SECRET_KEY`
 - `DATABASE_URL`
-- `MOVA_ADMIN_NAME`
-- `MOVA_ADMIN_LOGIN`
-- `MOVA_ADMIN_PASSWORD`
+- `MOVA_ADMIN_NAME` (compatibilidade legada)
+- `MOVA_ADMIN_LOGIN` (compatibilidade legada)
+- `MOVA_ADMIN_PASSWORD` (compatibilidade legada; não configurar em instalação existente)
 - `MOVA_SESSION_HOURS`
 - `MOVA_LOGIN_ATTEMPTS`
 - `MOVA_LOGIN_WINDOW_SECONDS`
@@ -305,6 +403,9 @@ Fluxo web confirmado:
 4. O JavaScript inicializa eventos, aplica sessão local e consulta `/api/session`.
 5. Após login, o frontend carrega dados pelas APIs modulares:
    - `/api/products`
+   - `/api/stock-entries`
+   - `/api/supplier-returns`
+   - `/api/supplier-credits`
    - `/api/customers`
    - `/api/suppliers`
    - `/api/brands`
@@ -316,7 +417,14 @@ Fluxo web confirmado:
    - `/api/cash-movements`
    - `/api/cash-closings`
    - `/api/returns`
+   - `/api/exchanges`
+   - `/api/warranties`
    - `/api/conditionals`
+   - `/api/catalog/products`
+   - `/api/documents`
+   - `/api/reports/catalog`
+   - `/api/reports/<report_key>`
+   - `/api/reports/<report_key>/export`
 6. O frontend renderiza as telas como uma SPA simples usando seções e abas em `index.html`.
 7. Operações de cadastro, venda, caixa, crediário e contas são enviadas por `fetch` para `/api/*`.
 8. O backend valida sessão, processa a operação, grava no banco e registra auditoria quando aplicável.
@@ -330,6 +438,66 @@ Autenticação e cache:
 - o navegador não é fonte de sessão, perfil, permissão ou credencial;
 - `localStorage` permanece como cache de dados públicos e operacionais, sem senha ou hash;
 - dados locais antigos não são usados para autenticação e não recebem novas credenciais.
+
+## Componentes da Etapa Business 17
+
+### Alertas
+
+- `alert_user_states` armazena somente leitura e fixacao por usuario; o
+  conteudo do alerta e derivado das fontes operacionais atuais;
+- `/api/alerts` oferece consulta, busca, filtros e paginacao;
+- as rotas de leitura, fixacao e leitura em massa atualizam apenas o estado do
+  usuario autenticado;
+- a migration v17 e aditiva e compativel com SQLite e PostgreSQL.
+
+### Score do cliente
+
+- `/api/customers/<id>/score` calcula o indicador no backend;
+- o calculo consulta `receivables`, `receivable_payments`,
+  `receivable_renegotiations`, `sales` e `sale_payments`;
+- nao ha snapshot de score nem efeito automatico sobre limite ou autorizacao
+  de credito.
+
+### Dashboard relacional
+
+- `/api/dashboard` consulta fontes relacionais de Vendas, devolucoes,
+  pagamentos, Caixa, Contas a Pagar, Crediario, estoque e Condicionais;
+- filtros relativos sao resolvidos no fuso `America/Sao_Paulo`;
+- campos financeiros sensiveis sao omitidos no backend para Operador;
+- o frontend mantem um unico observador leve para a virada do dia e limpa o
+  cache ao trocar de sessao.
+
+## Componentes da Etapa Business 18
+
+### Configuracoes da loja
+
+- `store_settings` mantem os dados cadastrais, identidade visual, preferencias
+  documentais, dados informativos de Pix e disponibilidade das formas de
+  pagamento;
+- `/api/settings/store` oferece leitura e alteracao exclusivas para
+  Administrador, com versao otimista e auditoria;
+- `/api/store/operational-settings` entrega somente nome, logo e meios
+  operacionais necessarios ao frontend, sem expor configuracao interna;
+- o upload da logo usa o armazenamento de midia ja suportado pelo sistema e
+  valida tipo, tamanho e versao da configuracao.
+
+### Preferencias e acessos
+
+- `user_preferences` isola o tema visual por loja e usuario;
+- `/api/me/preferences` permite tema claro, escuro ou conforme o sistema;
+- `/api/settings/access-matrix` apresenta a matriz fixa de Administrador e
+  Operador, calculada pelo backend;
+- o frontend nao cria perfis ou permissoes personalizadas.
+
+### Seguranca dos usuarios
+
+- `users.failed_login_attempts`, `users.blocked_at` e `users.last_login_at`
+  preservam o estado de autenticacao;
+- o quinto erro consecutivo bloqueia o usuario de forma persistente;
+- somente Administrador pode desbloquear, criar, editar ou desativar usuarios;
+- desativacao preserva o registro e o ultimo Administrador ativo nao pode ser
+  removido ou rebaixado;
+- a migration v18 e aditiva e compativel com SQLite e PostgreSQL.
 
 ## Arquivos Analisados
 

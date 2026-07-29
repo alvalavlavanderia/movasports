@@ -11,22 +11,32 @@
   <div class="app-layout">
     <aside class="sidebar">
       <div class="brand-block">
-        <img class="brand-logo" src="assets/MOVA%20LOGO.png" alt="Mova Sports">
+        <img id="brandLogo" class="brand-logo" src="assets/MOVA%20LOGO.png" alt="Mova Sports">
       </div>
       <nav class="tabs" aria-label="Módulos">
         <button class="tab-button active" type="button" data-tab="dashboard"><span><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5"></path><path d="M5 10.5V20h14v-9.5"></path><path d="M9 20v-6h6v6"></path></svg></span>Dashboard</button>
         <button class="tab-button" type="button" data-tab="venda"><span><svg viewBox="0 0 24 24"><path d="M6 6h15l-2 8H8L6 3H3"></path><circle cx="9" cy="20" r="1.5"></circle><circle cx="18" cy="20" r="1.5"></circle></svg></span>Vendas</button>
         <button class="tab-button" type="button" data-tab="estoque"><span><svg viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"></path><path d="M4 7.5 12 12l8-4.5"></path><path d="M12 12v9"></path></svg></span>Estoque</button>
+        <button class="tab-button" type="button" data-tab="inventario"><span><svg viewBox="0 0 24 24"><path d="M8 4h8"></path><path d="M9 3h6v3H9z"></path><path d="M6 5h12v16H6z"></path><path d="m9 12 2 2 4-5"></path><path d="M9 17h6"></path></svg></span>Inventário</button>
         <button class="tab-button" type="button" data-tab="catalogo"><span><svg viewBox="0 0 24 24"><path d="M20 13 13 20 4 11V4h7l9 9Z"></path><circle cx="8" cy="8" r="1.5"></circle></svg></span>Catálogo</button>
         <button class="tab-button" type="button" data-tab="crediario"><span><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"></rect><circle cx="12" cy="9" r="3"></circle><path d="M7.5 18c.9-2.4 2.4-3.5 4.5-3.5s3.6 1.1 4.5 3.5"></path></svg></span>Crediário</button>
         <button class="tab-button" type="button" data-tab="caixa"><span><svg viewBox="0 0 24 24"><path d="M7 5h10l2 3v12H5V8l2-3Z"></path><path d="M8 8h8"></path><path d="M12 11v6"></path><path d="M14.5 12.5c-.4-.8-1.2-1.2-2.3-1.2-1.2 0-2 .6-2 1.5s.7 1.3 2.1 1.6c1.5.3 2.3.7 2.3 1.7 0 .9-.8 1.6-2.2 1.6-1.2 0-2.1-.4-2.6-1.2"></path></svg></span>Caixa</button>
+        <button class="tab-button" type="button" data-tab="cartoes"><span><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M3 10h18"></path><path d="M7 15h4"></path></svg></span>Cartões</button>
         <button class="tab-button" type="button" data-tab="contas"><span><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6V3Z"></path><path d="M15 3v5h4"></path><path d="M12 10v7"></path><path d="M14.5 11.5c-.4-.8-1.2-1.2-2.3-1.2-1.2 0-2 .6-2 1.5s.7 1.3 2.1 1.6c1.5.3 2.3.7 2.3 1.7 0 .9-.8 1.6-2.2 1.6-1.2 0-2.1-.4-2.6-1.2"></path></svg></span>Contas a pagar</button>
+        <button class="tab-button" type="button" data-tab="relatorios"><span><svg viewBox="0 0 24 24"><path d="M4 20V10"></path><path d="M10 20V4"></path><path d="M16 20v-7"></path><path d="M22 20H2"></path></svg></span>Relatórios</button>
         <button class="tab-button" type="button" data-tab="cadastros"><span><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><path d="M3 20c1-3.5 3-5.2 6-5.2s5 1.7 6 5.2"></path><circle cx="17" cy="9" r="2.5"></circle><path d="M16 14.7c2.6.2 4.2 1.9 5 5.3"></path></svg></span>Cadastros</button>
         <button class="tab-button admin-only" type="button" data-tab="configuracoes"><span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2 3.4-.2-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V22h-4v-.3a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.2.1-2-3.4.1-.1A1.7 1.7 0 0 0 6 15a1.7 1.7 0 0 0-1.5-1H4v-4h.5A1.7 1.7 0 0 0 6 9a1.7 1.7 0 0 0-.3-1.9l-.1-.1 2-3.4.2.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V2h4v.3a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.2-.1 2 3.4-.1.1A1.7 1.7 0 0 0 18 9a1.7 1.7 0 0 0 1.5 1h.5v4h-.5A1.7 1.7 0 0 0 18 15Z"></path></svg></span>Configurações</button>
       </nav>
       <div class="sidebar-user">
         <div class="sidebar-user-row"><span class="sidebar-info-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M4 21c1.4-4 4-6 8-6s6.6 2 8 6"></path></svg></span><div><span>Usuário</span><strong id="currentUserLabel"></strong></div></div>
         <div class="sidebar-user-row"><span class="sidebar-info-icon"><svg viewBox="0 0 24 24"><path d="M12 3 20 6v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6l8-3Z"></path><path d="m8.5 12 2.2 2.2 4.8-5"></path></svg></span><div><span>Perfil</span><strong id="currentUserRole">Administrador</strong></div></div>
+        <label class="sidebar-theme">Aparência
+          <select id="userThemeSelect">
+            <option value="system">Sistema</option>
+            <option value="light">Claro</option>
+            <option value="dark">Escuro</option>
+          </select>
+        </label>
         <button id="logoutButton" class="logout-link" type="button"><span><svg viewBox="0 0 24 24"><path d="M14 8V5a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-3"></path><path d="M10 12h10"></path><path d="m17 9 3 3-3 3"></path></svg></span>Sair do sistema</button>
       </div>
     </aside>
@@ -36,34 +46,56 @@
     <section id="dashboard" class="tab-panel active">
       <section class="dashboard-shell">
         <div class="dashboard-head">
-          <div>
-            <h2>Mova Sports | Dashboard</h2>
+          <h2>Mova Sports | Dashboard</h2>
+          <div class="dashboard-head-actions">
+            <button id="alertBellButton" class="alert-bell-button" type="button" aria-label="Abrir central de alertas" title="Alertas">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
+              <span id="alertBellCount" hidden>0</span>
+            </button>
+            <span id="topDateLabel" class="date-chip"></span>
           </div>
-          <span id="topDateLabel" class="date-chip"></span>
         </div>
-        <div class="metric-grid dashboard-cards">
-          <div class="metric kpi green"><span>Vendas hoje</span><strong id="dashTodaySales">R$ 0,00</strong><small>Atualizado agora</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 13H7L6 7Z"></path><path d="M9 7a3 3 0 0 1 6 0"></path><path d="M10 13h4"></path></svg></i></div>
-          <div class="metric kpi blue"><span>Vendas no mês</span><strong id="dashMonthSales">R$ 0,00</strong><small>Período atual</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18V6"></path><path d="M4 18h16"></path><path d="m7 15 4-4 3 3 5-7"></path></svg></i></div>
-          <div class="metric kpi purple manager-only"><span>Lucro do mês</span><strong id="dashMonthProfit">R$ 0,00</strong><small>Estimado</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18"></path><path d="M17 7.5c-.8-1-2.2-1.5-4-1.5-2.3 0-4 1.1-4 2.8 0 4 8 1.8 8 6 0 1.8-1.7 3.2-4.4 3.2-2 0-3.7-.7-4.6-2"></path></svg></i></div>
-          <div class="metric kpi orange manager-only"><span>Valor do estoque</span><strong id="dashStockValue">R$ 0,00</strong><small>Custo cadastrado</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8 12 4l8 4-8 4-8-4Z"></path><path d="M4 8v8l8 4 8-4V8"></path><path d="M12 12v8"></path></svg></i></div>
-          <div class="metric kpi pink"><span>Crediário em aberto</span><strong id="dashCreditOpen">R$ 0,00</strong><small>Clientes com saldo</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"></rect><path d="M3 10h18"></path><path d="M7 15h4"></path></svg></i></div>
+        <div id="dashboardStatus" class="dashboard-status" role="status" aria-live="polite" hidden></div>
+        <div id="dashboardCards" class="metric-grid dashboard-cards">
+          <div class="metric kpi green dashboard-action-card" role="button" tabindex="0" data-dashboard-action="sales-today"><span>Vendas hoje</span><strong id="dashTodaySales">0</strong><small>Operações concluídas</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 7h12l-1 13H7L6 7Z"></path><path d="M9 7a3 3 0 0 1 6 0"></path></svg></i></div>
+          <div class="metric kpi blue dashboard-admin-card dashboard-action-card" role="button" tabindex="0" data-dashboard-action="sales-today"><span>Faturamento hoje</span><strong id="dashMonthSales">R$ 0,00</strong><small>Resultado líquido</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18V6"></path><path d="M4 18h16"></path><path d="m7 15 4-4 3 3 5-7"></path></svg></i></div>
+          <div class="metric kpi purple dashboard-admin-card"><span>Lucro do mês</span><strong id="dashMonthProfit">R$ 0,00</strong><small>Resultado líquido</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v18"></path><path d="M17 7.5c-.8-1-2.2-1.5-4-1.5-2.3 0-4 1.1-4 2.8 0 4 8 1.8 8 6 0 1.8-1.7 3.2-4.4 3.2-2 0-3.7-.7-4.6-2"></path></svg></i></div>
+          <div class="metric kpi orange dashboard-admin-card dashboard-action-card" role="button" tabindex="0" data-dashboard-action="stock"><span>Valor do estoque</span><strong id="dashStockValue">R$ 0,00</strong><small>Estoque disponível a custo</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8 12 4l8 4-8 4-8-4Z"></path><path d="M4 8v8l8 4 8-4V8"></path><path d="M12 12v8"></path></svg></i></div>
+          <div class="metric kpi pink dashboard-admin-card dashboard-action-card" role="button" tabindex="0" data-dashboard-action="credit"><span>Crediário em aberto</span><strong id="dashCreditOpen">R$ 0,00</strong><small id="dashCreditOpenCount">0 parcelas</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"></rect><path d="M3 10h18"></path></svg></i></div>
+          <div class="metric kpi blue dashboard-operator-card" hidden><span>Clientes atendidos</span><strong id="dashCustomersAttended">0</strong><small>Hoje</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><path d="M3 20c1-3.5 3-5 6-5s5 1.5 6 5"></path><path d="M16 7h5M18.5 4.5v5"></path></svg></i></div>
+          <div class="metric kpi orange dashboard-operator-card dashboard-action-card" role="button" tabindex="0" data-dashboard-action="conditionals" hidden><span>Condicionais atrasados</span><strong id="dashConditionalsOverdue">0</strong><small>Exigem retorno</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3h10v18H7z"></path><path d="M9 8h6M9 12h6"></path><path d="M12 16v2"></path></svg></i></div>
+          <div class="metric kpi pink dashboard-operator-card dashboard-action-card" role="button" tabindex="0" data-dashboard-action="alerts" hidden><span>Alertas ativos</span><strong id="dashAlertsActive">0</strong><small id="dashAlertsUnread">0 não lidos</small><i class="kpi-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg></i></div>
+        </div>
+        <div class="dashboard-period-toolbar">
+          <label>Período
+            <select id="dashSalesRange" class="mini-select">
+              <option value="today">Hoje</option>
+              <option value="7days">Últimos 7 dias</option>
+              <option value="30days" selected>Últimos 30 dias</option>
+              <option value="month">Mês atual</option>
+              <option value="custom">Personalizado</option>
+            </select>
+          </label>
+          <label id="dashCustomStartField" hidden>Início<input id="dashCustomStart" type="date"></label>
+          <label id="dashCustomEndField" hidden>Fim<input id="dashCustomEnd" type="date"></label>
+          <button id="dashRefreshButton" class="ghost" type="button">Atualizar</button>
         </div>
         <div class="dashboard-grid">
           <section class="dashboard-card chart-card span-2">
-            <div class="section-title tight"><h2>Vendas por dia</h2><select id="dashSalesRange" class="mini-select"><option value="30" selected>Últimos 30 dias</option><option value="7">Últimos 7 dias</option><option value="90">Últimos 90 dias</option></select></div>
+            <div class="section-title tight"><h2>Vendas por dia</h2></div>
             <div id="salesChart" class="line-chart"></div>
           </section>
           <section class="dashboard-card payment-card span-2">
             <div id="paymentSummary" class="payment-summary"></div>
           </section>
         </div>
-        <section class="cash-summary-card">
+        <section id="dashboardFinanceSummary" class="cash-summary-card">
           <div class="cash-summary-grid">
-            <article class="blue"><i><svg viewBox="0 0 24 24"><path d="M5 7h14v12H5z"></path><path d="M8 7V5h8v2"></path><path d="M8 13h8"></path></svg></i><span>Saldo em caixa</span><strong id="dashCashBalance">R$ 0,00</strong><small>Disponível agora</small><em>Igual ao último fechamento</em></article>
-            <article class="green"><i><svg viewBox="0 0 24 24"><path d="M12 4v16"></path><path d="m6 14 6 6 6-6"></path></svg></i><span>Entradas hoje</span><strong id="dashCashIn">R$ 0,00</strong><small>Total recebido</small><em>Atualizado hoje</em></article>
-            <article class="pink"><i><svg viewBox="0 0 24 24"><path d="M12 20V4"></path><path d="m6 10 6-6 6 6"></path></svg></i><span>Saídas hoje</span><strong id="dashCashOut">R$ 0,00</strong><small>Total pago</small><em>Atualizado hoje</em></article>
-            <article class="purple"><i><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2"></rect><path d="M4 10h16"></path></svg></i><span>Contas a pagar</span><strong id="dashPayablesOpen">R$ 0,00</strong><small>Total pendente</small><em id="dashPayablesCount">0 contas em aberto</em></article>
-            <article class="orange"><i><svg viewBox="0 0 24 24"><path d="M6 8c0-2 12-2 12 0s-12 2-12 0Z"></path><path d="M6 8v8c0 2 12 2 12 0V8"></path><path d="M6 12c0 2 12 2 12 0"></path></svg></i><span>A receber (crediário)</span><strong id="dashReceivableOpen">R$ 0,00</strong><small>Total a receber</small><em id="dashReceivableCount">0 parcelas em aberto</em></article>
+            <article class="blue dashboard-action-card" role="button" tabindex="0" data-dashboard-action="cash"><i><svg viewBox="0 0 24 24"><path d="M5 7h14v12H5z"></path><path d="M8 7V5h8v2"></path><path d="M8 13h8"></path></svg></i><span>Saldo em caixa</span><strong id="dashCashBalance">R$ 0,00</strong><small>Disponível agora</small></article>
+            <article class="green dashboard-action-card" role="button" tabindex="0" data-dashboard-action="cash"><i><svg viewBox="0 0 24 24"><path d="M12 4v16"></path><path d="m6 14 6 6 6-6"></path></svg></i><span>Entradas hoje</span><strong id="dashCashIn">R$ 0,00</strong><small>Total recebido</small><em>Atualizado hoje</em></article>
+            <article class="pink dashboard-action-card" role="button" tabindex="0" data-dashboard-action="cash"><i><svg viewBox="0 0 24 24"><path d="M12 20V4"></path><path d="m6 10 6-6 6 6"></path></svg></i><span>Saídas hoje</span><strong id="dashCashOut">R$ 0,00</strong><small>Total pago</small><em>Atualizado hoje</em></article>
+            <article class="purple dashboard-action-card" role="button" tabindex="0" data-dashboard-action="payables"><i><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="2"></rect><path d="M4 10h16"></path></svg></i><span>Contas a pagar</span><strong id="dashPayablesOpen">R$ 0,00</strong><small>Total pendente</small><em id="dashPayablesCount">0 contas em aberto</em></article>
+            <article class="orange dashboard-action-card" role="button" tabindex="0" data-dashboard-action="cards"><i><svg viewBox="0 0 24 24"><path d="M6 8c0-2 12-2 12 0s-12 2-12 0Z"></path><path d="M6 8v8c0 2 12 2 12 0V8"></path><path d="M6 12c0 2 12 2 12 0"></path></svg></i><span>Cartões a receber</span><strong id="dashReceivableOpen">R$ 0,00</strong><small>Total pendente</small><em id="dashReceivableCount">0 recebíveis em aberto</em></article>
           </div>
         </section>
         <div class="dashboard-grid dashboard-bottom-grid">
@@ -89,6 +121,7 @@
           <button id="backCadastroButton" class="ghost icon-back" type="button" title="Voltar para cadastros" aria-label="Voltar para cadastros">←</button>
           <button id="exportProductsButton" class="ghost product-only-action" type="button">Exportar</button>
           <button id="exportCustomersButton" class="ghost customer-only-action" type="button">Exportar</button>
+          <button id="newCustomerButton" class="primary customer-only-action" type="button">Novo cliente</button>
         </div>
       </div>
       <section id="cad-home" class="subtab-panel active">
@@ -103,6 +136,10 @@
             <button class="cadastro-card blue" type="button" data-subtab="cad-fornecedor"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 6h11v10H3z"></path><path d="M14 10h4l3 3v3h-7z"></path><circle cx="7" cy="18" r="2"></circle><circle cx="18" cy="18" r="2"></circle></svg></span><strong>Fornecedor</strong><p>Cadastre fornecedores, dados fiscais, contatos e formas de pagamento.</p><em id="supplierCardCount">0 fornecedores</em><b>→</b></button>
             <button class="cadastro-card orange" type="button" data-subtab="cad-marca"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 13 13 20 4 11V4h7l9 9Z"></path><circle cx="8" cy="8" r="1.5"></circle></svg></span><strong>Marca</strong><p>Cadastre as marcas dos produtos comercializados na sua loja.</p><em id="brandCardCount">0 marcas cadastradas</em><b>→</b></button>
             <button class="cadastro-card green" type="button" data-subtab="cad-categoria"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"></rect><rect x="14" y="4" width="6" height="6" rx="1"></rect><rect x="4" y="14" width="6" height="6" rx="1"></rect><rect x="14" y="14" width="6" height="6" rx="1"></rect></svg></span><strong>Categoria</strong><p>Organize seus produtos em categorias, linhas e grupos.</p><em id="categoryCardCount">0 categorias cadastradas</em><b>→</b></button>
+            <button class="cadastro-card purple" type="button" data-subtab="cad-tamanho"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8h16"></path><path d="M6 5v6"></path><path d="M10 6v4"></path><path d="M14 6v4"></path><path d="M18 5v6"></path><path d="M4 16h16"></path></svg></span><strong>Tamanho</strong><p>Padronize as variações de tamanho utilizadas nos produtos.</p><em id="sizeCardCount">0 tamanhos cadastrados</em><b>→</b></button>
+            <button class="cadastro-card pink" type="button" data-subtab="cad-cor"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3c4 4 7 7 7 11a7 7 0 0 1-14 0c0-4 3-7 7-11Z"></path></svg></span><strong>Cor</strong><p>Padronize as cores disponíveis para cadastro de produtos.</p><em id="colorCardCount">0 cores cadastradas</em><b>→</b></button>
+            <button class="cadastro-card orange" type="button" data-subtab="cad-despesa"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5z"></path><path d="M8 8h8"></path><path d="M8 12h8"></path><path d="M8 16h4"></path></svg></span><strong>Categoria de despesa</strong><p>Organize despesas do caixa e contas a pagar em uma lista única.</p><em id="expenseCategoryCardCount">0 categorias cadastradas</em><b>→</b></button>
+            <button class="cadastro-card blue admin-only" type="button" data-subtab="cad-modalidade"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path></svg></span><strong>Modalidades de Cartão</strong><p>Gerencie taxas, prazos e vigências de débito e crédito.</p><em id="cardModalityCardCount">0 modalidades</em><b>→</b></button>
             <button class="cadastro-card teal admin-only" type="button" data-subtab="cad-usuario"><span class="card-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><path d="M3 19c1-3.4 3-5 6-5s5 1.6 6 5"></path><path d="M16 6a3 3 0 0 1 0 6"></path><path d="M18 14c1.8.7 3 2.3 3 5"></path></svg></span><strong>Usuários</strong><p>Gerencie usuários, acessos, senhas e permissões do sistema.</p><em id="userCardCount">0 usuários cadastrados</em><b>→</b></button>
           </div>
         </section>
@@ -112,27 +149,50 @@
         <div class="product-register-layout">
           <section class="panel product-form-card">
             <div class="section-title">
-              <h2>Informações do Produto</h2>
+              <div>
+                <h2>Produtos e Entradas</h2>
+                <p id="productLookupStatus" class="product-lookup-status">Informe ou leia o código para começar.</p>
+              </div>
               <label class="switch-field">Produto ativo<input id="productActive" type="checkbox" checked><span></span></label>
             </div>
             <form id="productForm" class="product-form-grid">
               <input id="editingProductId" type="hidden">
-              <label class="field">Código de barras *<input id="productBarcode" type="text" required></label>
-              <label class="field span-2">Nome do produto *<input id="productName" type="text" required></label>
-              <label class="field">Categoria *<input id="productCategory" list="categoryOptions" placeholder="Selecione..."></label>
-              <label class="field">Marca *<input id="productBrand" list="brandOptions" placeholder="Selecione..."></label>
-              <label class="field">Gênero<select id="productGender"><option>Feminino</option><option>Masculino</option><option>Unissex</option></select></label>
-              <label class="field">Tamanho<input id="productSize" type="text" placeholder="Selecione..."></label>
-              <label class="field">Cor<input id="productColor" type="text" placeholder="Selecione..."></label>
+              <div class="field span-3">
+                <span>Código do produto *</span>
+                <div class="field-with-action product-code-action">
+                  <input id="productBarcode" type="text" autocomplete="off" required placeholder="Digite ou leia o código">
+                  <button id="productLookupButton" class="ghost" type="button">Consultar</button>
+                </div>
+              </div>
+              <label class="field span-3">Nome do produto *<input id="productName" type="text" required></label>
+              <div class="field"><span>Categoria *</span><div class="field-with-action"><input id="productCategory" list="categoryOptions" placeholder="Selecione..."><button id="newProductCategoryButton" class="icon-button" type="button" title="Nova categoria" aria-label="Nova categoria">+</button></div></div>
+              <div class="field"><span>Marca *</span><div class="field-with-action"><input id="productBrand" list="brandOptions" placeholder="Selecione..."><button id="newProductBrandButton" class="icon-button" type="button" title="Nova marca" aria-label="Nova marca">+</button></div></div>
+              <label class="field">Gênero<select id="productGender"><option>Feminino</option><option>Masculino</option><option>Unissex</option><option>Infantil</option></select></label>
+              <div class="field"><span>Tamanho</span><div class="field-with-action"><input id="productSize" list="sizeOptions" placeholder="Selecione..."><button id="newProductSizeButton" class="icon-button" type="button" title="Novo tamanho" aria-label="Novo tamanho">+</button></div></div>
+              <div class="field"><span>Cor</span><div class="field-with-action"><input id="productColor" list="colorOptions" placeholder="Selecione..."><button id="newProductColorButton" class="icon-button" type="button" title="Nova cor" aria-label="Nova cor">+</button></div></div>
+              <div class="field span-3">
+                <span>Fornecedor *</span>
+                <div class="field-with-action">
+                  <input id="productSupplier" list="supplierOptions" placeholder="Selecione um fornecedor ativo...">
+                  <button id="newProductSupplierButton" class="icon-button" type="button" title="Novo fornecedor" aria-label="Novo fornecedor">+</button>
+                </div>
+              </div>
               <label class="field manager-only">Preço de custo<input id="productCost" type="number" min="0" step="0.01" value="0"></label>
               <label class="field">Preço de venda<input id="productPrice" type="number" min="0" step="0.01" value="0"></label>
               <label class="field manager-only">Margem %<input id="productMargin" type="number" step="0.01" value="0"></label>
-              <label class="field">Estoque atual<input id="productStock" type="number" min="0" step="1" value="0"></label>
               <label class="field">Estoque mínimo<input id="productMinStock" type="number" min="0" step="1" value="0"></label>
+              <div class="product-stock-summary span-3" aria-label="Posição atual do estoque">
+                <div><span>Estoque real</span><strong id="productRealStock">0</strong></div>
+                <div><span>Reservado</span><strong id="productReservedStock">0</strong></div>
+                <div><span>Disponível</span><strong id="productAvailableStock">0</strong></div>
+              </div>
+              <label class="field">Quantidade da entrada *<input id="productEntryQuantity" type="number" min="1" step="1" value="1" required></label>
+              <label class="field">Estoque após a entrada<input id="productStockAfter" type="number" value="1" readonly></label>
               <label class="field span-3">Descrição<textarea id="productDescription" placeholder="Digite uma descrição para o produto..."></textarea></label>
               <label class="field span-3 upload-box">Foto do produto<input id="productPhoto" type="file" accept="image/*"><span>Arraste uma imagem ou clique para selecionar<br><small>PNG, JPG ou WEBP até 5MB</small></span></label>
               <button id="clearProductButton" class="ghost span-1" type="button">Limpar campos</button>
-              <button class="primary span-2" type="submit">Salvar Produto</button>
+              <button id="saveProductChangesButton" class="ghost span-1" type="button" hidden>Salvar alterações</button>
+              <button id="confirmProductEntryButton" class="primary span-1" type="submit">Cadastrar e dar entrada</button>
             </form>
           </section>
           <section class="panel product-list-card">
@@ -147,28 +207,44 @@
                 <tbody id="productList"></tbody>
               </table>
             </div>
+            <section class="product-entry-history">
+              <div class="section-title">
+                <h3>Histórico de entradas</h3>
+                <small id="productEntryHistoryCaption">Últimas entradas confirmadas</small>
+              </div>
+              <div id="productEntryHistory" class="product-entry-history-list"></div>
+            </section>
           </section>
         </div>
       </section>
 
       <section id="cad-cliente" class="subtab-panel">
+        <div class="customer-kpis" aria-label="Resumo dos clientes">
+          <article><span>Clientes ativos</span><strong id="customerTotalKpi">0</strong></article>
+          <article><span>Com crediário em aberto</span><strong id="customerOpenKpi">0</strong></article>
+          <article><span>Com parcelas atrasadas</span><strong id="customerOverdueKpi">0</strong></article>
+          <article><span>Total a receber</span><strong id="customerReceivableKpi">R$ 0,00</strong></article>
+        </div>
         <div class="customer-register-layout">
           <section class="panel customer-form-card">
             <div class="section-title"><h2>Informações do Cliente</h2></div>
             <form id="customerForm" class="customer-form-grid">
               <input id="editingCustomerId" type="hidden">
               <label class="field">Código<input id="customerCode" type="text" disabled></label>
-              <label class="field span-2">Nome<input id="customerName" type="text" required></label>
+              <label class="field span-2">Nome completo *<input id="customerName" type="text" required></label>
               <label class="field">CPF<input id="customerCpf" type="text"></label>
               <label class="field">RG<input id="customerRg" type="text"></label>
               <label class="field">Nascimento<input id="customerBirth" type="date"></label>
-              <label class="field">WhatsApp<input id="customerWhatsapp" type="tel"></label>
+              <label class="field">Telefone / WhatsApp *<input id="customerWhatsapp" type="tel" required></label>
               <label class="field">E-mail<input id="customerEmail" type="email"></label>
               <label class="field span-2">Endereço<input id="customerAddress" type="text"></label>
+              <label class="field">Número<input id="customerAddressNumber" type="text"></label>
               <label class="field">Cidade<input id="customerCity" type="text"></label>
               <label class="field">Bairro<input id="customerDistrict" type="text"></label>
+              <label class="field">Estado<input id="customerState" type="text" maxlength="2" placeholder="UF"></label>
               <label class="field">CEP<input id="customerZip" type="text"></label>
-              <label class="field">Limite de crédito<input id="customerLimit" type="number" min="0" step="0.01" value="0"></label>
+              <label class="field">Limite de crédito *<input id="customerLimit" type="number" min="0.01" step="0.01" required></label>
+              <label class="field span-3">Observações<textarea id="customerNotes" rows="3" placeholder="Informações relevantes sobre o cliente"></textarea></label>
               <button id="clearCustomerButton" class="ghost span-1" type="button">Limpar campos</button>
               <button class="primary span-2" type="submit">Salvar Cliente</button>
             </form>
@@ -176,11 +252,18 @@
           <section class="panel customer-list-card">
             <div class="section-title"><h2>Clientes Cadastrados</h2></div>
             <div class="customer-list-toolbar">
-              <input id="customerListSearch" type="search" placeholder="Buscar cliente por nome...">
+              <input id="customerListSearch" type="search" placeholder="Buscar por nome, CPF ou telefone...">
+              <select id="customerStatusFilter">
+                <option value="operational">Ativos e bloqueados</option>
+                <option value="active">Ativos</option>
+                <option value="blocked">Bloqueados</option>
+                <option value="deactivated">Desativados</option>
+                <option value="all">Todos</option>
+              </select>
             </div>
             <div class="customer-table-wrap">
               <table class="customer-table">
-                <thead><tr><th>Cliente</th><th>Contato</th><th>Limite</th><th>Saldo</th><th>Ações</th></tr></thead>
+                <thead><tr><th>Cliente</th><th>CPF</th><th>Telefone</th><th>Limite</th><th>Saldo</th><th>Situação</th><th>Ação</th></tr></thead>
                 <tbody id="customerList"></tbody>
               </table>
             </div>
@@ -189,16 +272,30 @@
       </section>
 
       <section id="cad-fornecedor" class="subtab-panel">
+        <div class="supplier-kpis" aria-label="Resumo dos fornecedores">
+          <article><span>Fornecedores ativos</span><strong id="supplierActiveKpi">0</strong></article>
+          <article><span>Saldo em aberto</span><strong id="supplierOpenKpi">R$ 0,00</strong></article>
+          <article><span>Saldo vencido</span><strong id="supplierOverdueKpi">R$ 0,00</strong></article>
+          <article><span>Créditos disponíveis</span><strong id="supplierCreditKpi">R$ 0,00</strong></article>
+        </div>
         <div class="cadastro-register-layout">
           <section class="panel cadastro-form-card">
             <div class="section-title"><h2>Informações do Fornecedor</h2></div>
             <form id="supplierForm" class="cadastro-form-grid">
               <input id="editingSupplierId" type="hidden">
-              <label class="field span-2">Nome<input id="supplierName" type="text" required></label>
-              <label class="field">CNPJ<input id="supplierCnpj" type="text" required></label>
-              <label class="field">WhatsApp<input id="supplierPhone" type="tel"></label>
+              <label class="field span-2">Razão social / Nome *<input id="supplierName" type="text" required></label>
+              <label class="field">Nome fantasia<input id="supplierTradeName" type="text"></label>
+              <label class="field">CPF / CNPJ<input id="supplierCnpj" type="text"></label>
+              <label class="field">Telefone<input id="supplierPhone" type="tel"></label>
+              <label class="field">WhatsApp<input id="supplierWhatsapp" type="tel"></label>
               <label class="field">E-mail<input id="supplierEmail" type="email"></label>
-              <label class="field span-3">Endereço<input id="supplierAddress" type="text"></label>
+              <label class="field">CEP<input id="supplierZip" type="text"></label>
+              <label class="field span-2">Endereço<input id="supplierAddress" type="text"></label>
+              <label class="field">Número<input id="supplierAddressNumber" type="text"></label>
+              <label class="field">Bairro<input id="supplierDistrict" type="text"></label>
+              <label class="field">Cidade<input id="supplierCity" type="text"></label>
+              <label class="field">Estado<input id="supplierState" type="text" maxlength="2" placeholder="UF"></label>
+              <label class="field span-3">Observações<textarea id="supplierNotes" rows="3"></textarea></label>
               <button class="primary span-3" type="submit">Salvar Fornecedor</button>
             </form>
           </section>
@@ -206,13 +303,59 @@
             <div class="section-title"><h2>Fornecedores Cadastrados</h2></div>
             <div class="cadastro-list-toolbar">
               <input id="supplierListSearch" type="search" placeholder="Buscar fornecedor...">
+              <select id="supplierStatusFilter"><option value="all">Todos</option><option value="active">Ativos</option><option value="deactivated">Desativados</option></select>
+              <select id="supplierFinancialFilter"><option value="all">Todos os vínculos</option><option value="open">Com contas em aberto</option><option value="overdue">Com contas vencidas</option><option value="credit">Com crédito disponível</option></select>
             </div>
             <div class="cadastro-table-wrap">
               <table class="cadastro-table">
-                <thead><tr><th>Fornecedor</th><th>CNPJ</th><th>Contato</th><th>Ações</th></tr></thead>
+                <thead><tr><th>Fornecedor</th><th>CPF / CNPJ</th><th>Contato</th><th>Em aberto</th><th>Vencido</th><th>Crédito</th><th>Situação</th><th>Ação</th></tr></thead>
                 <tbody id="supplierList"></tbody>
               </table>
             </div>
+          </section>
+        </div>
+      </section>
+      <section id="cad-tamanho" class="subtab-panel auxiliary-catalog-panel" data-catalog-kind="sizes"></section>
+      <section id="cad-cor" class="subtab-panel auxiliary-catalog-panel" data-catalog-kind="colors"></section>
+      <section id="cad-despesa" class="subtab-panel auxiliary-catalog-panel" data-catalog-kind="expenseCategories"></section>
+      <section id="cad-modalidade" class="subtab-panel admin-only">
+        <div class="cadastro-register-layout">
+          <section class="panel cadastro-form-card">
+            <div class="section-title"><h2>Configuração da Modalidade</h2></div>
+            <form id="cardModalityForm" class="cadastro-form-grid">
+              <input id="editingCardModalityId" type="hidden">
+              <label class="field">Tipo<select id="cardModalityType"><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+              <label class="field">Parcelas<input id="cardModalityInstallments" type="number" min="1" max="10" step="1" value="1"></label>
+              <label class="field">Taxa %<input id="cardModalityTaxPercent" type="number" min="0" step="0.01" value="0"></label>
+              <label class="field">Prazo de recebimento (dias)<input id="cardModalityReceivableDays" type="number" min="0" step="1" value="1"></label>
+              <label class="field">Início da vigência<input id="cardModalityValidFrom" type="datetime-local"></label>
+              <label class="field">Fim da vigência<input id="cardModalityValidUntil" type="datetime-local"></label>
+              <label class="field span-2 switch-field">Modalidade ativa<input id="cardModalityStatus" type="checkbox" checked><span></span></label>
+              <p id="cardModalityFormError" class="form-error span-3" hidden></p>
+              <button id="clearCardModalityButton" class="ghost" type="button">Limpar campos</button>
+              <button class="primary span-2" type="submit">Salvar Modalidade</button>
+            </form>
+          </section>
+          <section class="panel cadastro-list-card">
+            <div class="section-title"><h2>Modalidades Cadastradas</h2></div>
+            <div class="cadastro-list-toolbar">
+              <input id="cardModalitySearch" type="search" placeholder="Buscar modalidade...">
+            </div>
+            <div class="cadastro-table-wrap">
+              <table class="cadastro-table">
+                <thead><tr><th>Modalidade</th><th>Parcelas</th><th>Taxa</th><th>Prazo</th><th>Vigência</th><th>Situação</th><th>Ações</th></tr></thead>
+                <tbody id="cardModalityList"></tbody>
+              </table>
+            </div>
+            <section id="cardModalityHistoryPanel" class="card-modality-history" hidden>
+              <div class="section-title"><h3>Histórico de Vigência</h3></div>
+              <div class="cadastro-table-wrap">
+                <table class="cadastro-table">
+                  <thead><tr><th>Modalidade</th><th>Taxa</th><th>Prazo</th><th>Início</th><th>Fim</th><th>Situação</th></tr></thead>
+                  <tbody id="cardModalityHistoryList"></tbody>
+                </table>
+              </div>
+            </section>
           </section>
         </div>
       </section>
@@ -307,10 +450,15 @@
         <div class="catalog-toolbar">
           <label class="search-field catalog-search">
             <span>Busca</span>
-            <input id="catalogSearch" type="search" placeholder="Buscar por nome, código ou categoria...">
+            <input id="catalogSearch" type="search" placeholder="Buscar por nome, marca, categoria, cor ou tamanho...">
           </label>
           <label class="field">Categoria<select id="catalogCategoryFilter"><option value="all">Todas</option></select></label>
           <label class="field">Marca<select id="catalogBrandFilter"><option value="all">Todas</option></select></label>
+          <label class="field">Tamanho<select id="catalogSizeFilter"><option value="all">Todos</option></select></label>
+          <label class="field">Cor<select id="catalogColorFilter"><option value="all">Todas</option></select></label>
+          <label class="field">Preço mínimo<input id="catalogMinPrice" type="number" min="0" step="0.01" placeholder="0,00"></label>
+          <label class="field">Preço máximo<input id="catalogMaxPrice" type="number" min="0" step="0.01" placeholder="Sem limite"></label>
+          <label class="field">Ordenar<select id="catalogOrder"><option value="name">Nome</option><option value="price_asc">Menor preço</option><option value="price_desc">Maior preço</option></select></label>
           <button id="catalogClearFiltersButton" class="ghost" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"></path><path d="M20 4v6h-6"></path></svg></span>Limpar filtros</button>
         </div>
         <div class="catalog-result-head">
@@ -321,6 +469,13 @@
           </div>
         </div>
         <div id="catalogList" class="catalog-grid empty">Nenhum produto cadastrado.</div>
+      </section>
+      <section class="panel catalog-documents-panel">
+        <div class="section-title">
+          <div><h2>Documentos gerados</h2><p>Emissões oficiais e segundas vias registradas pelo sistema.</p></div>
+          <button id="catalogDocumentsRefreshButton" class="ghost" type="button">Atualizar</button>
+        </div>
+        <div id="catalogDocumentsList" class="catalog-documents-list empty">Nenhum documento gerado.</div>
       </section>
     </section>
 
@@ -345,7 +500,7 @@
         <div class="stock-filter-grid">
           <label class="field">Categoria<select id="stockCategoryFilter"><option value="all">Todas</option></select></label>
           <label class="field">Marca<select id="stockBrandFilter"><option value="all">Todas</option></select></label>
-          <label class="field">Status<select id="stockStatusFilter"><option value="all">Todos</option><option value="ok">Em estoque</option><option value="low">Estoque baixo</option><option value="empty">Sem estoque</option></select></label>
+          <label class="field">Status<select id="stockStatusFilter"><option value="all">Todos</option><option value="ok">Em estoque</option><option value="low">Estoque baixo</option></select></label>
         </div>
       </section>
       <section class="panel stock-table-panel">
@@ -359,7 +514,9 @@
                 <th>Marca</th>
                 <th>Tamanho</th>
                 <th>Cor</th>
-                <th>Estoque</th>
+                <th>Real</th>
+                <th>Reservado</th>
+                <th>Disponível</th>
                 <th>Preço custo</th>
                 <th>Preço venda</th>
                 <th>Ações</th>
@@ -369,6 +526,141 @@
           </table>
         </div>
         <div id="stockFooter" class="stock-footer"></div>
+      </section>
+      <section class="panel inventory-history-panel">
+        <div class="section-title inventory-history-head">
+          <div>
+            <h3>Histórico de movimentações</h3>
+            <p id="inventoryHistoryCaption">Todas as movimentações de estoque</p>
+          </div>
+          <button id="inventoryHistoryClear" class="ghost" type="button">Mostrar todas</button>
+        </div>
+        <div id="inventoryHistoryList" class="inventory-history-list"></div>
+      </section>
+    </section>
+
+    <section id="inventario" class="tab-panel">
+      <div class="page-head">
+        <div><h2>Mova Sports | Inventário</h2></div>
+        <div class="page-actions">
+          <button id="newInventoryButton" class="primary" type="button"><span aria-hidden="true">+</span>Novo inventário</button>
+        </div>
+      </div>
+
+      <div id="inventoryMetrics" class="metric-grid inventory-metrics">
+        <article class="metric"><span>Em andamento</span><strong id="inventoryOpenCount">0</strong></article>
+        <article class="metric"><span>Finalizados</span><strong id="inventoryFinalizedCount">0</strong></article>
+        <article class="metric"><span>Cancelados</span><strong id="inventoryCancelledCount">0</strong></article>
+        <article class="metric pending"><span>Divergências confirmadas</span><strong id="inventoryDivergenceCount">0</strong></article>
+      </div>
+
+      <section id="inventoryCreatePanel" class="panel inventory-create-panel" hidden>
+        <div class="section-title">
+          <div><h2>Abrir inventário</h2><p>O escopo e os saldos iniciais ficam preservados no momento da abertura.</p></div>
+          <button id="inventoryCreateCloseButton" class="ghost" type="button">Fechar</button>
+        </div>
+        <form id="inventoryCreateForm" class="inventory-create-grid">
+          <label class="field">Tipo
+            <select id="inventoryType" required>
+              <option value="general">Inventário geral</option>
+              <option value="partial">Inventário parcial</option>
+            </select>
+          </label>
+          <label class="field inventory-partial-field" hidden>Marca
+            <select id="inventoryBrand"><option value="">Todas</option></select>
+          </label>
+          <label class="field inventory-partial-field" hidden>Categoria
+            <select id="inventoryCategory"><option value="">Todas</option></select>
+          </label>
+          <label class="field inventory-partial-field" hidden>Gênero
+            <select id="inventoryGender"><option value="">Todos</option><option>Feminino</option><option>Masculino</option><option>Unissex</option></select>
+          </label>
+          <label class="field inventory-partial-field" hidden>Código de barras
+            <input id="inventoryScopeBarcode" type="text" inputmode="numeric" placeholder="Opcional">
+          </label>
+          <label class="field inventory-partial-field span-2" hidden>Produto específico
+            <select id="inventoryProduct"><option value="">Todos do filtro</option></select>
+          </label>
+          <div class="inventory-create-actions span-3">
+            <button id="inventoryCreateCancelButton" class="ghost" type="button">Cancelar</button>
+            <button class="primary" type="submit">Iniciar contagem</button>
+          </div>
+        </form>
+      </section>
+
+      <section id="inventoryListPanel" class="panel inventory-list-panel">
+        <div class="inventory-toolbar">
+          <label class="search-field">
+            <span>Buscar</span>
+            <input id="inventorySearch" type="search" placeholder="Número, produto, código ou marca...">
+          </label>
+          <label class="field">Tipo
+            <select id="inventoryTypeFilter"><option value="">Todos</option><option value="general">Geral</option><option value="partial">Parcial</option></select>
+          </label>
+          <label class="field">Situação
+            <select id="inventoryStatusFilter"><option value="">Todas</option><option value="in_progress">Em andamento</option><option value="finalized">Finalizado</option><option value="cancelled">Cancelado</option></select>
+          </label>
+          <label class="field">Responsável
+            <select id="inventoryUserFilter"><option value="">Todos</option></select>
+          </label>
+          <label class="field">Início
+            <input id="inventoryStartFilter" type="date">
+          </label>
+          <label class="field">Fim
+            <input id="inventoryEndFilter" type="date">
+          </label>
+        </div>
+        <div class="inventory-table-wrap">
+          <table class="inventory-table">
+            <thead><tr><th>Número</th><th>Tipo e escopo</th><th>Início</th><th>Responsável</th><th>Progresso</th><th>Situação</th><th>Ação</th></tr></thead>
+            <tbody id="inventoryList"></tbody>
+          </table>
+        </div>
+        <div id="inventoryListEmpty" class="inventory-empty" hidden>Nenhum inventário encontrado.</div>
+      </section>
+
+      <section id="inventoryDetailPanel" class="panel inventory-detail-panel" hidden>
+        <div class="inventory-detail-head">
+          <div>
+            <button id="inventoryBackButton" class="ghost" type="button">← Voltar</button>
+            <h2 id="inventoryDetailTitle">Inventário</h2>
+            <p id="inventoryDetailMeta"></p>
+          </div>
+          <span id="inventoryDetailStatus" class="inventory-status"></span>
+        </div>
+        <div id="inventoryDetailSummary" class="inventory-detail-summary"></div>
+        <div id="inventoryCountingTools" class="inventory-counting-tools">
+          <form id="inventoryBarcodeForm" class="inventory-barcode-form">
+            <label class="search-field"><span>Leitor ou código de barras</span><input id="inventoryBarcode" type="text" autocomplete="off" placeholder="Leia o código e pressione Enter"></label>
+            <button class="primary" type="submit">Contar peça</button>
+          </form>
+          <label class="field">Mostrar
+            <select id="inventoryItemFilter">
+              <option value="all">Todos os produtos</option>
+              <option value="uncounted">Não contados</option>
+              <option value="divergent">Com divergência</option>
+              <option value="positive">Sobra</option>
+              <option value="negative">Falta</option>
+              <option value="matched">Sem divergência</option>
+            </select>
+          </label>
+        </div>
+        <div class="inventory-table-wrap">
+          <table class="inventory-table inventory-count-table">
+            <thead><tr><th>Produto</th><th>Inicial</th><th>Esperado atual</th><th>Contagem</th><th>Divergência</th><th>Última contagem</th></tr></thead>
+            <tbody id="inventoryItemList"></tbody>
+          </table>
+        </div>
+        <div id="inventoryItemsEmpty" class="inventory-empty" hidden>Nenhum produto corresponde ao filtro.</div>
+        <div id="inventoryFinalizeArea" class="inventory-finalize-area">
+          <label class="field">Observação geral
+            <textarea id="inventoryNotes" rows="3" placeholder="Obrigatória quando houver divergências"></textarea>
+          </label>
+          <div class="inventory-finalize-actions">
+            <button id="inventoryCancelButton" class="danger" type="button">Cancelar inventário</button>
+            <button id="inventoryFinalizeButton" class="primary" type="button">Finalizar inventário</button>
+          </div>
+        </div>
       </section>
     </section>
 
@@ -406,14 +698,21 @@
               <div id="cartList" class="sale-cart-list empty">Nenhum item.</div>
             </div>
             <div class="sale-total-row">
-              <label class="field">Desconto (R$)<input id="saleDiscount" type="number" min="0" step="0.01" value="0"></label>
+              <div class="sale-adjustments">
+                <label class="field">Desconto (R$)<input id="saleDiscount" type="number" min="0" step="0.01" value="0"></label>
+                <label class="field">Acréscimo (R$)<input id="saleAddition" type="number" min="0" step="0.01" value="0"></label>
+              </div>
               <div class="sale-total-box"><span>Total da venda</span><strong id="saleTotal">R$ 0,00</strong></div>
             </div>
             <div class="section-title tight"><h2>Pagamentos</h2><button id="addPaymentButton" class="ghost" type="button">Adicionar forma</button></div>
-            <div class="sale-payment-head"><span>Forma de pagamento</span><span>Valor</span><span>Ações</span></div>
+            <div class="sale-payment-head"><span>Forma de pagamento</span><span>Valor</span><span>Valor entregue</span><span>Ações</span></div>
             <div id="paymentRows" class="payments-list"></div>
             <div class="sale-total-row">
-              <label class="field">Parcelas crediário<input id="storeCreditInstallments" type="number" min="1" step="1" value="1"></label>
+              <div class="sale-credit-settings">
+                <label class="field">Parcelas crediário<input id="storeCreditInstallments" type="number" min="1" max="3" step="1" value="1"></label>
+                <label class="field">Primeiro vencimento<input id="storeCreditFirstDueDate" type="date"></label>
+                <small id="storeCreditDuePreview">Selecione o crediário para visualizar os vencimentos.</small>
+              </div>
               <div class="sale-change-box"><span>Troco</span><strong id="saleChange">R$ 0,00</strong></div>
             </div>
             <button id="finishSaleButton" class="primary finish-button" type="button">Finalizar venda</button>
@@ -422,6 +721,28 @@
         <section id="receiptPanel" class="panel" hidden></section>
       </section>
       <section id="condicional" class="subtab-panel">
+        <div class="conditional-summary-grid" aria-label="Resumo dos condicionais">
+          <article class="summary-card">
+            <span>Em aberto</span>
+            <strong id="conditionalOpenCount">0</strong>
+            <small>condicionais ativos</small>
+          </article>
+          <article class="summary-card">
+            <span>Em atraso</span>
+            <strong id="conditionalOverdueCount">0</strong>
+            <small>fora do prazo</small>
+          </article>
+          <article class="summary-card">
+            <span>Peças com clientes</span>
+            <strong id="conditionalPieceCount">0</strong>
+            <small>estoque reservado</small>
+          </article>
+          <article class="summary-card">
+            <span>Valor em condicional</span>
+            <strong id="conditionalValue">R$ 0,00</strong>
+            <small>preço histórico de referência</small>
+          </article>
+        </div>
         <div class="sale-register-layout conditional-layout">
           <section class="panel sale-products-card">
             <div class="section-title"><h2>Produtos</h2></div>
@@ -443,17 +764,31 @@
               <div id="conditionalCartList" class="sale-cart-list empty">Nenhum item.</div>
             </div>
             <div class="sale-total-row">
-              <div class="conditional-note">O condicional não baixa estoque. A baixa acontece somente quando os itens virarem venda.</div>
+              <div class="conditional-note">As peças ficam reservadas e indisponíveis para outra venda. O estoque real será baixado somente na venda.</div>
               <div class="sale-total-box"><span>Total enviado</span><strong id="conditionalTotal">R$ 0,00</strong></div>
             </div>
             <button id="sendConditionalButton" class="primary finish-button" type="button">Enviar condicional</button>
           </section>
           <section id="conditionalOpenPanel" class="panel conditional-open-panel">
-            <div class="section-title tight"><h2>Condicionais em aberto</h2><button id="newConditionalButton" class="primary" type="button">Novo</button></div>
-            <div class="conditional-search-row">
-              <input id="conditionalOpenSearch" type="search" placeholder="Buscar por nome ou CPF do cliente...">
+            <div class="section-title tight"><h2>Condicionais</h2><button id="newConditionalButton" class="primary" type="button">Novo</button></div>
+            <div class="conditional-filter-grid">
+              <label class="field conditional-search-field">Buscar
+                <input id="conditionalOpenSearch" type="search" placeholder="Número, nome, CPF ou telefone...">
+              </label>
+              <label class="field">Situação
+                <select id="conditionalStatusFilter">
+                  <option value="active">Em aberto e atrasados</option>
+                  <option value="all">Todos</option>
+                  <option value="open">Em aberto</option>
+                  <option value="overdue">Em atraso</option>
+                  <option value="finalized">Finalizados</option>
+                  <option value="cancelled">Cancelados</option>
+                </select>
+              </label>
+              <label class="field">Início<input id="conditionalStartFilter" type="date"></label>
+              <label class="field">Fim<input id="conditionalEndFilter" type="date"></label>
             </div>
-            <div id="conditionalOpenList" class="table-list empty">Nenhum condicional em aberto.</div>
+            <div id="conditionalOpenList" class="table-list empty">Nenhum condicional encontrado.</div>
           </section>
           <section id="conditionalFinalizePanel" class="panel conditional-finalize-panel" hidden></section>
           </div>
@@ -465,30 +800,92 @@
             <div class="return-left">
               <div class="section-title stacked"><div><h2>Devolução / Troca</h2><p>Localize a venda, selecione os itens e informe o motivo da devolução ou troca.</p></div></div>
               <form id="returnForm" class="return-form">
+                <div class="after-sales-mode" role="group" aria-label="Tipo de atendimento">
+                  <button class="active" type="button" data-after-sales-mode="return">Devolução</button>
+                  <button type="button" data-after-sales-mode="exchange">Troca</button>
+                  <button type="button" data-after-sales-mode="warranty">Garantia</button>
+                </div>
                 <div class="return-step">
                   <strong>1. Localizar venda</strong>
                   <div class="return-search-row">
                     <input id="returnProductSearch" list="saleOptions" placeholder="Buscar venda por número. Ex: VENDA001" required>
                     <button class="ghost" type="button" aria-label="Buscar">⌕</button>
-                    <button class="ghost" type="button">Filtros</button>
                   </div>
                 </div>
                 <div class="return-items-box">
                   <strong>2. Itens da venda</strong>
-                  <div class="return-table-head"><span>Produto</span><span>Variação</span><span>Qtd. vendida</span><span>Ação</span><span>Qtd.</span><span>Unitário</span><span>Total</span></div>
+                  <div class="return-table-head"><span>Produto</span><span>Variação</span><span>Disponível</span><span>Incluir</span><span>Qtd.</span><span>Condição</span><span>Valor líquido</span></div>
                   <div id="returnItemsList" class="return-empty">
                     <span>□</span>
                     <strong>Nenhuma venda selecionada</strong>
                     <small>Busque uma venda para visualizar os itens.</small>
                   </div>
                 </div>
+                <section id="exchangeReplacementCard" class="return-items-box after-sales-extra" hidden>
+                  <strong>3. Produtos substitutos</strong>
+                  <div class="after-sales-add-row">
+                    <label class="field">Produto<input id="exchangeProductSearch" list="productOptions" placeholder="Código ou nome"></label>
+                    <label class="field">Quantidade<input id="exchangeProductQuantity" type="number" min="1" step="1" value="1"></label>
+                    <label class="field">Preço praticado<input id="exchangeProductPrice" type="number" min="0" step="0.01"></label>
+                    <button id="addExchangeProductButton" class="ghost" type="button">Adicionar</button>
+                  </div>
+                  <div id="exchangeItemsList" class="after-sales-compact-list empty">Nenhum produto substituto adicionado.</div>
+                  <div id="exchangeDifferenceSummary" class="after-sales-difference"></div>
+                  <div id="exchangePaymentFields" class="after-sales-payment" hidden>
+                    <div class="section-title tight span-2">
+                      <strong>Pagamento da diferença</strong>
+                      <button id="addExchangePaymentButton" class="ghost" type="button">Adicionar forma</button>
+                    </div>
+                    <div id="exchangePaymentRows" class="exchange-payment-rows span-2"></div>
+                    <div id="exchangeStoreCreditFields" class="after-sales-payment span-2" hidden>
+                      <label class="field">Parcelas do crediário
+                        <input id="exchangeStoreCreditInstallments" type="number" min="1" max="3" step="1" value="1">
+                      </label>
+                      <label class="field">Primeiro vencimento
+                        <input id="exchangeStoreCreditFirstDueDate" type="date">
+                      </label>
+                    </div>
+                  </div>
+                </section>
+                <section id="warrantyDetailsCard" class="return-items-box after-sales-extra" hidden>
+                  <strong>3. Dados da garantia</strong>
+                  <div class="warranty-form-grid">
+                    <label class="field">Categoria do defeito
+                      <select id="warrantyDefectCategory">
+                        <option value="">Selecione...</option>
+                        <option>Costura</option><option>Cola</option><option>Solado</option>
+                        <option>Tecido</option><option value="Ziper">Zíper</option>
+                        <option>Estampa</option><option value="Acessorio">Acessório</option>
+                        <option>Outro</option>
+                      </select>
+                    </label>
+                    <label class="field">Produto está com
+                      <select id="warrantyPhysicalLocation">
+                        <option value="customer">Cliente</option>
+                        <option value="store">Loja</option>
+                      </select>
+                    </label>
+                    <label class="field span-2">Descrição do defeito
+                      <textarea id="warrantyDefectDescription" placeholder="Descreva o defeito observado"></textarea>
+                    </label>
+                    <label class="field">Contato<input id="warrantyContactName" type="text"></label>
+                    <label class="field">Telefone<input id="warrantyContactPhone" type="text"></label>
+                    <label class="field span-2">Fotos do defeito
+                      <input id="warrantyPhotoFiles" type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple>
+                      <small>Até 5 imagens JPG, JPEG, PNG ou WEBP, com no máximo 5 MB cada.</small>
+                    </label>
+                    <label class="field span-2">Fotos (URLs, uma por linha)
+                      <textarea id="warrantyPhotoUrls" placeholder="Até 5 evidências"></textarea>
+                    </label>
+                  </div>
+                </section>
                 <div class="return-warning"><strong>Atenção</strong><span>Verifique a política de trocas e devoluções da loja antes de confirmar a operação.</span></div>
               </form>
             </div>
             <div class="return-right">
               <div class="return-info"><strong>Importante</strong><span>A devolução gera um estorno conforme a forma de pagamento original.</span></div>
               <section class="return-reason-card">
-                <strong>3. Motivo</strong>
+                <strong id="afterSalesReasonTitle">3. Motivo</strong>
                 <label class="field">Motivo da devolução/troca *
                   <select id="returnReason" required>
                     <option value="">Selecione o motivo</option>
@@ -503,16 +900,19 @@
               </section>
               <section class="return-summary">
                 <strong>Resumo</strong>
-                <div><span>Total da devolução</span><b id="returnTotalLabel">R$ 0,00</b></div>
-                <div><span>Descontos</span><b>R$ 0,00</b></div>
-                <div class="return-refund"><span>Valor a estornar</span><b id="returnRefundLabel">R$ 0,00</b></div>
+                <div><span id="returnTotalTitle">Crédito dos itens</span><b id="returnTotalLabel">R$ 0,00</b></div>
+                <div class="return-refund"><span id="returnRefundTitle">Valor a estornar</span><b id="returnRefundLabel">R$ 0,00</b></div>
               </section>
               <div class="return-actions">
-                <button class="ghost" type="button" onclick="document.getElementById('returnForm').reset()">Limpar</button>
-                <button class="primary" form="returnForm" type="submit">Registrar devolução/troca</button>
+                <button id="clearAfterSalesButton" class="ghost" type="button">Limpar</button>
+                <button id="submitAfterSalesButton" class="primary" form="returnForm" type="submit">Registrar devolução</button>
               </div>
             </div>
           </div>
+        </section>
+        <section class="panel after-sales-history">
+          <div class="section-title"><h2>Atendimentos de pós-venda</h2></div>
+          <div id="afterSalesHistoryList" class="table-list empty">Nenhum atendimento registrado.</div>
         </section>
       </section>
       <section id="recebimento-venda" class="subtab-panel">
@@ -684,13 +1084,16 @@
       </div>
       <section id="payableFormPanel" class="panel payable-form-panel" hidden>
         <form id="payableForm" class="payable-form-grid">
-          <label class="field">Fornecedor<input id="payableSupplier" list="supplierOptions" required></label>
-          <label class="field">Categoria despesa<input id="payableCategory" type="text" required></label>
+          <input id="payableEditingId" type="hidden">
+          <div class="field"><span>Fornecedor</span><div class="field-with-action"><input id="payableSupplier" list="supplierOptions" required><button id="payableNewSupplierButton" class="icon-button" type="button" title="Novo fornecedor" aria-label="Novo fornecedor">+</button></div></div>
+          <label class="field">Categoria despesa<input id="payableCategory" list="expenseCategoryOptions" required></label>
           <label class="field">Valor<input id="payableAmount" type="number" min="0.01" step="0.01" required></label>
           <label class="field">Data emissão<input id="payableIssue" type="date" required></label>
           <label class="field">Vencimento<input id="payableDue" type="date" required></label>
+          <label class="field payable-recurring-toggle"><span>Recorrência mensal</span><input id="payableRecurring" type="checkbox"></label>
+          <label id="payableRecurringDayField" class="field" hidden>Dia da recorrência<input id="payableRecurringDay" type="number" min="1" max="31"></label>
           <label class="field span-2">Observações<input id="payableNotes" type="text"></label>
-          <button class="primary" type="submit">Adicionar</button>
+          <button id="payableSaveButton" class="primary" type="submit">Adicionar</button>
         </form>
       </section>
       <section class="panel payable-filter-panel">
@@ -730,8 +1133,7 @@
           <h2>Mova Sports | Caixa</h2>
         </div>
         <div class="cash-head-actions">
-          <button id="cashClosingButton" class="ghost bank-account-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6z"></path><path d="M9 7h6"></path><path d="M9 11h6"></path><path d="M9 15h3"></path></svg></span>Fechamento</button>
-          <button id="bankAccountButton" class="ghost bank-account-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 10h16"></path><path d="M6 10V8l6-4 6 4v2"></path><path d="M7 10v8"></path><path d="M12 10v8"></path><path d="M17 10v8"></path><path d="M5 18h14"></path></svg></span>Conta bancária</button>
+          <button id="bankAccountButton" class="ghost bank-account-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 10h16"></path><path d="M6 10V8l6-4 6 4v2"></path><path d="M7 10v8"></path><path d="M12 10v8"></path><path d="M17 10v8"></path><path d="M5 18h14"></path></svg></span>Recebíveis de cartão</button>
           <button id="cashMovementButton" class="primary cash-movement-button" type="button"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="3"></rect><path d="M8 10h8"></path><path d="M8 14h4"></path></svg></span>Movimentação</button>
         </div>
       </div>
@@ -755,7 +1157,7 @@
             <option value="Outros">Outros</option>
           </select></label>
           <label class="field">Descrição<input id="cashMovementDescription" type="text" required></label>
-          <label class="field">Forma<select id="cashMovementMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option></select></label>
+          <label class="field">Forma<select id="cashMovementMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option></select></label>
           <label class="field">Valor<input id="cashMovementAmount" type="number" min="0.01" step="0.01" required></label>
           <button class="primary" type="submit">Registrar</button>
         </form>
@@ -775,31 +1177,12 @@
           <button class="primary" type="submit">Registrar entrada</button>
         </form>
       </section>
-      <section id="cashClosingPanel" class="panel cash-closing-panel" hidden>
-        <div class="section-title tight">
-          <div>
-            <h2>Fechamento de caixa</h2>
-            <p>Confira o dinheiro físico esperado e registre o valor informado pelo operador.</p>
-          </div>
-        </div>
-        <form id="cashClosingForm" class="cash-closing-form">
-          <label class="field">Data do fechamento<input id="cashClosingDate" type="date" required></label>
-          <label class="field">Dinheiro informado<input id="cashClosingInformed" type="number" min="0" step="0.01" value="0"></label>
-          <label class="field span-2">Observação<input id="cashClosingNotes" type="text" placeholder="Ex: diferença conferida, sangria pendente..."></label>
-          <div class="cash-closing-summary">
-            <article><span>Dinheiro esperado</span><strong id="cashClosingExpected">R$ 0,00</strong></article>
-            <article><span>Diferença</span><strong id="cashClosingDifference">R$ 0,00</strong></article>
-            <article><span>Saldo total</span><strong id="cashClosingTotalBalance">R$ 0,00</strong></article>
-          </div>
-          <button class="primary" type="submit">Registrar fechamento</button>
-        </form>
-      </section>
       <section class="panel cash-filter-panel">
         <h2>Filtros</h2>
         <div class="cash-filter-grid">
           <label class="field">Início<input id="cashStart" type="date"></label>
           <label class="field">Fim<input id="cashEnd" type="date"></label>
-          <label class="field">Forma de pagamento<select id="cashMethodFilter"><option value="all">Todas</option><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="card">Cartão</option></select></label>
+          <label class="field">Forma de pagamento<select id="cashMethodFilter"><option value="all">Todas</option><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
           <label class="field">Tipo de movimentação<select id="cashTypeFilter"><option value="all">Todos</option><option value="in">Entrada</option><option value="out">Saída</option></select></label>
           <label class="field">Tipo de despesa<select id="cashExpenseFilter"><option value="all">Todos</option></select></label>
         </div>
@@ -814,34 +1197,137 @@
       <section class="panel cash-timeline-panel">
         <div class="section-title tight">
           <h2>Linha do tempo</h2>
-          <button class="ghost cash-export-button" type="button">Exportar relatório</button>
+          <button id="cashExportButton" class="ghost cash-export-button" type="button">Exportar relatório</button>
         </div>
         <div id="cashTimeline" class="cash-timeline empty">Nenhuma movimentação.</div>
         <div id="cashFooter" class="cash-footer"></div>
       </section>
-      <section class="panel cash-closing-list-panel">
-        <div class="section-title tight"><h2>Fechamentos registrados</h2></div>
-        <div id="cashClosingList" class="cash-closing-list empty">Nenhum fechamento registrado.</div>
-      </section>
     </section>
 
     <section id="cartoes" class="tab-panel">
-      <section class="panel">
-        <div class="section-title"><h2>Receber cartoes</h2></div>
-        <form id="cardReceiptForm" class="grid-form">
-          <label class="field">Valor entrada<input id="cardReceiptAmount" type="number" min="0.01" step="0.01" required></label>
-          <label class="field span-2">Descrição<input id="cardReceiptDescription" type="text" placeholder="Conta Sicoob, Cartão Ana..." required></label>
-          <button class="primary" type="submit">Lancar no caixa</button>
-        </form>
-        <div id="cardPendingList" class="table-list empty">Nenhum cartao pendente.</div>
+      <div class="page-head">
+        <div><h2>Mova Sports | Recebíveis de Cartão</h2></div>
+        <button id="cardReconcileSelectedButton" class="primary" type="button" disabled>Conciliar selecionados</button>
+      </div>
+      <section class="card-reconciliation-summary" aria-label="Resumo dos recebíveis">
+        <article class="metric-card"><span>A receber</span><strong id="cardOpenTotal">R$ 0,00</strong><small>Saldos pendentes</small></article>
+        <article class="metric-card"><span>Previsto hoje</span><strong id="cardDueToday">R$ 0,00</strong><small>Previsão de crédito</small></article>
+        <article class="metric-card"><span>Recebido no mês</span><strong id="cardReceivedMonth">R$ 0,00</strong><small>Conciliações efetivas</small></article>
+        <article class="metric-card"><span>Divergências</span><strong id="cardDivergenceTotal">R$ 0,00</strong><small>Diferenças encerradas</small></article>
       </section>
+      <section class="panel card-reconciliation-panel">
+        <div class="card-reconciliation-filters">
+          <label class="field span-2">Buscar<input id="cardReceivableSearch" type="search" placeholder="Venda, cliente ou valor"></label>
+          <label class="field">Modalidade<select id="cardReceivableMethod"><option value="">Todas</option><option value="debit">Débito</option><option value="credit:1">Crédito 1x</option><option value="credit:2">Crédito 2x</option><option value="credit:3">Crédito 3x</option><option value="credit">Outros créditos</option></select></label>
+          <label class="field">Situação<select id="cardReceivableStatus"><option value="">Todas</option><option value="cardPending">Pendente</option><option value="cardPartial">Parcialmente recebido</option><option value="paid">Recebido</option><option value="cardDivergent">Com divergência</option><option value="cancelled">Cancelado</option></select></label>
+          <label class="field">Previsão inicial<input id="cardReceivableStart" type="date"></label>
+          <label class="field">Previsão final<input id="cardReceivableEnd" type="date"></label>
+        </div>
+        <div id="cardReceivableState" class="card-reconciliation-state" hidden></div>
+        <div id="cardReceivableList" class="card-receivable-table"></div>
+        <div id="cardReceivablePagination" class="pagination"></div>
+      </section>
+
+      <div id="cardReconciliationModal" class="modal-backdrop" hidden>
+        <section class="modal-panel card-reconciliation-modal" role="dialog" aria-modal="true" aria-labelledby="cardReconciliationTitle">
+          <div class="modal-head">
+            <div><h2 id="cardReconciliationTitle">Conciliar recebíveis</h2><p id="cardReconciliationSubtitle"></p></div>
+            <button id="cardReconciliationCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+          </div>
+          <form id="cardReconciliationForm">
+            <div class="grid-form">
+              <label class="field">Data do recebimento<input id="cardReconciliationDate" type="date" required></label>
+              <label class="field">Valor efetivamente recebido<input id="cardReconciliationTotal" type="number" min="0.01" step="0.01" required></label>
+              <label class="field span-2">Observação<input id="cardReconciliationNote" type="text" maxlength="300" placeholder="Identificação do depósito ou observação"></label>
+            </div>
+            <div id="cardReconciliationItems" class="card-reconciliation-items"></div>
+            <div class="total-line"><span>Soma atribuída</span><strong id="cardReconciliationAllocatedTotal">R$ 0,00</strong></div>
+            <div class="modal-actions">
+              <button id="cardReconciliationCancelButton" class="ghost" type="button">Cancelar</button>
+              <button id="cardReconciliationSubmitButton" class="primary" type="submit">Confirmar conciliação</button>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <div id="cardReceivableDetailModal" class="modal-backdrop" hidden>
+        <section class="modal-panel card-reconciliation-modal" role="dialog" aria-modal="true" aria-labelledby="cardReceivableDetailTitle">
+          <div class="modal-head">
+            <div><h2 id="cardReceivableDetailTitle">Histórico do recebível</h2><p id="cardReceivableDetailSubtitle"></p></div>
+            <button id="cardReceivableDetailCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+          </div>
+          <div id="cardReceivableDetailBody" class="card-receivable-detail"></div>
+        </section>
+      </div>
     </section>
 
     <section id="relatorios" class="tab-panel">
-      <section class="panel">
-        <div class="section-title"><h2>Relatórios</h2><div class="inline-filters"><label class="field">Início<input id="reportStart" type="date"></label><label class="field">Fim<input id="reportEnd" type="date"></label></div></div>
-        <div id="reportsList" class="report-grid"></div>
+      <div class="page-head report-page-head">
+        <div><h2>Mova Sports | Relatórios</h2></div>
+        <div class="page-actions">
+          <button id="reportExportPdf" class="ghost" type="button">Exportar PDF</button>
+          <button id="reportExportXlsx" class="primary" type="button">Exportar Excel</button>
+        </div>
+      </div>
+      <section class="reports-workspace">
+        <aside class="report-sidebar panel" aria-label="Tipos de relatório">
+          <div class="report-sidebar-title">Relatórios disponíveis</div>
+          <nav id="reportNavigation" class="report-navigation"></nav>
+        </aside>
+        <div class="report-main">
+          <section class="panel report-controls">
+            <div class="report-control-grid">
+              <label class="field">Relatório
+                <select id="reportType" aria-label="Tipo de relatório"></select>
+              </label>
+              <label class="field">Período
+                <select id="reportPeriod">
+                  <option value="today">Hoje</option>
+                  <option value="7days">Últimos 7 dias</option>
+                  <option value="30days" selected>Últimos 30 dias</option>
+                  <option value="month">Mês atual</option>
+                  <option value="custom">Personalizado</option>
+                </select>
+              </label>
+              <div id="reportCustomPeriod" class="report-custom-period">
+                <label class="field">Início<input id="reportStart" type="date"></label>
+                <label class="field">Fim<input id="reportEnd" type="date"></label>
+              </div>
+              <button id="reportApply" class="primary report-apply" type="button">Aplicar filtros</button>
+            </div>
+            <div id="reportFilters" class="report-filter-grid"></div>
+          </section>
+
+          <section id="reportFeedback" class="report-feedback" aria-live="polite"></section>
+          <section id="reportSummary" class="report-summary" aria-label="Resumo do relatório"></section>
+
+          <section class="panel report-result">
+            <div class="section-title report-result-head">
+              <div>
+                <h2 id="reportResultTitle">Relatório</h2>
+                <p id="reportResultMeta"></p>
+              </div>
+            </div>
+            <div class="report-table-shell">
+              <table class="report-table">
+                <thead id="reportTableHead"></thead>
+                <tbody id="reportTableBody"></tbody>
+              </table>
+            </div>
+            <div id="reportPagination" class="report-pagination"></div>
+          </section>
+        </div>
       </section>
+
+      <div id="reportDetailModal" class="modal-backdrop" hidden>
+        <section class="modal-panel report-detail-modal" role="dialog" aria-modal="true" aria-labelledby="reportDetailTitle">
+          <div class="modal-head">
+            <div><h2 id="reportDetailTitle">Detalhes da venda</h2></div>
+            <button id="reportDetailClose" class="modal-close" type="button" aria-label="Fechar">×</button>
+          </div>
+          <div id="reportDetailBody" class="report-detail-body"></div>
+        </section>
+      </div>
     </section>
 
     <section id="configuracoes" class="tab-panel admin-only">
@@ -991,6 +1477,173 @@
   <datalist id="productOptions"></datalist>
   <datalist id="saleOptions"></datalist>
   <datalist id="supplierOptions"></datalist>
+  <datalist id="sizeOptions"></datalist>
+  <datalist id="colorOptions"></datalist>
+  <datalist id="expenseCategoryOptions"></datalist>
+
+  <div id="supplierDetailModal" class="modal-backdrop" hidden>
+    <section class="modal-panel supplier-detail-modal" role="dialog" aria-modal="true" aria-labelledby="supplierDetailTitle">
+      <div class="modal-head">
+        <div><h2 id="supplierDetailTitle">Fornecedor</h2></div>
+        <button id="supplierDetailCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <section class="panel store-settings-panel">
+        <div class="section-title stacked">
+          <h2>Dados e identidade da loja</h2>
+          <p>Informações usadas na operação e nos documentos emitidos pelo sistema.</p>
+        </div>
+        <form id="storeSettingsForm" class="settings-form-grid">
+          <input id="storeSettingsVersion" type="hidden" value="0">
+          <label class="field">Nome da loja *<input id="storeName" maxlength="120" required></label>
+          <label class="field">Razão social<input id="storeLegalName"></label>
+          <label class="field">Nome comercial<input id="storeTradeName"></label>
+          <label class="field">CPF/CNPJ<input id="storeDocument" inputmode="numeric"></label>
+          <label class="field">Telefone<input id="storePhone"></label>
+          <label class="field">WhatsApp<input id="storeWhatsapp"></label>
+          <label class="field">E-mail<input id="storeEmail" type="email"></label>
+          <label class="field">CEP<input id="storeZip" inputmode="numeric"></label>
+          <label class="field settings-span-2">Endereço<input id="storeAddress"></label>
+          <label class="field">Número<input id="storeAddressNumber"></label>
+          <label class="field">Complemento<input id="storeComplement"></label>
+          <label class="field">Bairro<input id="storeDistrict"></label>
+          <label class="field">Cidade<input id="storeCity"></label>
+          <label class="field">Estado<input id="storeState" maxlength="2"></label>
+          <label class="field settings-span-2">Rodapé do comprovante<textarea id="storeReceiptFooter" maxlength="300" rows="2"></textarea></label>
+          <fieldset class="settings-fieldset settings-span-2">
+            <legend>Informações impressas</legend>
+            <label><input id="printShowDocument" type="checkbox"> CPF/CNPJ</label>
+            <label><input id="printShowPhone" type="checkbox"> Telefone</label>
+            <label><input id="printShowWhatsapp" type="checkbox"> WhatsApp</label>
+            <label><input id="printShowAddress" type="checkbox"> Endereço</label>
+            <label><input id="printShowEmail" type="checkbox"> E-mail</label>
+          </fieldset>
+          <fieldset class="settings-fieldset settings-span-2">
+            <legend>Dados informativos do Pix</legend>
+            <label class="field">Tipo da chave
+              <select id="storePixKeyType">
+                <option value="">Não informado</option>
+                <option value="cpf">CPF</option>
+                <option value="cnpj">CNPJ</option>
+                <option value="email">E-mail</option>
+                <option value="phone">Telefone</option>
+                <option value="random">Aleatória</option>
+              </select>
+            </label>
+            <label class="field">Chave<input id="storePixKey"></label>
+            <label class="field">Favorecido<input id="storePixRecipientName"></label>
+            <label class="field">CPF/CNPJ do favorecido<input id="storePixRecipientDocument"></label>
+            <label class="field">Banco<input id="storePixBank"></label>
+          </fieldset>
+          <fieldset class="settings-fieldset settings-span-2">
+            <legend>Formas disponíveis para novas vendas</legend>
+            <label><input type="checkbox" checked disabled> Dinheiro</label>
+            <label><input id="paymentPixEnabled" type="checkbox"> Pix</label>
+            <label><input id="paymentDebitEnabled" type="checkbox"> Débito</label>
+            <label><input id="paymentCreditEnabled" type="checkbox"> Crédito</label>
+            <label><input id="paymentStoreCreditEnabled" type="checkbox"> Crediário</label>
+          </fieldset>
+          <div class="settings-logo settings-span-2">
+            <img id="storeLogoPreview" alt="Logo da loja" hidden>
+            <label class="field">Logo (JPG, PNG ou WEBP, até 5MB)<input id="storeLogoFile" type="file" accept="image/jpeg,image/png,image/webp"></label>
+            <button id="uploadStoreLogoButton" class="ghost" type="button">Enviar logo</button>
+          </div>
+          <div class="settings-actions settings-span-2">
+            <span id="storeSettingsStatus" class="backup-status">Configurações ainda não carregadas.</span>
+            <button class="primary" type="submit">Salvar configurações</button>
+          </div>
+        </form>
+      </section>
+      <section class="panel access-matrix-panel">
+        <div class="section-title stacked">
+          <h2>Perfis e acessos</h2>
+          <p>Os perfis são fixos e as permissões são aplicadas pelo servidor.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Módulo</th><th>Administrador</th><th>Operador</th></tr></thead>
+            <tbody id="accessMatrixList"><tr><td colspan="3" class="empty-cell">Carregando acessos...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+      <div id="supplierDetailContent"></div>
+    </section>
+  </div>
+
+  <div id="catalogDetailModal" class="modal-backdrop" hidden>
+    <section class="modal-panel catalog-detail-modal" role="dialog" aria-modal="true" aria-labelledby="catalogDetailTitle">
+      <div class="modal-head">
+        <div><h2 id="catalogDetailTitle">Produto</h2></div>
+        <button id="catalogDetailCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div id="catalogDetailContent" class="catalog-detail-content"></div>
+    </section>
+  </div>
+
+  <div id="customerDetailModal" class="modal-backdrop" hidden>
+    <section class="modal-panel customer-detail-modal" role="dialog" aria-modal="true" aria-labelledby="customerDetailTitle">
+      <div class="modal-head">
+        <div>
+          <h2 id="customerDetailTitle">Ficha do cliente</h2>
+          <p id="customerDetailSubtitle"></p>
+        </div>
+        <button id="customerDetailCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div id="customerDetailContent" class="customer-detail-content"></div>
+      <div class="modal-actions customer-detail-actions">
+        <button id="customerDetailStatusButton" class="ghost" type="button">Alterar situação</button>
+        <button id="customerDetailEditButton" class="primary" type="button">Editar cliente</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="alertsModal" class="modal-backdrop" hidden>
+    <section class="modal-panel alerts-modal" role="dialog" aria-modal="true" aria-labelledby="alertsTitle">
+      <div class="modal-head">
+        <div><h2 id="alertsTitle">Central de alertas</h2><p>Situações operacionais que exigem acompanhamento.</p></div>
+        <button id="alertsCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div class="alerts-toolbar">
+        <input id="alertsSearch" type="search" placeholder="Buscar alerta...">
+        <select id="alertsPriority"><option value="">Todas as prioridades</option><option value="critical">Crítica</option><option value="attention">Atenção</option></select>
+        <select id="alertsModule"><option value="">Todos os módulos</option><option value="store_credit">Crediário</option><option value="conditional">Condicionais</option><option value="payable">Contas a pagar</option><option value="inventory">Estoque</option></select>
+        <select id="alertsState"><option value="">Todos os estados</option><option value="unread">Não lidos</option><option value="read">Lidos</option><option value="pinned">Fixados</option></select>
+      </div>
+      <div class="alerts-actions">
+        <button id="alertsRefreshButton" class="ghost" type="button">Atualizar</button>
+        <button id="alertsReadAllButton" class="ghost" type="button">Marcar todos como lidos</button>
+      </div>
+      <div id="alertsFeedback" class="alerts-feedback" role="status" aria-live="polite"></div>
+      <div id="alertsList" class="alerts-list"></div>
+      <div id="alertsPagination" class="alerts-pagination"></div>
+    </section>
+  </div>
+
+  <div id="customerStatusModal" class="modal-backdrop" hidden>
+    <form id="customerStatusForm" class="modal-panel customer-status-modal">
+      <input id="customerStatusId" type="hidden">
+      <div class="modal-head">
+        <div>
+          <h2>Alterar situação</h2>
+          <p id="customerStatusName"></p>
+        </div>
+        <button id="customerStatusCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <label class="field">Nova situação
+        <select id="customerStatusValue" required>
+          <option value="active">Ativo</option>
+          <option value="blocked">Bloqueado</option>
+          <option value="deactivated">Desativado</option>
+        </select>
+      </label>
+      <label class="field">Motivo
+        <textarea id="customerStatusReason" rows="3" placeholder="Obrigatório para bloqueio"></textarea>
+      </label>
+      <div class="modal-actions">
+        <button id="customerStatusCancelButton" class="ghost" type="button">Cancelar</button>
+        <button class="primary" type="submit">Confirmar alteração</button>
+      </div>
+    </form>
+  </div>
 
   <div id="creditReceiveModal" class="modal-backdrop" hidden>
     <form id="creditReceiveForm" class="modal-panel credit-receive-modal">
@@ -1010,10 +1663,16 @@
       <div class="credit-receive-fields">
         <label class="field">Data do pagamento<input id="creditReceiveDate" type="date" required></label>
         <label class="field">Forma de pagamento<select id="creditReceiveMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+        <label id="creditReceiveCardModalityField" class="field span-2" hidden>Modalidade do cartão<select id="creditReceiveCardModality"></select></label>
+        <label class="field">Tipo de desconto<select id="creditReceiveDiscountType"><option value="value">Valor (R$)</option><option value="percent">Percentual (%)</option></select></label>
+        <label class="field">Desconto<input id="creditReceiveDiscountValue" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Juros<input id="creditReceiveInterest" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Multa<input id="creditReceiveFine" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Outros acréscimos<input id="creditReceiveAddition" type="number" min="0" step="0.01" value="0"></label>
         <label class="field span-2">Observação<input id="creditReceiveNote" type="text" placeholder="Opcional"></label>
       </div>
       <div class="credit-receive-total">
-        <span>Total a receber</span>
+        <span>Valor efetivo a receber</span>
         <strong id="creditReceiveTotal">R$ 0,00</strong>
       </div>
       <div class="modal-actions">
@@ -1039,16 +1698,76 @@
         <div><span>Após pagamento</span><strong id="payablePaymentRemaining">R$ 0,00</strong></div>
       </div>
       <div class="payable-payment-fields">
-        <label class="field">Data do pagamento<input id="payablePaymentDate" type="date" required></label>
-        <label class="field">Forma de pagamento<select id="payablePaymentMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
-        <label class="field">Juros / multa<input id="payablePaymentFee" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Forma de pagamento<select id="payablePaymentMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="supplierCredit">Crédito do fornecedor</option></select></label>
+        <label class="field">Juros<input id="payablePaymentInterest" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Multa<input id="payablePaymentFine" type="number" min="0" step="0.01" value="0"></label>
         <label class="field">Desconto<input id="payablePaymentDiscount" type="number" min="0" step="0.01" value="0"></label>
-        <label class="field">Valor pago agora<input id="payablePaymentAmount" type="number" min="0.01" step="0.01" required></label>
+        <label class="field">Valor pago agora<input id="payablePaymentAmount" type="number" min="0" step="0.01" required></label>
         <label class="field span-2">Observação<input id="payablePaymentNote" type="text" placeholder="Opcional"></label>
       </div>
+      <div id="payablePaymentHistory" class="payable-payment-history"></div>
       <div class="modal-actions">
         <button id="payablePaymentCancelButton" class="ghost" type="button">Cancelar</button>
         <button class="primary" type="submit">Confirmar pagamento</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="saleItemAdjustmentBackdrop" class="modal-backdrop" hidden>
+    <form id="saleItemAdjustmentForm" class="modal-panel sale-item-adjustment-modal">
+      <input id="saleItemAdjustmentProductId" type="hidden">
+      <div class="modal-head">
+        <div>
+          <h2>Ajustar item da venda</h2>
+          <p id="saleItemAdjustmentName">Produto</p>
+        </div>
+        <button id="saleItemAdjustmentCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div class="sale-item-adjustment-fields">
+        <label class="field">Preço praticado (unitário)<input id="saleItemPracticedPrice" type="number" min="0" step="0.01" required></label>
+        <label class="field">Desconto unitário<input id="saleItemDiscount" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Acréscimo unitário<input id="saleItemAddition" type="number" min="0" step="0.01" value="0"></label>
+      </div>
+      <p id="saleItemAdjustmentError" class="value-bad" hidden></p>
+      <div class="modal-actions">
+        <button id="saleItemAdjustmentCancelButton" class="ghost" type="button">Cancelar</button>
+        <button class="primary" type="submit">Aplicar ajuste</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="creditRenegotiationModal" class="modal-backdrop" hidden>
+    <form id="creditRenegotiationForm" class="modal-panel credit-receive-modal">
+      <input id="creditRenegotiationReceivableId" type="hidden">
+      <div class="modal-head">
+        <div>
+          <h2>Renegociar parcela</h2>
+          <p id="creditRenegotiationTitle">Crediário</p>
+        </div>
+        <button id="creditRenegotiationCloseButton" class="modal-close" type="button" aria-label="Fechar">×</button>
+      </div>
+      <div class="credit-receive-summary">
+        <span>Saldo atual</span>
+        <strong id="creditRenegotiationOpen">R$ 0,00</strong>
+      </div>
+      <div class="credit-receive-fields">
+        <label class="field">Novo vencimento<input id="creditRenegotiationDueDate" type="date" required></label>
+        <label class="field">Pagamento agora<input id="creditRenegotiationPayment" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Desconto<input id="creditRenegotiationDiscount" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Juros<input id="creditRenegotiationInterest" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Multa<input id="creditRenegotiationFine" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Outros acréscimos<input id="creditRenegotiationAddition" type="number" min="0" step="0.01" value="0"></label>
+        <label class="field">Forma do pagamento<select id="creditRenegotiationMethod"><option value="cash">Dinheiro</option><option value="pix">PIX</option><option value="debit">Débito</option><option value="credit">Crédito</option></select></label>
+        <label id="creditRenegotiationCardField" class="field" hidden>Modalidade do cartão<select id="creditRenegotiationCardModality"></select></label>
+        <label class="field span-2">Motivo<textarea id="creditRenegotiationReason" rows="3" required></textarea></label>
+      </div>
+      <div class="credit-receive-total">
+        <span>Novo saldo</span>
+        <strong id="creditRenegotiationNewOpen">R$ 0,00</strong>
+      </div>
+      <div class="modal-actions">
+        <button id="creditRenegotiationCancelButton" class="ghost" type="button">Cancelar</button>
+        <button class="primary" type="submit">Confirmar renegociação</button>
       </div>
     </form>
   </div>

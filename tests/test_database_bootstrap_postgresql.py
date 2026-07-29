@@ -19,14 +19,16 @@ class FakeBootstrapAdapter:
     driver = "postgresql"
 
     def __init__(self):
-        migration = MIGRATIONS[0]
-        self.history = [AppliedMigration(
-            version=1,
-            description=migration.description,
-            applied_at="2026-01-01T00:00:00Z",
-            checksum=migration.checksum,
-            execution_time_ms=1,
-        )]
+        self.history = [
+            AppliedMigration(
+                version=migration.version,
+                description=migration.description,
+                applied_at="2026-01-01T00:00:00Z",
+                checksum=migration.checksum,
+                execution_time_ms=1,
+            )
+            for migration in MIGRATIONS
+        ]
         self.stores = []
         self.app_states = []
         self.users = []
@@ -92,6 +94,14 @@ class FakeBootstrapAdapter:
         self.events.append("insert_app_state")
         self._fail("app_state")
         self.app_states.append({"id": 1, "data": data, "updated_at": updated_at})
+
+    def insert_default_customer(self, store_id, created_at):
+        self.events.append("insert_default_customer")
+        self._fail("default_customer")
+
+    def insert_default_expense_categories(self, store_id, created_at):
+        self.events.append("insert_default_expense_categories")
+        self._fail("expense_categories")
 
     def insert_admin(self, user_id, store_id, name, login, password_hash, updated_at):
         self.events.append("insert_admin")

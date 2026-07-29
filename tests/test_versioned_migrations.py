@@ -22,7 +22,11 @@ from database_migrations.runner import (
     run_database_migrations,
     validate_history,
 )
-from database_migrations.schema import CURRENT_INDEX_NAMES, CURRENT_SCHEMA_STATEMENTS, CURRENT_TABLE_NAMES
+from database_migrations.schema import (
+    CURRENT_INDEX_NAMES,
+    CURRENT_TABLE_NAMES,
+    V001_SCHEMA_STATEMENTS,
+)
 
 
 AUTHORIZED_ENV = {"APP_ENV": "development", "MOVA_ALLOW_MIGRATIONS": "true"}
@@ -36,7 +40,7 @@ def create_empty_sqlite(path: str) -> None:
 def create_legacy_schema(path: str, *, omit_index: str = "", omit_discount: bool = False) -> None:
     connection = sqlite3.connect(path)
     try:
-        for statement in CURRENT_SCHEMA_STATEMENTS:
+        for statement in V001_SCHEMA_STATEMENTS:
             if omit_index and statement.startswith(f"CREATE INDEX {omit_index} "):
                 continue
             if omit_index and statement.startswith(f"CREATE UNIQUE INDEX {omit_index} "):
@@ -50,16 +54,24 @@ def create_legacy_schema(path: str, *, omit_index: str = "", omit_discount: bool
 
 
 class RegistryTests(unittest.TestCase):
-    def test_registry_contains_only_migration_001(self):
-        self.assertEqual([item.version for item in MIGRATIONS], [1])
+    def test_registry_contains_migrations_in_version_order(self):
+        self.assertEqual(
+            [item.version for item in MIGRATIONS],
+            list(range(1, 19)),
+        )
         self.assertEqual(MIGRATIONS[0].description, "Create current schema")
+        self.assertEqual(MIGRATIONS[1].description, "Add customer business rules")
+        self.assertEqual(MIGRATIONS[2].description, "Add supplier and auxiliary business rules")
+        self.assertEqual(MIGRATIONS[3].description, "Add product stock entry core")
+        self.assertEqual(MIGRATIONS[4].description, "Add purchase financial and supplier return flows")
 
     def test_registry_metadata_is_valid(self):
-        migration = MIGRATIONS[0]
-        self.assertIsInstance(migration.version, int)
-        self.assertGreater(migration.version, 0)
-        self.assertTrue(migration.description)
-        self.assertRegex(migration.checksum, r"^[0-9a-f]{64}$")
+        for migration in MIGRATIONS:
+            with self.subTest(version=migration.version):
+                self.assertIsInstance(migration.version, int)
+                self.assertGreater(migration.version, 0)
+                self.assertTrue(migration.description)
+                self.assertRegex(migration.checksum, r"^[0-9a-f]{64}$")
 
     def test_checksum_is_deterministic(self):
         self.assertEqual(MIGRATIONS[0].checksum, MIGRATIONS[0].checksum)
@@ -124,7 +136,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
     def test_migrate_with_create_builds_current_schema(self):
         result = self.migrate()
-        self.assertEqual(result["applied"], [1])
+        self.assertEqual(result["applied"], list(range(1, 19)))
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             tables = {
                 row[0] for row in connection.execute(
@@ -132,9 +144,9 @@ class SQLiteMigrationTests(unittest.TestCase):
                 )
             }
         self.assertEqual(tables - {"schema_migrations"}, set(CURRENT_TABLE_NAMES))
-        self.assertEqual(len(tables), 20)
+        self.assertEqual(len(tables), len(CURRENT_TABLE_NAMES) + 1)
 
-    def test_migration_creates_all_thirty_indexes(self):
+    def test_migration_creates_all_current_indexes(self):
         self.migrate()
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             indexes = {
@@ -143,7 +155,7 @@ class SQLiteMigrationTests(unittest.TestCase):
                 )
             }
         self.assertEqual(indexes, set(CURRENT_INDEX_NAMES))
-        self.assertEqual(len(indexes), 30)
+        self.assertEqual(len(indexes), len(CURRENT_INDEX_NAMES))
 
     def test_migration_includes_payables_discount_without_alter(self):
         self.assertTrue(any("discount REAL NOT NULL DEFAULT 0" in item for item in MIGRATIONS[0].sqlite_statements))
@@ -153,18 +165,130 @@ class SQLiteMigrationTests(unittest.TestCase):
             columns = {row[1] for row in connection.execute("PRAGMA table_info(payables)")}
         self.assertIn("discount", columns)
 
-    def test_history_has_one_complete_row(self):
+    def test_migration_001_checksum_remains_frozen(self):
+        self.assertEqual(
+            MIGRATIONS[0].checksum,
+            "e2a325175590be37d1402cfa747b404be6a139effc90ada5a1db954701ab9b67",
+        )
+
+    def test_customer_migration_preserves_legacy_rows_and_creates_default(self):
+        create_legacy_schema(self.db_path)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?)",
+                ("matriz", "Matriz", "2026-01-01T00:00:00Z"),
+            )
+            connection.execute(
+                """
+                INSERT INTO customers (
+                    id, store_id, code, name, cpf, rg, birth, whatsapp, email,
+                    address, city, district, zip, credit_limit, status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-customer",
+                    "matriz",
+                    "CLI00001",
+                    "Cliente Legado",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    "",
+                    250,
+                    "active",
+                    "2026-01-01T00:00:00Z",
+                ),
+            )
+            connection.commit()
+        baseline_database(
+            environ=AUTHORIZED_ENV,
+            sqlite_path=self.db_path,
+            confirm_baseline=True,
+        )
+
+        result = run_database_migrations(
+            environ=AUTHORIZED_ENV,
+            sqlite_path=self.db_path,
+        )
+
+        self.assertEqual(result["applied"], list(range(2, 19)))
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
+            connection.row_factory = sqlite3.Row
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(customers)")
+            }
+            legacy = connection.execute(
+                "SELECT name, credit_limit, is_default FROM customers WHERE id = ?",
+                ("legacy-customer",),
+            ).fetchone()
+            default = connection.execute(
+                """
+                SELECT id, code, name, credit_limit, status, is_default
+                FROM customers
+                WHERE store_id = ? AND is_default = 1
+                """,
+                ("matriz",),
+            ).fetchone()
+        self.assertTrue(
+            {"address_number", "state", "notes", "is_default", "created_at"} <= columns
+        )
+        self.assertEqual(tuple(legacy), ("Cliente Legado", 250.0, 0))
+        self.assertEqual(default["id"], "matriz:customer:default")
+        self.assertEqual(default["code"], "PADRAO")
+        self.assertEqual(default["name"], "Cliente padrao")
+        self.assertEqual(default["credit_limit"], 0)
+        self.assertEqual(default["status"], "active")
+        self.assertEqual(default["is_default"], 1)
+
+    def test_customer_migration_is_non_destructive_to_app_state(self):
+        create_legacy_schema(self.db_path)
+        original_state = '{"customers":[{"id":"legacy-customer","name":"Preservar"}]}'
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?)",
+                ("matriz", "Matriz", "2026-01-01T00:00:00Z"),
+            )
+            connection.execute(
+                "INSERT INTO app_state (id, data, updated_at) VALUES (1, ?, ?)",
+                (original_state, "2026-01-01T00:00:00Z"),
+            )
+            connection.commit()
+        baseline_database(
+            environ=AUTHORIZED_ENV,
+            sqlite_path=self.db_path,
+            confirm_baseline=True,
+        )
+        run_database_migrations(environ=AUTHORIZED_ENV, sqlite_path=self.db_path)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
+            current_state = connection.execute(
+                "SELECT data FROM app_state WHERE id = 1"
+            ).fetchone()[0]
+        self.assertEqual(current_state, original_state)
+
+    def test_history_has_complete_rows_for_each_migration(self):
         self.migrate()
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
-            row = connection.execute(
-                "SELECT version, description, applied_at, checksum, execution_time_ms FROM schema_migrations"
-            ).fetchone()
-        self.assertEqual(row[0], 1)
-        self.assertEqual(row[1], MIGRATIONS[0].description)
-        self.assertEqual(row[3], MIGRATIONS[0].checksum)
-        self.assertGreaterEqual(row[4], 0)
-        parsed = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
-        self.assertEqual(parsed.utcoffset(), timezone.utc.utcoffset(parsed))
+            rows = connection.execute(
+                """
+                SELECT version, description, applied_at, checksum, execution_time_ms
+                FROM schema_migrations
+                ORDER BY version
+                """
+            ).fetchall()
+        self.assertEqual(len(rows), len(MIGRATIONS))
+        for row, migration in zip(rows, MIGRATIONS):
+            self.assertEqual(row[0], migration.version)
+            self.assertEqual(row[1], migration.description)
+            self.assertEqual(row[3], migration.checksum)
+            self.assertGreaterEqual(row[4], 0)
+            parsed = datetime.fromisoformat(row[2].replace("Z", "+00:00"))
+            self.assertEqual(parsed.utcoffset(), timezone.utc.utcoffset(parsed))
 
     def test_migration_does_not_bootstrap_operational_data(self):
         self.migrate()
@@ -182,29 +306,35 @@ class SQLiteMigrationTests(unittest.TestCase):
     def test_reexecution_is_idempotent(self):
         first = self.migrate()
         second = self.migrate()
-        self.assertEqual(first["applied"], [1])
+        self.assertEqual(first["applied"], list(range(1, 19)))
         self.assertEqual(second["applied"], [])
         self.assertIn("Nenhuma", second["message"])
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 1)
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
+                len(MIGRATIONS),
+            )
 
     def test_status_versioned_database_is_up_to_date(self):
         self.migrate()
         status = get_migration_status(environ=AUTHORIZED_ENV, sqlite_path=self.db_path)
         self.assertTrue(status["ok"])
         self.assertEqual(status["state"], "up_to_date")
-        self.assertEqual(status["current_version"], 1)
+        self.assertEqual(status["current_version"], 18)
 
     def test_status_identifies_pending_migration(self):
-        self.migrate()
-        second = Migration(2, "Second", ("SELECT 1",), ("SELECT 1",))
+        create_legacy_schema(self.db_path)
+        baseline_database(
+            environ=AUTHORIZED_ENV,
+            sqlite_path=self.db_path,
+            confirm_baseline=True,
+        )
         status = get_migration_status(
             environ=AUTHORIZED_ENV,
             sqlite_path=self.db_path,
-            migrations=(MIGRATIONS[0], second),
         )
         self.assertEqual(status["state"], "pending")
-        self.assertEqual(status["pending"], [2])
+        self.assertEqual(status["pending"], list(range(2, 19)))
 
     def test_status_identifies_checksum_mismatch(self):
         self.migrate()
@@ -219,7 +349,11 @@ class SQLiteMigrationTests(unittest.TestCase):
         self.migrate()
         with contextlib.closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
-                "UPDATE schema_migrations SET version = 2, description = 'Future', checksum = ?",
+                """
+                INSERT INTO schema_migrations (
+                    version, description, applied_at, checksum, execution_time_ms
+                ) VALUES (19, 'Future', '2026-07-18T12:00:00Z', ?, 0)
+                """,
                 ("0" * 64,),
             )
             connection.commit()
@@ -268,7 +402,7 @@ class SQLiteMigrationTests(unittest.TestCase):
 
         with mock.patch.object(SQLiteAdapter, "begin_write", spy):
             self.migrate()
-        self.assertEqual(calls, [True])
+        self.assertEqual(calls, [True] * len(MIGRATIONS))
 
     def test_lock_failure_aborts_without_history(self):
         class LockedAdapter(SQLiteAdapter):
@@ -439,8 +573,25 @@ class HistoryValidationTests(unittest.TestCase):
             validate_history([self.valid_row(description="Changed")], MIGRATIONS)
 
     def test_future_version_is_blocked(self):
+        future = AppliedMigration(
+            19,
+            "Future",
+            "2026-07-18T12:00:00Z",
+            "0" * 64,
+            1,
+        )
         with self.assertRaises(MigrationError) as context:
-            validate_history([self.valid_row(version=2)], MIGRATIONS)
+            history = [
+                AppliedMigration(
+                    migration.version,
+                    migration.description,
+                    "2026-07-18T12:00:00Z",
+                    migration.checksum,
+                    1,
+                )
+                for migration in MIGRATIONS
+            ]
+            validate_history([*history, future], MIGRATIONS)
         self.assertEqual(context.exception.code, "future_version")
 
     def test_duplicate_version_is_blocked(self):
@@ -530,6 +681,7 @@ class ReadinessAndSentinelTests(unittest.TestCase):
     def test_baselined_database_is_ready(self):
         create_legacy_schema(self.db_path)
         baseline_database(environ=AUTHORIZED_ENV, sqlite_path=self.db_path, confirm_baseline=True)
+        run_database_migrations(environ=AUTHORIZED_ENV, sqlite_path=self.db_path)
         server.DB_PATH = self.db_path
         server.DATABASE_URL = ""
         server.USE_POSTGRES = False

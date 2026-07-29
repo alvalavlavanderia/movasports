@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from database_migrations.runner import run_database_migrations
 from environment_config import EnvironmentConfig
 import server
 
@@ -17,6 +18,9 @@ class FakeCursor:
 
     def fetchone(self):
         return self.row
+
+    def fetchall(self):
+        return []
 
 
 class FakePostgresConnection:
@@ -115,7 +119,23 @@ class PayableUpdatePersistenceTest(unittest.TestCase):
         server.DATABASE_URL = ""
         server.DB_PATH = os.path.join(self.temp_dir.name, "payable-update.db")
         os.environ["MOVA_ADMIN_PASSWORD"] = self.ADMIN_PASSWORD
-        server.init_db()
+        run_database_migrations(
+            test_mode=True,
+            sqlite_path=server.DB_PATH,
+            create_database=True,
+        )
+        with server.connect_db() as conn:
+            conn.execute(
+                "INSERT INTO stores (id, name, created_at) VALUES (?, ?, ?)",
+                ("matriz", "Matriz", server.utc_now()),
+            )
+            conn.execute(
+                "INSERT INTO app_state (id, data, updated_at) VALUES (1, ?, ?)",
+                (
+                    json.dumps(server.default_state(), ensure_ascii=False),
+                    server.utc_now(),
+                ),
+            )
 
         self.payable = self.payable_record("payable-update")
         self.other_payable = self.payable_record("payable-other")
@@ -346,7 +366,7 @@ class PayableUpdatePersistenceTest(unittest.TestCase):
         self.assertEqual(self.fetch_payable(self.other_payable["id"]), other_before)
 
         after_state = self.raw_state()
-        self.assertEqual(after_state["payables"], [self.other_payable, payable])
+        self.assertEqual(after_state["payables"], [payable, self.other_payable])
         self.assertEqual(
             {key: value for key, value in after_state.items() if key != "payables"},
             {key: value for key, value in before_state.items() if key != "payables"},
@@ -421,7 +441,7 @@ class PayableUpdatePersistenceTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertEqual(response.get_json(), {"ok": False, "error": expected_error})
 
-    def test_paid_and_cancelled_accounts_keep_permissive_editing_rules(self):
+    def test_paid_and_cancelled_accounts_block_silent_reopening(self):
         self.authenticate()
         paid = self.client.put(
             f"/api/payables/{self.payable['id']}",
@@ -436,23 +456,23 @@ class PayableUpdatePersistenceTest(unittest.TestCase):
                 "amount": 800, "dueDate": "qualquer-texto",
             },
         )
-        value = reopened_paid.get_json()["data"]
-        self.assertEqual(reopened_paid.status_code, 200)
-        self.assertEqual(value["status"], "pending")
-        self.assertEqual(value["paidAmount"], 0.0)
-        self.assertEqual(value["paidAt"], "")
-        self.assertEqual(value["amount"], 800.0)
-        self.assertEqual(value["dueDate"], "qualquer-texto")
+        self.assertEqual(reopened_paid.status_code, 400)
+        self.assertIn("nao pode ser editada", reopened_paid.get_json()["error"])
 
-        cancelled = self.client.put(
-            f"/api/payables/{self.payable['id']}", json={"status": "cancelled"}
-        )
-        self.assertEqual(cancelled.status_code, 200)
+        with server.connect_db() as conn:
+            conn.execute(
+                """
+                UPDATE payables
+                SET status = 'cancelled', paid_amount = 0, paid_at = NULL
+                WHERE id = ?
+                """,
+                (self.payable["id"],),
+            )
         reopened = self.client.put(
             f"/api/payables/{self.payable['id']}", json={"status": "pending"}
         )
-        self.assertEqual(reopened.status_code, 200)
-        self.assertEqual(reopened.get_json()["data"]["status"], "pending")
+        self.assertEqual(reopened.status_code, 400)
+        self.assertIn("nao pode ser editada", reopened.get_json()["error"])
         self.assertEqual(self.table_counts()["cash_movements"], 1)
 
     def test_transaction_rolls_back_when_payable_update_fails(self):
@@ -531,10 +551,10 @@ class PayableUpdatePersistenceTest(unittest.TestCase):
         state_update = next(index for index, sql in enumerate(statements) if sql.startswith("INSERT INTO app_state"))
         audit_insert = next(index for index, sql in enumerate(statements) if sql.startswith("INSERT INTO audit_logs"))
         self.assertLess(payable_lock, state_lock)
-        self.assertLess(state_lock, payable_update)
-        self.assertLess(payable_update, state_update)
+        self.assertLess(payable_update, state_lock)
+        self.assertLess(state_lock, state_update)
         self.assertLess(state_update, audit_insert)
-        self.assertEqual(fake.saved_state["payables"], [self.other_payable, payable])
+        self.assertEqual(fake.saved_state["payables"], [payable, self.other_payable])
         self.assertEqual(fake.saved_state["products"], state["products"])
         for sql, params in fake.calls:
             if params:

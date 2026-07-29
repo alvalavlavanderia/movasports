@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from database_migrations.migrations.v014_financial_ledger import MIGRATION_014
+from database_migrations.migrations.v015_card_reconciliation import MIGRATION_015
 from environment_config import EnvironmentConfig
 import server
 
@@ -30,6 +32,17 @@ class FakePostgresConnection:
     def execute(self, sql, params=()):
         normalized = " ".join(sql.split())
         self.calls.append((normalized, params))
+        if normalized.startswith("SELECT id, name, normalized_name, status"):
+            return FakeCursor({
+                "id": "matriz:expense-category:gasolina",
+                "name": "Gasolina",
+                "normalized_name": "gasolina",
+                "status": "active",
+                "createdAt": "2026-07-17T10:00:00+00:00",
+                "updatedAt": "2026-07-17T10:00:00+00:00",
+            })
+        if normalized.startswith("SELECT COALESCE(SUM("):
+            return FakeCursor({"balance": 1000.0})
         if normalized.startswith("SELECT data FROM app_state"):
             return FakeCursor({"data": json.dumps(self.state, ensure_ascii=False)})
         if normalized.startswith("INSERT INTO app_state"):
@@ -62,13 +75,18 @@ class CashMovementPersistenceTest(unittest.TestCase):
         server.DB_PATH = os.path.join(self.temp_dir.name, "cash-movements.db")
         os.environ["MOVA_ADMIN_PASSWORD"] = self.ADMIN_PASSWORD
         server.init_db()
+        with sqlite3.connect(server.DB_PATH) as connection:
+            for statement in MIGRATION_014.sqlite_statements:
+                connection.execute(statement)
+            for statement in MIGRATION_015.sqlite_statements:
+                connection.execute(statement)
         self.baseline_movement = {
             "id": "cash-baseline",
             "direction": "in",
             "type": "opening",
             "description": "Saldo inicial de teste",
             "method": "cash",
-            "amount": 10.0,
+            "amount": 1000.0,
             "refId": "",
             "createdAt": "2026-07-17T10:00:00+00:00",
         }
@@ -175,7 +193,8 @@ class CashMovementPersistenceTest(unittest.TestCase):
         return {
             "id": movement_id,
             "direction": "out",
-            "type": "fuel",
+            "type": "Gasolina",
+            "expenseCategoryId": "matriz:expense-category:gasolina",
             "description": "Despesa operacional de teste",
             "method": "cash",
             "amount": 25.678,
@@ -198,7 +217,7 @@ class CashMovementPersistenceTest(unittest.TestCase):
         ):
             response = self.client.post("/api/cash-movements", json=self.movement_payload())
 
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 201, response.get_json())
         payload = response.get_json()
         self.assertEqual(set(payload), {"ok", "data"})
         self.assertTrue(payload["ok"])
@@ -224,6 +243,7 @@ class CashMovementPersistenceTest(unittest.TestCase):
         self.assertEqual(row["method"], movement["method"])
         self.assertEqual(row["amount"], movement["amount"])
         self.assertEqual(row["ref_id"], movement["refId"])
+        self.assertEqual(row["expense_category_id"], movement["expenseCategoryId"])
         self.assertEqual(row["created_at"], movement["createdAt"])
         self.assertEqual((audit["action"], audit["module"], audit["ref_id"]), ("create", "cash", movement["id"]))
         self.assertEqual(json.loads(audit["details"])["movement"]["id"], movement["id"])
@@ -311,6 +331,118 @@ class CashMovementPersistenceTest(unittest.TestCase):
                 translated = server.translate_postgres_sql(sql)
                 self.assertNotIn("?", translated)
                 self.assertIn("%s", translated)
+
+    def test_manual_outflow_cannot_make_cash_balance_negative(self):
+        self.authenticate("operator")
+        before_state = self.raw_state()
+        response = self.client.post(
+            "/api/cash-movements",
+            json={
+                **self.movement_payload("cash-negative"),
+                "amount": 1000.01,
+            },
+        )
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertIn("saldo", response.get_json()["error"].lower())
+        self.assertEqual(self.raw_state(), before_state)
+        with sqlite3.connect(server.DB_PATH) as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT id FROM cash_movements WHERE id = ?",
+                    ("cash-negative",),
+                ).fetchone()
+            )
+
+    def test_cash_reversal_is_inverse_traceable_and_idempotent(self):
+        self.authenticate("operator")
+        headers = {"Idempotency-Key": "reverse-cash-baseline"}
+        payload = {"reason": "Correcao de lancamento"}
+        with (
+            mock.patch.object(
+                server,
+                "write_state",
+                side_effect=AssertionError("write_state chamado"),
+            ),
+            mock.patch.object(
+                server,
+                "sync_business_tables",
+                side_effect=AssertionError("sync_business_tables chamado"),
+            ),
+        ):
+            first = self.client.post(
+                "/api/cash-movements/cash-baseline/reverse",
+                json=payload,
+                headers=headers,
+            )
+            replay = self.client.post(
+                "/api/cash-movements/cash-baseline/reverse",
+                json=payload,
+                headers=headers,
+            )
+
+        self.assertEqual(first.status_code, 201, first.get_json())
+        self.assertEqual(replay.status_code, 200, replay.get_json())
+        self.assertFalse(first.get_json()["replayed"])
+        self.assertTrue(replay.get_json()["replayed"])
+        reversal = first.get_json()["data"]["movement"]
+        self.assertEqual(reversal["direction"], "out")
+        self.assertEqual(reversal["amount"], 1000.0)
+        self.assertEqual(reversal["reversalOfId"], "cash-baseline")
+        self.assertEqual(replay.get_json()["data"], first.get_json()["data"])
+        with sqlite3.connect(server.DB_PATH) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM cash_movements WHERE reversal_of_id = ?",
+                ("cash-baseline",),
+            ).fetchone()[0]
+            original = conn.execute(
+                "SELECT reversed_at FROM cash_movements WHERE id = ?",
+                ("cash-baseline",),
+            ).fetchone()
+        self.assertEqual(count, 1)
+        self.assertTrue(original[0])
+
+    def test_legacy_bank_receipt_is_blocked_without_writes(self):
+        self.authenticate("operator")
+        headers = {"Idempotency-Key": "bank-receipt-2026-07-26"}
+        payload = {
+            "description": "Recebimento liquido da operadora",
+            "credit": 120.5,
+            "debit": 79.5,
+        }
+        with (
+            mock.patch.object(
+                server,
+                "write_state",
+                side_effect=AssertionError("write_state chamado"),
+            ),
+            mock.patch.object(
+                server,
+                "sync_business_tables",
+                side_effect=AssertionError("sync_business_tables chamado"),
+            ),
+        ):
+            response = self.client.post(
+                "/api/card-receipts",
+                json=payload,
+                headers=headers,
+            )
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertEqual(
+            response.get_json()["code"],
+            "CARD_RECONCILIATION_REQUIRED",
+        )
+        with sqlite3.connect(server.DB_PATH) as conn:
+            receipt_count = conn.execute(
+                "SELECT COUNT(*) FROM bank_receipts WHERE idempotency_key = ?",
+                (headers["Idempotency-Key"],),
+            ).fetchone()[0]
+            movement_count = conn.execute(
+                "SELECT COUNT(*) FROM cash_movements WHERE origin_type = 'bank_receipt'"
+            ).fetchone()[0]
+        self.assertEqual(receipt_count, 0)
+        self.assertEqual(movement_count, 0)
 
 
 if __name__ == "__main__":

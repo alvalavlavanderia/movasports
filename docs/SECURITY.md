@@ -55,8 +55,13 @@ Nunca confiar apenas no frontend.
 - O modo de autenticação offline por `file:` está descontinuado; falha de rede mantém o usuário desconectado.
 - O navegador não deve armazenar senha, hash ou verificador equivalente em memória global, `localStorage` ou `sessionStorage`.
 - Usuário sem hash válido não pode ser corrigido ou reconstruído automaticamente; o fluxo deve ser bloqueado com aviso sem identificação ou credencial.
-- O bootstrap não utiliza senha padrão: um banco novo só recebe o administrador quando `MOVA_ADMIN_PASSWORD` foi configurada explicitamente.
-- A ausência da variável não interrompe a aplicação e não cria credencial; o log informa apenas a configuração necessária.
+- O bootstrap não utiliza senha padrão e só pode ser executado explicitamente
+  pela CLI `database_bootstrap`, após migrations e validação estrutural.
+- A senha inicial deve ser fornecida por variável temporária indicada ao
+  comando, com `MOVA_ALLOW_BOOTSTRAP=true` e as confirmações exigidas; ela não
+  deve permanecer configurada no serviço.
+- A ausência da configuração de bootstrap não interrompe a aplicação e não
+  cria credencial automaticamente.
 
 ---
 

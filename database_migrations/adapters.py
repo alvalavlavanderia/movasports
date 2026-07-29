@@ -56,6 +56,12 @@ def _compact_sql(value: object) -> str:
     return re.sub(r"\s+", "", str(value or "")).lower().replace('"', "")
 
 
+def _normalize_index_predicate(value: object) -> str:
+    normalized = _compact_sql(value)
+    normalized = re.sub(r"::(?:text|charactervarying)", "", normalized)
+    return normalized.replace("(", "").replace(")", "")
+
+
 def _normalize_default(value: object) -> str | None:
     if value is None:
         return None
@@ -493,8 +499,10 @@ class PostgreSQLAdapter:
                 errors.append(f"Indice divergente: {index.name}")
             if ("createuniqueindex" in definition) != index.unique:
                 errors.append(f"Unicidade divergente: {index.name}")
-            if index.predicate and _compact_sql(index.predicate) not in definition:
-                errors.append(f"Predicado divergente: {index.name}")
+            if index.predicate:
+                actual_predicate = definition.split("where", 1)[1] if "where" in definition else ""
+                if _normalize_index_predicate(actual_predicate) != _normalize_index_predicate(index.predicate):
+                    errors.append(f"Predicado divergente: {index.name}")
         return SchemaValidation(not errors, tuple(errors))
 
     def validate_current_schema(self) -> SchemaValidation:

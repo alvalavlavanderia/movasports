@@ -9,6 +9,7 @@ from database_migrations.adapters import (
     POSTGRES_STATEMENT_TIMEOUT,
     PostgreSQLAdapter,
     SchemaValidation,
+    _normalize_index_predicate,
 )
 from database_migrations.models import AppliedMigration, Migration
 from database_migrations.registry import MIGRATIONS
@@ -69,6 +70,22 @@ class RecordingConnection:
 
 
 class PostgreSQLAdapterTests(unittest.TestCase):
+    def test_postgresql_index_predicate_normalizes_equivalent_text_cast(self):
+        expected = "cpf IS NOT NULL AND cpf <> ''"
+        actual = "((cpf IS NOT NULL) AND (cpf <> ''::text))"
+        self.assertEqual(
+            _normalize_index_predicate(actual),
+            _normalize_index_predicate(expected),
+        )
+
+    def test_postgresql_index_predicate_preserves_semantic_difference(self):
+        expected = "cpf IS NOT NULL AND cpf <> ''"
+        actual = "cpf IS NOT NULL"
+        self.assertNotEqual(
+            _normalize_index_predicate(actual),
+            _normalize_index_predicate(expected),
+        )
+
     def test_adapter_disables_autocommit(self):
         connection = RecordingConnection()
         PostgreSQLAdapter(connection)

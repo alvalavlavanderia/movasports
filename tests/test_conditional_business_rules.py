@@ -559,6 +559,8 @@ class ConditionalBusinessRulesTest(unittest.TestCase):
             html = source.read()
         with open(os.path.join(root, "script.js"), encoding="utf-8") as source:
             javascript = source.read()
+        with open(os.path.join(root, "style.css"), encoding="utf-8") as source:
+            stylesheet = source.read()
         for element_id in (
             "conditionalOpenCount",
             "conditionalOverdueCount",
@@ -574,6 +576,19 @@ class ConditionalBusinessRulesTest(unittest.TestCase):
         self.assertIn("pendingConditionalSaleDraft", javascript)
         self.assertIn("Continuar venda", javascript)
         self.assertNotIn("renderConditionalOpenListLegacy", javascript)
+        self.assertIn("conditional-summary-grid operational-kpis", html)
+        self.assertIn("card-reconciliation-summary operational-kpis", html)
+        for element_id in (
+            "cardOpenTotal",
+            "cardDueToday",
+            "cardReceivedMonth",
+            "cardDivergenceTotal",
+        ):
+            self.assertIn(f'id="{element_id}"', html)
+        self.assertIn(".operational-kpis article {", stylesheet)
+        self.assertIn(".operational-kpis svg {", stylesheet)
+        self.assertIn(".operational-kpis .green", stylesheet)
+        self.assertIn(".operational-kpis .pink", stylesheet)
 
     def test_postgresql_adapter_path_uses_locks(self):
         server.USE_POSTGRES = True

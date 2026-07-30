@@ -1100,20 +1100,19 @@
         <div class="payable-filter-grid">
           <label class="search-field payable-search"><span>Busca</span><input id="payableSearch" type="search" placeholder="Buscar por fornecedor, categoria ou descrição..."></label>
           <label class="field">Categoria de despesa<select id="payableCategoryFilter"><option value="all">Todas</option></select></label>
-          <label class="field">Status<select id="payableFilter"><option value="all">Todos</option><option value="open">Vencidas e pendentes</option><option value="pending">A vencer</option><option value="today">Vence hoje</option><option value="overdue">Vencida</option><option value="paid">Pago</option></select></label>
+          <label class="field">Status<select id="payableFilter"><option value="all">Todos</option><option value="open" selected>Vencidas e pendentes</option><option value="pending">A vencer</option><option value="today">Vence hoje</option><option value="overdue">Vencida</option><option value="paid">Pago</option></select></label>
           <label class="field">Início<input id="payableStart" type="date"></label>
           <label class="field">Fim<input id="payableEnd" type="date"></label>
         </div>
       </section>
       <div class="payable-main-layout">
         <section class="panel payable-table-panel">
-          <div class="section-title tight"><h2>Todas as contas</h2><span id="payableFoundCount" class="muted-count">0 contas encontradas</span></div>
+          <div class="section-title tight"><h2>Contas a pagar</h2><span id="payableFoundCount" class="muted-count">0 contas encontradas</span></div>
           <div class="payable-filter-tabs">
-            <button class="active" type="button" data-payable-filter="all">Todas <span id="payableTabAllCount">0</span></button>
-            <button type="button" data-payable-filter="open">Em aberto <span id="payableTabOpenCount">0</span></button>
+            <button class="active" type="button" data-payable-filter="open">Em aberto <span id="payableTabOpenCount">0</span></button>
             <button type="button" data-payable-filter="overdue">Vencidas <span id="payableTabOverdueCount">0</span></button>
-            <button type="button" data-payable-filter="today">Hoje <span id="payableTabTodayCount">0</span></button>
             <button type="button" data-payable-filter="paid">Pagas <span id="payableTabPaidCount">0</span></button>
+            <button type="button" data-payable-filter="all">Todas <span id="payableTabAllCount">0</span></button>
           </div>
           <div class="payable-table-wrap">
             <table class="payable-table">

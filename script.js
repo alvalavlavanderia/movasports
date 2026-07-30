@@ -161,7 +161,10 @@ function bindEvents() {
   document.querySelectorAll(".subtab").forEach((button) => button.addEventListener("click", () => activateSubtab(button.dataset.subtab)));
   document.querySelectorAll(".cadastro-card").forEach((button) => button.addEventListener("click", () => activateSubtab(button.dataset.subtab)));
   populateCashExpenseFilter();
-  ["cashStart", "cashEnd", "reportStart", "reportEnd", "manualReceiptDate", "cancelSaleDate", "cancelSaleEndDate", "creditReceiveDate", "payableStart", "payableEnd", "bankAccountDate", "saleHistoryStart", "saleHistoryEnd"].forEach((id) => els[id].value = todayIso);
+  ["cashStart", "cashEnd", "reportStart", "reportEnd", "manualReceiptDate", "cancelSaleDate", "cancelSaleEndDate", "creditReceiveDate", "bankAccountDate", "saleHistoryStart", "saleHistoryEnd"].forEach((id) => els[id].value = todayIso);
+  els.payableStart.value = "";
+  els.payableEnd.value = "";
+  els.payableFilter.value = "open";
   els.storeCreditFirstDueDate.value = addCalendarMonthsIso(todayIso, 1);
   els.exchangeStoreCreditFirstDueDate.value = addCalendarMonthsIso(todayIso, 1);
 
@@ -7045,21 +7048,19 @@ function renderPayables() {
   });
   const tabCounts = {
     all: baseItems.length,
-    open: baseItems.filter((item) => ["pending", "today", "overdue"].includes(payableStatus(item))).length,
+    open: baseItems.filter((item) => payableBalance(item) > 0).length,
     overdue: baseItems.filter((item) => payableStatus(item) === "overdue").length,
-    today: baseItems.filter((item) => payableStatus(item) === "today").length,
     paid: baseItems.filter((item) => payableStatus(item) === "paid").length,
   };
   if (els.payableTabAllCount) els.payableTabAllCount.textContent = tabCounts.all;
   if (els.payableTabOpenCount) els.payableTabOpenCount.textContent = tabCounts.open;
   if (els.payableTabOverdueCount) els.payableTabOverdueCount.textContent = tabCounts.overdue;
-  if (els.payableTabTodayCount) els.payableTabTodayCount.textContent = tabCounts.today;
   if (els.payableTabPaidCount) els.payableTabPaidCount.textContent = tabCounts.paid;
   document.querySelectorAll("[data-payable-filter]").forEach((button) => button.classList.toggle("active", button.dataset.payableFilter === filter));
   const items = baseItems.filter((item) => {
     const status = payableStatus(item);
     if (filter === "all") return true;
-    if (filter === "open") return status === "pending" || status === "today" || status === "overdue";
+    if (filter === "open") return payableBalance(item) > 0;
     if (filter === "today") return status === "today";
     return status === filter;
   }).sort((a, b) => a.dueDate.localeCompare(b.dueDate));

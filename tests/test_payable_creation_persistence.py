@@ -487,5 +487,43 @@ class PayableCreationPersistenceTest(unittest.TestCase):
                 self.assertIn("%s", translated)
 
 
+class PayableFrontendDefaultsTest(unittest.TestCase):
+    def test_open_payables_are_the_default_without_an_initial_date_range(self):
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(project_root, "index.html"), encoding="utf-8") as source:
+            html = source.read()
+        with open(os.path.join(project_root, "script.js"), encoding="utf-8") as source:
+            script = source.read()
+
+        self.assertIn('<option value="open" selected>Vencidas e pendentes</option>', html)
+        self.assertIn(
+            'class="active" type="button" data-payable-filter="open">Em aberto',
+            html,
+        )
+        self.assertNotIn('data-payable-filter="today"', html)
+        open_position = html.index('data-payable-filter="open"')
+        overdue_position = html.index('data-payable-filter="overdue"', open_position)
+        paid_position = html.index('data-payable-filter="paid"', overdue_position)
+        all_position = html.index('data-payable-filter="all"', paid_position)
+        self.assertLess(open_position, overdue_position)
+        self.assertLess(overdue_position, paid_position)
+        self.assertLess(paid_position, all_position)
+        self.assertNotIn(
+            '"creditReceiveDate", "payableStart", "payableEnd", "bankAccountDate"',
+            script,
+        )
+        self.assertIn('els.payableStart.value = "";', script)
+        self.assertIn('els.payableEnd.value = "";', script)
+        self.assertIn('els.payableFilter.value = "open";', script)
+        self.assertIn(
+            'if (filter === "open") return payableBalance(item) > 0;',
+            script,
+        )
+        self.assertIn(
+            ".sort((a, b) => a.dueDate.localeCompare(b.dueDate))",
+            script,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ const todayIso = toDateInput(new Date());
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 const paymentLabels = { cash: "Dinheiro", pix: "PIX", debit: "Débito", credit: "Crédito", storeCredit: "Crediário" };
 const cashExpenseTypes = ["Gasolina", "Lanches", "Estacionamento", "Motoboy", "Material de limpeza", "Outros"];
+const CREDIT_CUSTOMER_PAGE_SIZE = 10;
 const BACKEND_ENABLED = location.protocol !== "file:";
 const BACKEND_REQUIRED_MESSAGE = "O sistema precisa ser acessado pelo endereço oficial do servidor. Abra o ERP pelo link utilizado normalmente pela empresa.";
 const STATE_API_URL = "/api/state";
@@ -46,7 +47,8 @@ let selectedConditionalId = "";
 let conditionalView = "list";
 let pendingConditionalSaleDraft = null;
 let selectedCreditCustomerId = "";
-let creditFilterStatus = "all";
+let creditFilterStatus = "open";
+let creditCustomerPage = 1;
 let selectedPayableId = "";
 let selectedCustomerDetailId = "";
 let quickProductCatalogContext = null;
@@ -233,7 +235,13 @@ function bindEvents() {
   els.uploadStoreLogoButton.addEventListener("click", uploadStoreLogo);
 
   ["customerListSearch", "customerStatusFilter", "supplierListSearch", "supplierStatusFilter", "supplierFinancialFilter", "brandListSearch", "categoryListSearch", "sizeListSearch", "colorListSearch", "expenseCategoryListSearch", "userListSearch", "stockSearch", "stockCategoryFilter", "stockBrandFilter", "stockStatusFilter", "saleProductSearch", "saleCustomerSearch", "saleDiscount", "saleAddition", "saleHistorySearch", "saleHistoryType", "saleHistoryStart", "saleHistoryEnd", "saleHistoryStatus", "cancelSaleSearch", "cancelSaleDate", "cancelSaleEndDate", "creditCustomerSearch", "payableSearch", "payableCategoryFilter", "payableFilter", "payableStart", "payableEnd", "cashStart", "cashEnd", "cashMethodFilter", "cashTypeFilter"].forEach((id) => {
-    els[id].addEventListener("input", renderAll);
+    els[id].addEventListener("input", () => {
+      if (id === "creditCustomerSearch") {
+        creditCustomerPage = 1;
+        selectedCreditCustomerId = "";
+      }
+      renderAll();
+    });
   });
   els.dashSalesRange.addEventListener("change", () => {
     updateDashboardPeriodControls();
@@ -344,6 +352,8 @@ function bindEvents() {
   els.creditExportButton.addEventListener("click", exportCreditCustomers);
   document.querySelectorAll("[data-credit-filter]").forEach((button) => button.addEventListener("click", () => {
     creditFilterStatus = button.dataset.creditFilter;
+    creditCustomerPage = 1;
+    selectedCreditCustomerId = "";
     renderCreditCustomers();
   }));
   els.creditNewCustomerButton.addEventListener("click", () => {
@@ -1145,6 +1155,12 @@ function activateTab(tabId) {
     loadAuditLogs(true);
   }
   if (tabId === "contas") ensurePayableRecurrences();
+  if (tabId === "crediario") {
+    creditFilterStatus = "open";
+    creditCustomerPage = 1;
+    selectedCreditCustomerId = "";
+    renderCreditCustomers();
+  }
   if (tabId === "cartoes") loadCardReceivables();
   if (tabId === "catalogo") {
     loadCatalog(true);
@@ -6299,12 +6315,15 @@ function renderCreditCustomers() {
     return stats.totalCount > 0 && (!query || normalize(text).includes(query));
   });
   const countByStatus = {
-    all: searchedCustomers.length,
+    open: searchedCustomers.filter((customer) => customerCreditStats(customer.id).open > 0).length,
     ok: searchedCustomers.filter((customer) => creditStatusFromStats(customerCreditStats(customer.id)) === "ok").length,
     overdue: searchedCustomers.filter((customer) => creditStatusFromStats(customerCreditStats(customer.id)) === "overdue").length,
     paid: searchedCustomers.filter((customer) => creditStatusFromStats(customerCreditStats(customer.id)) === "paid").length,
   };
-  const customers = searchedCustomers.filter((customer) => creditFilterStatus === "all" || creditStatusFromStats(customerCreditStats(customer.id)) === creditFilterStatus);
+  const customers = searchedCustomers.filter((customer) => {
+    const stats = customerCreditStats(customer.id);
+    return creditFilterStatus === "open" ? stats.open > 0 : creditStatusFromStats(stats) === creditFilterStatus;
+  });
   const customerIds = new Set(customers.map((customer) => customer.id));
   const creditItems = db.receivables.filter((item) => item.method === "storeCredit" && item.status !== "cancelled" && customerIds.has(item.customerId));
   const openItems = creditItems.filter((item) => receivableBalance(item) > 0);
@@ -6317,7 +6336,7 @@ function renderCreditCustomers() {
   els.creditDueCount.textContent = `${dueItems.length} parcela${dueItems.length === 1 ? "" : "s"}`;
   els.creditOverdueTotal.textContent = money.format(overdueItems.reduce((total, item) => total + receivableBalance(item), 0));
   els.creditOverdueCount.textContent = `${overdueItems.length} parcela${overdueItems.length === 1 ? "" : "s"}`;
-  if (els.creditFilterAllCount) els.creditFilterAllCount.textContent = countByStatus.all;
+  if (els.creditFilterOpenCount) els.creditFilterOpenCount.textContent = countByStatus.open;
   if (els.creditFilterOkCount) els.creditFilterOkCount.textContent = countByStatus.ok;
   if (els.creditFilterOverdueCount) els.creditFilterOverdueCount.textContent = countByStatus.overdue;
   if (els.creditFilterPaidCount) els.creditFilterPaidCount.textContent = countByStatus.paid;
@@ -6330,8 +6349,12 @@ function renderCreditCustomers() {
     renderCreditCustomerDetail(null);
     return;
   }
-  if (!customers.some((customer) => customer.id === selectedCreditCustomerId)) selectedCreditCustomerId = customers[0].id;
-  customers.forEach((customer) => {
+  const totalPages = Math.ceil(customers.length / CREDIT_CUSTOMER_PAGE_SIZE);
+  creditCustomerPage = Math.min(Math.max(creditCustomerPage, 1), totalPages);
+  const pageStart = (creditCustomerPage - 1) * CREDIT_CUSTOMER_PAGE_SIZE;
+  const pageCustomers = customers.slice(pageStart, pageStart + CREDIT_CUSTOMER_PAGE_SIZE);
+  if (!pageCustomers.some((customer) => customer.id === selectedCreditCustomerId)) selectedCreditCustomerId = pageCustomers[0].id;
+  pageCustomers.forEach((customer) => {
     const stats = customerCreditStats(customer.id);
     const statusKey = creditStatusFromStats(stats);
     const row = document.createElement("tr");
@@ -6359,11 +6382,60 @@ function renderCreditCustomers() {
     }));
     els.creditCustomerList.append(row);
   });
-  els.creditFooter.innerHTML = `
-    <span>Mostrando 1 a ${customers.length} de ${searchedCustomers.length} cliente${searchedCustomers.length === 1 ? "" : "s"}</span>
-    <div class="credit-pagination"><button type="button" disabled>Anterior</button><button type="button" class="active">1</button><button type="button" disabled>Próximo</button></div>
-  `;
+  renderCreditCustomerPagination(customers.length, pageStart, pageCustomers.length, totalPages);
   renderCreditCustomerDetail(db.customers.find((customer) => customer.id === selectedCreditCustomerId));
+}
+
+function creditPaginationWindow(currentPage, totalPages) {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  const pages = new Set([1, totalPages, currentPage - 1, currentPage, currentPage + 1]);
+  if (currentPage <= 3) [2, 3, 4].forEach((page) => pages.add(page));
+  if (currentPage >= totalPages - 2) [totalPages - 3, totalPages - 2, totalPages - 1].forEach((page) => pages.add(page));
+  const sortedPages = Array.from(pages).filter((page) => page >= 1 && page <= totalPages).sort((a, b) => a - b);
+  return sortedPages.reduce((items, page, index) => {
+    if (index > 0 && page - sortedPages[index - 1] > 1) items.push("ellipsis");
+    items.push(page);
+    return items;
+  }, []);
+}
+
+function renderCreditCustomerPagination(totalCustomers, pageStart, visibleCount, totalPages) {
+  els.creditFooter.innerHTML = "";
+  const firstVisible = totalCustomers ? pageStart + 1 : 0;
+  const lastVisible = pageStart + visibleCount;
+  const summary = document.createElement("span");
+  summary.textContent = `Mostrando ${firstVisible} a ${lastVisible} de ${totalCustomers} cliente${totalCustomers === 1 ? "" : "s"}`;
+  const navigation = document.createElement("div");
+  navigation.className = "credit-pagination";
+  navigation.setAttribute("aria-label", "Paginação dos clientes do crediário");
+  navigation.append(button("Anterior", "ghost", () => {
+    creditCustomerPage -= 1;
+    selectedCreditCustomerId = "";
+    renderCreditCustomers();
+  }, creditCustomerPage === 1));
+  creditPaginationWindow(creditCustomerPage, totalPages).forEach((page) => {
+    if (page === "ellipsis") {
+      const ellipsis = document.createElement("span");
+      ellipsis.className = "credit-pagination-ellipsis";
+      ellipsis.textContent = "...";
+      navigation.append(ellipsis);
+      return;
+    }
+    const pageButton = button(String(page), page === creditCustomerPage ? "active" : "ghost", () => {
+      creditCustomerPage = page;
+      selectedCreditCustomerId = "";
+      renderCreditCustomers();
+    });
+    pageButton.setAttribute("aria-label", `Página ${page}`);
+    if (page === creditCustomerPage) pageButton.setAttribute("aria-current", "page");
+    navigation.append(pageButton);
+  });
+  navigation.append(button("Próximo", "ghost", () => {
+    creditCustomerPage += 1;
+    selectedCreditCustomerId = "";
+    renderCreditCustomers();
+  }, creditCustomerPage === totalPages));
+  els.creditFooter.append(summary, navigation);
 }
 
 function renderCreditCustomerDetail(customer) {
@@ -6493,7 +6565,8 @@ function filteredCreditCustomersForExport() {
     const stats = customerCreditStats(customer.id);
     const status = creditStatusFromStats(stats);
     const text = [customer.name, customer.whatsapp, customer.phone, customer.cpf].join(" ");
-    return stats.totalCount > 0 && (!query || normalize(text).includes(query)) && (creditFilterStatus === "all" || status === creditFilterStatus);
+    const matchesStatus = creditFilterStatus === "open" ? stats.open > 0 : status === creditFilterStatus;
+    return stats.totalCount > 0 && (!query || normalize(text).includes(query)) && matchesStatus;
   });
 }
 

@@ -522,5 +522,28 @@ class StoreCreditBusinessRulesTest(unittest.TestCase):
             server.store_credit_due_dates("invalid", 2)
 
 
+class StoreCreditFrontendTest(unittest.TestCase):
+    def test_open_filter_and_ten_customer_pagination_are_the_default(self):
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(project_root, "index.html"), encoding="utf-8") as source:
+            html = source.read()
+        with open(os.path.join(project_root, "script.js"), encoding="utf-8") as source:
+            script = source.read()
+
+        self.assertIn('data-credit-filter="open">Abertos', html)
+        self.assertNotIn('data-credit-filter="all">Todos', html)
+        self.assertIn("const CREDIT_CUSTOMER_PAGE_SIZE = 10;", script)
+        self.assertIn('let creditFilterStatus = "open";', script)
+        self.assertIn(
+            'return creditFilterStatus === "open" ? stats.open > 0',
+            script,
+        )
+        self.assertIn(
+            "customers.slice(pageStart, pageStart + CREDIT_CUSTOMER_PAGE_SIZE)",
+            script,
+        )
+        self.assertIn("creditPaginationWindow(creditCustomerPage, totalPages)", script)
+
+
 if __name__ == "__main__":
     unittest.main()

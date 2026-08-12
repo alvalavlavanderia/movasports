@@ -2233,13 +2233,56 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
   color: #b45b0a;
 }
 
-.product-code-action {
-  grid-template-columns: minmax(0, 1fr) auto;
+.field-with-action.product-code-action {
+  grid-template-columns: minmax(0, 1fr) 92px;
 }
 
 .product-code-action .ghost {
-  min-width: 92px;
-  padding-inline: 14px;
+  width: 92px;
+  min-width: 0;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
+.registration-pagination-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.registration-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.registration-pagination button {
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.registration-pagination button.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.registration-pagination-ellipsis {
+  min-width: 22px;
+  text-align: center;
 }
 
 .product-stock-summary {
@@ -7357,6 +7400,11 @@ input:focus, select:focus {
   .cancel-sale-total { justify-self: start; }
   .cancel-sale-actions { justify-content: flex-start; }
   .cancel-sale-footer { display: grid; }
+  .registration-pagination-footer {
+    align-items: flex-start;
+    display: grid;
+  }
+  .registration-pagination { justify-content: flex-start; }
   .stock-actions { justify-content: stretch; display: grid; grid-template-columns: 1fr; }
   .catalog-actions { display: grid; grid-template-columns: 1fr; width: 100%; }
   .catalog-result-head { display: grid; }

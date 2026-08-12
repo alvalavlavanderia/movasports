@@ -2933,6 +2933,23 @@ def public_user(row: sqlite3.Row | dict) -> dict:
     }
 
 
+def registration_user(row: sqlite3.Row | dict) -> dict:
+    return {
+        **public_user(row),
+        "createdAt": str(
+            row_value(
+                row,
+                "created_at",
+                row_value(row, "createdAt", row_value(row, "updated_at", row_value(row, "updatedAt", ""))),
+            )
+            or ""
+        ),
+        "updatedAt": str(
+            row_value(row, "updated_at", row_value(row, "updatedAt", "")) or ""
+        ),
+    }
+
+
 def sanitize_audit_value(value):
     if isinstance(value, dict):
         sanitized = {}
@@ -22721,15 +22738,24 @@ def list_users():
     with connect_db() as conn:
         rows = conn.execute(
             """
-            SELECT id, name, login, role, active, blocked_at,
-                   failed_login_attempts, last_login_at
+            SELECT users.id, users.name, users.login, users.role, users.active,
+                   users.blocked_at, users.failed_login_attempts, users.last_login_at,
+                   users.updated_at,
+                   COALESCE((
+                       SELECT MIN(audit_logs.created_at)
+                       FROM audit_logs
+                       WHERE audit_logs.store_id = users.store_id
+                         AND audit_logs.module = 'user'
+                         AND audit_logs.action = 'create'
+                         AND audit_logs.ref_id = users.id
+                   ), users.updated_at) AS created_at
             FROM users
-            WHERE store_id = ?
-            ORDER BY name COLLATE NOCASE
+            WHERE users.store_id = ?
+            ORDER BY LOWER(users.name)
             """,
             ("matriz",),
         ).fetchall()
-    return jsonify({"ok": True, "data": [public_user(row) for row in rows]})
+    return jsonify({"ok": True, "data": [registration_user(row) for row in rows]})
 
 
 @app.post("/api/users")
@@ -22773,7 +22799,7 @@ def create_user():
         public = public_user(user)
         record_audit("create", "user", user["id"], {"user": public}, conn)
     sync_user_to_state(public)
-    return jsonify({"ok": True, "data": public}), 201
+    return jsonify({"ok": True, "data": registration_user(user)}), 201
 
 
 @app.put("/api/users/<user_id>")
@@ -22840,10 +22866,19 @@ def update_user(user_id: str):
         )
         updated = conn.execute(
             """
-            SELECT id, name, login, role, active, blocked_at,
-                   failed_login_attempts, last_login_at
+            SELECT users.id, users.name, users.login, users.role, users.active,
+                   users.blocked_at, users.failed_login_attempts, users.last_login_at,
+                   users.updated_at,
+                   COALESCE((
+                       SELECT MIN(audit_logs.created_at)
+                       FROM audit_logs
+                       WHERE audit_logs.store_id = users.store_id
+                         AND audit_logs.module = 'user'
+                         AND audit_logs.action = 'create'
+                         AND audit_logs.ref_id = users.id
+                   ), users.updated_at) AS created_at
             FROM users
-            WHERE store_id = ? AND id = ?
+            WHERE users.store_id = ? AND users.id = ?
             """,
             ("matriz", user_id),
         ).fetchone()
@@ -22852,7 +22887,7 @@ def update_user(user_id: str):
     public = public_user(updated)
     if current_user and current_user.get("id") == user_id:
         session["user"] = public
-    return jsonify({"ok": True, "data": public})
+    return jsonify({"ok": True, "data": registration_user(updated)})
 
 
 @app.delete("/api/users/<user_id>")

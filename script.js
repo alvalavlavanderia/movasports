@@ -8,6 +8,7 @@ const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL
 const paymentLabels = { cash: "Dinheiro", pix: "PIX", debit: "Débito", credit: "Crédito", storeCredit: "Crediário" };
 const cashExpenseTypes = ["Gasolina", "Lanches", "Estacionamento", "Motoboy", "Material de limpeza", "Outros"];
 const CREDIT_CUSTOMER_PAGE_SIZE = 10;
+const REGISTRATION_PAGE_SIZE = 10;
 const BACKEND_ENABLED = location.protocol !== "file:";
 const BACKEND_REQUIRED_MESSAGE = "O sistema precisa ser acessado pelo endereço oficial do servidor. Abra o ERP pelo link utilizado normalmente pela empresa.";
 const STATE_API_URL = "/api/state";
@@ -58,6 +59,20 @@ let productPhotoData = "";
 let productPhotoFile = null;
 let pendingProductEntryKey = "";
 let productLookupMode = "idle";
+let unauthorizedNoticeShown = false;
+let initialSessionSyncComplete = !BACKEND_ENABLED;
+const registrationPages = {
+  products: 1,
+  customers: 1,
+  suppliers: 1,
+  brands: 1,
+  categories: 1,
+  sizes: 1,
+  colors: 1,
+  expenseCategories: 1,
+  cardModalities: 1,
+  users: 1,
+};
 let catalogViewMode = "grid";
 let serverSaveTimer = null;
 let serverStateLoaded = !BACKEND_ENABLED;
@@ -199,8 +214,14 @@ function bindEvents() {
   els.backCadastroButton.addEventListener("click", showCadastroHome);
   els.exportProductsButton.addEventListener("click", exportProducts);
   els.exportCustomersButton.addEventListener("click", exportCustomers);
-  els.productTableSearch.addEventListener("input", renderProducts);
-  els.productTableFilter.addEventListener("input", renderProducts);
+  els.productTableSearch.addEventListener("input", () => {
+    resetRegistrationPage("products");
+    renderProducts();
+  });
+  els.productTableFilter.addEventListener("input", () => {
+    resetRegistrationPage("products");
+    renderProducts();
+  });
   els.productPhoto.addEventListener("change", readProductPhoto);
   els.productCost.addEventListener("input", updateProductMarginFromPrice);
   els.productPrice.addEventListener("input", updateProductMarginFromPrice);
@@ -230,7 +251,10 @@ function bindEvents() {
   els.cardModalityForm.addEventListener("submit", saveCardModality);
   els.clearCardModalityButton.addEventListener("click", resetCardModalityForm);
   els.cardModalityType.addEventListener("change", updateCardModalityInstallments);
-  els.cardModalitySearch.addEventListener("input", renderCardModalities);
+  els.cardModalitySearch.addEventListener("input", () => {
+    resetRegistrationPage("cardModalities");
+    renderCardModalities();
+  });
   els.supplierDetailCloseButton.addEventListener("click", closeSupplierDetail);
   els.userForm.addEventListener("submit", saveUser);
   els.userThemeSelect.addEventListener("change", saveUserTheme);
@@ -239,6 +263,20 @@ function bindEvents() {
 
   ["customerListSearch", "customerStatusFilter", "supplierListSearch", "supplierStatusFilter", "supplierFinancialFilter", "brandListSearch", "categoryListSearch", "sizeListSearch", "colorListSearch", "expenseCategoryListSearch", "userListSearch", "stockSearch", "stockCategoryFilter", "stockBrandFilter", "stockStatusFilter", "saleProductSearch", "saleCustomerSearch", "saleDiscount", "saleAddition", "saleHistorySearch", "saleHistoryType", "saleHistoryStart", "saleHistoryEnd", "saleHistoryStatus", "cancelSaleSearch", "cancelSaleDate", "cancelSaleEndDate", "creditCustomerSearch", "payableSearch", "payableCategoryFilter", "payableFilter", "payableStart", "payableEnd", "cashStart", "cashEnd", "cashMethodFilter", "cashTypeFilter"].forEach((id) => {
     els[id].addEventListener("input", () => {
+      const registrationPageByControl = {
+        customerListSearch: "customers",
+        customerStatusFilter: "customers",
+        supplierListSearch: "suppliers",
+        supplierStatusFilter: "suppliers",
+        supplierFinancialFilter: "suppliers",
+        brandListSearch: "brands",
+        categoryListSearch: "categories",
+        sizeListSearch: "sizes",
+        colorListSearch: "colors",
+        expenseCategoryListSearch: "expenseCategories",
+        userListSearch: "users",
+      };
+      if (registrationPageByControl[id]) resetRegistrationPage(registrationPageByControl[id]);
       if (id === "creditCustomerSearch") {
         creditCustomerPage = 1;
         selectedCreditCustomerId = "";
@@ -534,6 +572,7 @@ function initializeAuxiliaryCatalogPanels() {
               <tbody id="${config.prefix}List"></tbody>
             </table>
           </div>
+          <div id="${config.prefix}Pagination" class="registration-pagination-footer"></div>
         </section>
       </div>
     `;
@@ -772,6 +811,14 @@ function showBackendRequiredMessage() {
 async function login(event) {
   event.preventDefault();
   els.loginMessage.hidden = true;
+  const loginName = els.loginUser.value.trim();
+  const password = els.loginPassword.value;
+  if (!loginName || !password) {
+    els.loginMessage.textContent = "Informe o usuário e a senha.";
+    els.loginMessage.hidden = false;
+    (loginName ? els.loginPassword : els.loginUser).focus();
+    return;
+  }
   clearSessionCapabilities();
   applySession();
   if (!BACKEND_ENABLED) {
@@ -782,11 +829,13 @@ async function login(event) {
     const response = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ login: els.loginUser.value.trim(), password: els.loginPassword.value }),
+      body: JSON.stringify({ login: loginName, password }),
     });
     const payload = await response.json();
     if (response.ok && payload.user) {
       session = sanitizeUserForBrowser(payload.user);
+      unauthorizedNoticeShown = false;
+      initialSessionSyncComplete = true;
       setSessionCapabilities(payload.capabilities);
       saveSession();
       applySession();
@@ -807,6 +856,8 @@ async function login(event) {
 
 async function logout() {
   session = null;
+  unauthorizedNoticeShown = false;
+  initialSessionSyncComplete = true;
   clearSessionCapabilities();
   saveSession();
   applySession();
@@ -833,6 +884,7 @@ async function syncSessionFromServer() {
     const payload = await response.json();
     if (payload.user) {
       session = sanitizeUserForBrowser(payload.user);
+      unauthorizedNoticeShown = false;
       setSessionCapabilities(payload.capabilities);
       saveSession();
       applySession();
@@ -849,6 +901,8 @@ async function syncSessionFromServer() {
     clearSessionCapabilities();
     applySession();
     console.warn(error);
+  } finally {
+    initialSessionSyncComplete = true;
   }
 }
 
@@ -1134,11 +1188,16 @@ function applySession() {
 
 function handleUnauthorized(response, payload = {}) {
   if (response.status !== 401) return false;
+  const hadAuthenticatedSession = Boolean(session);
   session = null;
   clearSessionCapabilities();
   saveSession();
   applySession();
-  alert(payload.error || "Sua sessão expirou. Faça login novamente.");
+  if (initialSessionSyncComplete && hadAuthenticatedSession && !unauthorizedNoticeShown) {
+    unauthorizedNoticeShown = true;
+    els.loginMessage.textContent = payload.error || "Sua sessão expirou. Faça login novamente.";
+    els.loginMessage.hidden = false;
+  }
   return true;
 }
 
@@ -1257,27 +1316,30 @@ function updateProductPriceFromMargin() {
 }
 
 async function productPayloadFromForm(existing = null) {
-  const photo = await resolveProductPhoto(existing?.photo || "");
-  if (photo === null) return null;
-  return {
+  const draft = {
     barcode: els.productBarcode.value.trim().toUpperCase(),
     name: els.productName.value.trim(),
     size: els.productSize.value.trim(),
-    sizeId: findCatalogItem("sizes", els.productSize.value)?.id || "",
     color: els.productColor.value.trim(),
-    colorId: findCatalogItem("colors", els.productColor.value)?.id || "",
     gender: els.productGender.value,
     category: els.productCategory.value.trim(),
-    categoryId: findCatalogItem("categories", els.productCategory.value)?.id || "",
     brand: els.productBrand.value.trim(),
-    brandId: findCatalogItem("brands", els.productBrand.value)?.id || "",
     supplier: els.productSupplier.value.trim(),
-    supplierId: db.suppliers.find((item) => item.status === "active" && normalize(item.name) === normalize(els.productSupplier.value))?.id || "",
     minStock: Math.max(0, Math.floor(readNumber(els.productMinStock.value))),
     description: els.productDescription.value.trim(),
     active: els.productActive.checked,
     cost: readNumber(els.productCost.value),
     price: readNumber(els.productPrice.value),
+  };
+  const photo = await resolveProductPhoto(existing?.photo || "");
+  if (photo === null) return null;
+  return {
+    ...draft,
+    sizeId: findCatalogItem("sizes", draft.size)?.id || "",
+    colorId: findCatalogItem("colors", draft.color)?.id || "",
+    categoryId: findCatalogItem("categories", draft.category)?.id || "",
+    brandId: findCatalogItem("brands", draft.brand)?.id || "",
+    supplierId: db.suppliers.find((item) => item.status === "active" && normalize(item.name) === normalize(draft.supplier))?.id || "",
     photo,
   };
 }
@@ -1351,7 +1413,8 @@ function populateProductForm(product) {
   updateProductMode();
 }
 
-async function lookupProductByCode() {
+async function lookupProductByCode(options = {}) {
+  const preserveDraft = options?.preserveDraft === true;
   const barcode = els.productBarcode.value.trim().toUpperCase();
   if (!barcode) return alert("Informe o código do produto.");
   if (!BACKEND_ENABLED) return showBackendRequiredMessage();
@@ -1373,11 +1436,16 @@ async function lookupProductByCode() {
       populateProductForm(payload.data.product);
       return true;
     }
-    resetProductForm(barcode);
+    if (preserveDraft) {
+      els.editingProductId.value = "";
+      setProductStockSummary();
+    } else {
+      resetProductForm(barcode);
+    }
     productLookupMode = "new";
     els.productBarcode.value = payload.data?.barcode || barcode;
     updateProductMode();
-    els.productName.focus();
+    if (!preserveDraft) els.productName.focus();
     return true;
   } catch (error) {
     console.warn(error);
@@ -1418,7 +1486,7 @@ async function saveProductChanges() {
 
 async function confirmProductEntry(event) {
   event.preventDefault();
-  if (productLookupMode === "idle" && !(await lookupProductByCode())) return;
+  if (productLookupMode === "idle" && !(await lookupProductByCode({ preserveDraft: true }))) return;
   const existing = db.products.find((item) => item.id === els.editingProductId.value);
   const quantity = Number(els.productEntryQuantity.value);
   if (!Number.isInteger(quantity) || quantity <= 0) {
@@ -1475,9 +1543,11 @@ async function confirmProductEntry(event) {
 
 function applyProductLocally(product) {
   catalogData = { items: [], total: 0, filters: {}, query: {} };
-  db.products = db.products.some((item) => item.id === product.id)
+  const exists = db.products.some((item) => item.id === product.id);
+  db.products = exists
     ? db.products.map((item) => item.id === product.id ? product : item)
     : [product, ...db.products];
+  if (!exists) resetRegistrationPage("products");
 }
 
 function resetProductForm(value = "") {
@@ -1603,9 +1673,11 @@ async function submitCustomer(customer, existing, duplicateAcknowledged = false)
 }
 
 function applyCustomerLocally(customer) {
-  db.customers = db.customers.some((item) => item.id === customer.id)
+  const exists = db.customers.some((item) => item.id === customer.id);
+  db.customers = exists
     ? db.customers.map((item) => item.id === customer.id ? { ...item, ...customer } : item)
     : [customer, ...db.customers];
+  if (!exists) resetRegistrationPage("customers");
 }
 
 function resetCustomerForm() {
@@ -1850,9 +1922,11 @@ function completeQuickProductCatalog(collection, item) {
 }
 
 function applySupplierLocally(supplier) {
-  db.suppliers = db.suppliers.some((item) => item.id === supplier.id)
+  const exists = db.suppliers.some((item) => item.id === supplier.id);
+  db.suppliers = exists
     ? db.suppliers.map((item) => item.id === supplier.id ? supplier : item)
     : [supplier, ...db.suppliers];
+  if (!exists) resetRegistrationPage("suppliers");
 }
 
 async function saveSimpleName(event, collection, input) {
@@ -1912,9 +1986,11 @@ function catalogFrontendConfig(collection) {
 
 function applySimpleNameLocally(collection, item) {
   const normalizedItem = { ...item, name: catalogName(item), status: item.status || "active" };
-  db[collection] = db[collection].some((value) => value.id === normalizedItem.id)
+  const exists = db[collection].some((value) => value.id === normalizedItem.id);
+  db[collection] = exists
     ? db[collection].map((value) => value.id === normalizedItem.id ? normalizedItem : value)
     : [...db[collection], normalizedItem];
+  if (!exists) resetRegistrationPage(collection);
   const config = catalogFrontendConfig(collection);
   if (config?.field) {
     db.products = db.products.map((product) => product[config.idField] === normalizedItem.id
@@ -1965,9 +2041,11 @@ async function saveUser(event) {
 
 function applyUserLocally(user) {
   const publicUser = sanitizeUserForBrowser(user);
-  db.users = db.users.some((item) => item.id === user.id)
+  const exists = db.users.some((item) => item.id === user.id);
+  db.users = exists
     ? db.users.map((item) => item.id === publicUser.id ? publicUser : item)
     : [...db.users, publicUser];
+  if (!exists) resetRegistrationPage("users");
 }
 
 function resetSupplierForm() {
@@ -2392,12 +2470,18 @@ function renderCardModalities() {
   const filtered = cardModalities.filter((item) => (
     !query || normalize(`${item.name} ${item.method} ${item.status}`).includes(query)
   ));
+  const modalities = paginatedRegistrations(
+    filtered,
+    "cardModalities",
+    els.cardModalityPagination,
+    renderCardModalities,
+  );
   els.cardModalityList.innerHTML = "";
-  if (!filtered.length) {
+  if (!modalities.length) {
     els.cardModalityList.innerHTML = `<tr><td colspan="7" class="empty-cell">Nenhuma modalidade encontrada.</td></tr>`;
     return;
   }
-  filtered.forEach((modality) => {
+  modalities.forEach((modality) => {
     const row = document.createElement("tr");
     row.innerHTML = `
       <td><strong>${escapeHtml(modality.name)}</strong></td>
@@ -2467,6 +2551,7 @@ async function saveCardModality(event) {
       setCardModalityError(result.error || "Não foi possível salvar a modalidade.");
       return;
     }
+    if (!cardModalityId) resetRegistrationPage("cardModalities");
     cardModalitiesLoaded = false;
     await loadCardModalities(true);
     resetCardModalityForm();
@@ -2585,6 +2670,78 @@ function fillSelect(element, items, allLabel) {
   element.value = [...element.options].some((option) => option.value === current) ? current : "all";
 }
 
+function resetRegistrationPage(key) {
+  if (Object.prototype.hasOwnProperty.call(registrationPages, key)) registrationPages[key] = 1;
+}
+
+function newestRegistrationsFirst(items = []) {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.item.createdAt || left.item.updatedAt || "") || 0;
+      const rightTime = Date.parse(right.item.createdAt || right.item.updatedAt || "") || 0;
+      return rightTime - leftTime || left.index - right.index;
+    })
+    .map(({ item }) => item);
+}
+
+function registrationPaginationWindow(currentPage, totalPages) {
+  if (totalPages <= 7) return Array.from({ length: totalPages }, (_, index) => index + 1);
+  const pages = new Set([1, totalPages, currentPage - 1, currentPage, currentPage + 1]);
+  if (currentPage <= 3) [2, 3, 4].forEach((page) => pages.add(page));
+  if (currentPage >= totalPages - 2) [totalPages - 3, totalPages - 2, totalPages - 1].forEach((page) => pages.add(page));
+  const sortedPages = [...pages].filter((page) => page >= 1 && page <= totalPages).sort((a, b) => a - b);
+  return sortedPages.reduce((result, page, index) => {
+    if (index && page - sortedPages[index - 1] > 1) result.push("ellipsis");
+    result.push(page);
+    return result;
+  }, []);
+}
+
+function renderRegistrationPagination(container, key, totalItems, totalPages, pageStart, visibleCount, render) {
+  if (!container) return;
+  container.innerHTML = "";
+  const summary = document.createElement("span");
+  const firstVisible = totalItems ? pageStart + 1 : 0;
+  const lastVisible = pageStart + visibleCount;
+  summary.textContent = `Mostrando ${firstVisible} a ${lastVisible} de ${totalItems} cadastro${totalItems === 1 ? "" : "s"}`;
+  container.append(summary);
+  if (!totalItems) return;
+  const navigation = document.createElement("div");
+  navigation.className = "registration-pagination";
+  navigation.setAttribute("aria-label", "Paginação dos cadastros");
+  const goToPage = (page) => {
+    registrationPages[key] = page;
+    render();
+  };
+  navigation.append(button("Anterior", "ghost", () => goToPage(registrationPages[key] - 1), registrationPages[key] <= 1));
+  registrationPaginationWindow(registrationPages[key], totalPages).forEach((page) => {
+    if (page === "ellipsis") {
+      const ellipsis = document.createElement("span");
+      ellipsis.className = "registration-pagination-ellipsis";
+      ellipsis.textContent = "...";
+      navigation.append(ellipsis);
+      return;
+    }
+    const pageButton = button(String(page), page === registrationPages[key] ? "active" : "ghost", () => goToPage(page));
+    pageButton.setAttribute("aria-label", `Página ${page}`);
+    if (page === registrationPages[key]) pageButton.setAttribute("aria-current", "page");
+    navigation.append(pageButton);
+  });
+  navigation.append(button("Próximo", "ghost", () => goToPage(registrationPages[key] + 1), registrationPages[key] >= totalPages));
+  container.append(navigation);
+}
+
+function paginatedRegistrations(items, key, container, render) {
+  const orderedItems = newestRegistrationsFirst(items);
+  const totalPages = Math.max(1, Math.ceil(orderedItems.length / REGISTRATION_PAGE_SIZE));
+  registrationPages[key] = Math.min(Math.max(registrationPages[key] || 1, 1), totalPages);
+  const pageStart = (registrationPages[key] - 1) * REGISTRATION_PAGE_SIZE;
+  const visibleItems = orderedItems.slice(pageStart, pageStart + REGISTRATION_PAGE_SIZE);
+  renderRegistrationPagination(container, key, orderedItems.length, totalPages, pageStart, visibleItems.length, render);
+  return visibleItems;
+}
+
 function renderProducts() {
   const query = normalize(els.productTableSearch.value);
   const filter = els.productTableFilter.value;
@@ -2593,7 +2750,8 @@ function renderProducts() {
     const matchesFilter = filter === "all" || (filter === "active" && product.active !== false) || (filter === "low" && product.stock <= (product.minStock || 0));
     return matchesQuery && matchesFilter;
   });
-  renderProductTable(products);
+  const visibleProducts = paginatedRegistrations(products, "products", els.productPagination, renderProducts);
+  renderProductTable(visibleProducts);
 }
 
 function renderProductTable(products) {
@@ -2905,7 +3063,7 @@ function renderCustomers() {
   const query = normalize(els.customerListSearch.value);
   const filter = els.customerStatusFilter.value;
   const baseCustomers = db.customers.filter((customer) => !customer.isDefault);
-  const customers = baseCustomers.filter((customer) => {
+  const filteredCustomers = baseCustomers.filter((customer) => {
     const matchesQuery = !query
       || normalize(customer.name).includes(query)
       || normalize(customer.cpf).includes(query)
@@ -2923,6 +3081,12 @@ function renderCustomers() {
   els.customerOverdueKpi.textContent = String(withOverdue.length);
   els.customerReceivableKpi.textContent = money.format(
     operational.reduce((total, customer) => total + Number(customer.openCredit ?? customerDebt(customer.id).open), 0)
+  );
+  const customers = paginatedRegistrations(
+    filteredCustomers,
+    "customers",
+    els.customerPagination,
+    renderCustomers,
   );
   els.customerList.innerHTML = "";
   if (!customers.length) {
@@ -3048,7 +3212,7 @@ function renderSuppliers() {
   const term = normalize(els.supplierListSearch.value);
   const status = els.supplierStatusFilter.value;
   const financial = els.supplierFinancialFilter.value;
-  const suppliers = db.suppliers.filter((supplier) => (status === "all" || supplier.status === status)
+  const filteredSuppliers = db.suppliers.filter((supplier) => (status === "all" || supplier.status === status)
     && (financial === "all"
       || (financial === "open" && Number(supplier.openAmount || 0) > 0)
       || (financial === "overdue" && Number(supplier.overdueAmount || 0) > 0)
@@ -3064,6 +3228,12 @@ function renderSuppliers() {
   els.supplierOpenKpi.textContent = money.format(db.suppliers.reduce((total, item) => total + Number(item.openAmount || 0), 0));
   els.supplierOverdueKpi.textContent = money.format(db.suppliers.reduce((total, item) => total + Number(item.overdueAmount || 0), 0));
   els.supplierCreditKpi.textContent = money.format(db.suppliers.reduce((total, item) => total + Number(item.creditAvailable || 0), 0));
+  const suppliers = paginatedRegistrations(
+    filteredSuppliers,
+    "suppliers",
+    els.supplierPagination,
+    renderSuppliers,
+  );
   if (!db.suppliers.length) {
     els.supplierList.innerHTML = `<tr><td colspan="8" class="empty-cell">Nenhum fornecedor cadastrado.</td></tr>`;
     return;
@@ -3094,15 +3264,21 @@ function renderSuppliers() {
 
 function renderSimpleLists() {
   const configs = {
-    brands: { list: els.brandList, search: els.brandListSearch, columns: 2 },
-    categories: { list: els.categoryList, search: els.categoryListSearch, columns: 2 },
-    sizes: { list: els.sizeList, search: els.sizeListSearch, columns: 3 },
-    colors: { list: els.colorList, search: els.colorListSearch, columns: 3 },
-    expenseCategories: { list: els.expenseCategoryList, search: els.expenseCategoryListSearch, columns: 3 },
+    brands: { list: els.brandList, search: els.brandListSearch, pagination: els.brandPagination, columns: 2 },
+    categories: { list: els.categoryList, search: els.categoryListSearch, pagination: els.categoryPagination, columns: 2 },
+    sizes: { list: els.sizeList, search: els.sizeListSearch, pagination: els.sizePagination, columns: 3 },
+    colors: { list: els.colorList, search: els.colorListSearch, pagination: els.colorPagination, columns: 3 },
+    expenseCategories: { list: els.expenseCategoryList, search: els.expenseCategoryListSearch, pagination: els.expenseCategoryPagination, columns: 3 },
   };
   Object.entries(configs).forEach(([collection, config]) => {
     const term = normalize(config.search.value);
-    const items = db[collection].filter((item) => !term || normalize(item.name).includes(term));
+    const filteredItems = db[collection].filter((item) => !term || normalize(item.name).includes(term));
+    const items = paginatedRegistrations(
+      filteredItems,
+      collection,
+      config.pagination,
+      renderSimpleLists,
+    );
     config.list.innerHTML = items.length
       ? items.map((item) => `<tr>
           <td><strong>${escapeHtml(item.name)}</strong></td>
@@ -3121,10 +3297,16 @@ function renderSimpleLists() {
 function renderUsers() {
   els.userList.innerHTML = "";
   const term = normalize(els.userListSearch.value);
-  const users = db.users.filter((user) => !term
+  const filteredUsers = db.users.filter((user) => !term
     || normalize(user.name).includes(term)
     || normalize(user.login).includes(term)
     || normalize(user.role === "admin" ? "Admin" : "Operador").includes(term));
+  const users = paginatedRegistrations(
+    filteredUsers,
+    "users",
+    els.userPagination,
+    renderUsers,
+  );
   if (!db.users.length) {
     els.userList.innerHTML = `<tr><td colspan="4" class="empty-cell">Nenhum usuário cadastrado.</td></tr>`;
     return;

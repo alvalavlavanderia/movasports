@@ -207,6 +207,7 @@
                 <tbody id="productList"></tbody>
               </table>
             </div>
+            <div id="productPagination" class="registration-pagination-footer"></div>
             <section class="product-entry-history">
               <div class="section-title">
                 <h3>Histórico de entradas</h3>
@@ -267,6 +268,7 @@
                 <tbody id="customerList"></tbody>
               </table>
             </div>
+            <div id="customerPagination" class="registration-pagination-footer"></div>
           </section>
         </div>
       </section>
@@ -312,6 +314,7 @@
                 <tbody id="supplierList"></tbody>
               </table>
             </div>
+            <div id="supplierPagination" class="registration-pagination-footer"></div>
           </section>
         </div>
       </section>
@@ -347,6 +350,7 @@
                 <tbody id="cardModalityList"></tbody>
               </table>
             </div>
+            <div id="cardModalityPagination" class="registration-pagination-footer"></div>
             <section id="cardModalityHistoryPanel" class="card-modality-history" hidden>
               <div class="section-title"><h3>Histórico de Vigência</h3></div>
               <div class="cadastro-table-wrap">
@@ -381,6 +385,7 @@
                 <tbody id="brandList"></tbody>
               </table>
             </div>
+            <div id="brandPagination" class="registration-pagination-footer"></div>
           </section>
         </div>
       </section>
@@ -405,6 +410,7 @@
                 <tbody id="categoryList"></tbody>
               </table>
             </div>
+            <div id="categoryPagination" class="registration-pagination-footer"></div>
           </section>
         </div>
       </section>
@@ -432,6 +438,7 @@
                 <tbody id="userList"></tbody>
               </table>
             </div>
+            <div id="userPagination" class="registration-pagination-footer"></div>
           </section>
         </div>
       </section>
@@ -1780,7 +1787,7 @@
   </div>
 
   <div id="loginScreen" class="login-screen">
-    <form id="loginForm" class="login-panel" autocomplete="off">
+    <form id="loginForm" class="login-panel" autocomplete="off" novalidate>
       <h2>Entrar no Mova Sports</h2>
       <label class="field">Usuário<input id="loginUser" type="text" autocomplete="off" required></label>
       <label class="field">Senha<input id="loginPassword" type="password" autocomplete="off" required></label>
